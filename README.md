@@ -1,59 +1,41 @@
-# TradeLab AI — rebuild foundation
+# TradeLab AI — hybrid trading platform foundation
 
-This is the first rebuild foundation for the combined personal + multi-user TradeLab AI platform.
+A responsive React/Vite frontend foundation for a personal + multi-user trading workspace.
 
-## Included
-- Responsive React dashboard for desktop and mobile
-- Workspace/navigation foundation
-- Market selector and clearly labelled illustrative chart data
-- Manual / semi-automatic / automatic mode interface
-- Risk-control configuration UI (not yet enforced server-side)
-- Broker connection placeholder for Deriv and MetaTrader 5
-- Netlify build and a health-check function
+## Current implementation
+- Responsive dashboard and navigation
+- Overview, market watch, AI analysis preview, trading ticket preview, trade history, risk controls, broker connections, admin and settings screens
+- Clearly labelled illustrative market data and simulated demo balance
+- Manual / assisted / automated mode preference UI
+- Risk preference slider (UI only; not enforced)
+- Deriv and MetaTrader 5 connection placeholders
+- Netlify build configuration and health endpoint
 
-## Important status
-This is **not a live trading system**. Prices and chart values are illustrative. AI analysis, account balances, order routing, broker authorisation, user authentication, database persistence and server-enforced risk limits are not connected. Live execution is intentionally disabled.
+## Important: what is not connected
+This is a **frontend prototype**, not a live trading system. It does not currently provide real authentication, user database, live market prices, AI-generated signals, broker authorisation, MT5 connectivity, server-side risk enforcement, or order execution. Buttons that would place orders explicitly do not submit trades. Do not use it to make financial decisions.
 
 ## Run locally
-1. Install Node.js 20 or newer.
-2. Extract this folder.
-3. Run `npm install`.
-4. Run `npm run dev`.
-5. Open the local address shown by Vite.
+Requires Node.js 20+.
 
-## Deploy to Netlify
-1. Push this project to a private GitHub repository.
-2. In Netlify, import the repository.
-3. Build command: `npm run build`
-4. Publish directory: `dist`
-5. Netlify Functions directory: `netlify/functions`
-6. Deploy. The included `netlify.toml` contains these settings.
+```bash
+npm install
+npm run dev
+```
 
-## Target production architecture
-- Frontend: React/Vite on Netlify
-- Authentication: managed identity provider (email login, verification, password reset)
-- Database: PostgreSQL with row-level tenant isolation
-- Backend: authenticated server functions / dedicated service for long-running tasks
-- Secrets: server-side environment variables or managed secrets vault only
-- Deriv: official OAuth/API authorisation; per-user scoped tokens stored encrypted
-- MT5: a separately hosted MT5 bridge/EA or broker-approved integration; never expose terminal credentials in browser code
-- AI: server-side analysis service using verified live market data
-- Risk: server-side pre-trade validation, per-user limits, idempotent order requests, audit log and kill switch
+## Netlify deployment
+- Build command: `npm run build`
+- Publish directory: `dist`
+- Functions directory: `netlify/functions`
 
-## Mandatory safety gates before real money
-1. Verify live quote source and timestamps.
-2. Test each broker connection with read-only permissions first.
-3. Validate order size, symbol precision, stop distance and account currency.
-4. Enforce per-trade and daily loss limits on the server, not just in the UI.
-5. Add per-user isolation and audit trails.
-6. Test disconnects, duplicate requests, stale prices and rejected orders.
-7. Run demo/paper trading for a sustained period.
-8. Enable live execution only after explicit account-owner consent and a successful safety review.
+Push the project to the connected GitHub repository and trigger a Netlify deploy. If you replace the repository contents, keep the repository's existing deployment connection.
 
-## Suggested initial defaults
-- Default account mode: demo
-- Default risk per trade: 1% (configurable)
-- Default daily loss limit: 3% (configurable)
-- Automatic mode: locked until backend controls and demo validation pass
+## Production architecture still required
+1. Authentication with verified email, password reset and role-based access.
+2. PostgreSQL database with row-level tenant isolation.
+3. Server-side API for market data, AI analysis and order routing.
+4. Official Deriv authorisation with scoped per-user tokens stored encrypted.
+5. MT5 integration through a separately hosted, secured bridge or broker-approved connector.
+6. Server-side pre-trade risk checks, idempotency, audit log and emergency kill switch.
+7. Demo/paper testing, security review and explicit account-owner consent before any live execution.
 
-Do not commit `.env` files, API tokens, passwords or broker secrets to GitHub.
+Never commit `.env` files, broker passwords, API tokens or other secrets to GitHub. Keep live execution disabled until all production controls have been independently tested.
