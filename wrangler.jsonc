@@ -1,6 +1,11 @@
-"name": "your-project-name",
-  "compatibility_date": "2026-11-07",
-  "assets": {
-    "directory": "./dist"
-  }
-}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/")) {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return env.ASSETS.fetch(request);
+  },
+};
