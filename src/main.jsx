@@ -348,8 +348,15 @@ const [lastUpdated, setLastUpdated] = useState(null);
 
                 <div className="card">
                   <div className="stat-label">Risk Status</div>
-                  <div className="stat-value" style={{ fontSize: 19 }}>Protected</div>
-                  <div className="positive">Demo environment</div>
+                 <div className="stat-value" style={{ fontSize: 19 }}>
+  {marketStatus}
+</div>
+
+<div className="muted">
+  {lastUpdated
+    ? `Updated: ${lastUpdated.toLocaleTimeString()}`
+    : 'Waiting for market data'}
+</div>
                 </div>
               </div>
 
