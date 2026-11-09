@@ -124,22 +124,22 @@ function IndicatorSuite({candles,symbol}){
   const last=arr=>{for(let i=arr.length-1;i>=0;i--)if(arr[i]!=null)return arr[i];return null;};
   const close=Number(candles.at(-1)?.close), ef=last(data.emaFast),es=last(data.emaSlow),el=last(data.emaLong),r=last(data.rsi),m=last(data.macd.line),ms=last(data.macd.signal),a=last(data.adx),atr=last(data.atr),sk=last(data.stoch.k),sd=last(data.stoch.d),bb=last(data.bb);
   const votes=[ef!=null&&es!=null?(ef>es?1:-1):0,m!=null&&ms!=null?(m>ms?1:-1):0,r!=null?(r>55?1:r<45?-1:0):0,el!=null?(close>el?1:-1):0];const score=votes.reduce((x,y)=>x+y,0);const bias=score>=2?'BULLISH':score<=-2?'BEARISH':'MIXED';
-  const fmt=(v,d=5)=>v==null||!Number.isFinite(v)?'Insufficient data':v.toFixed(d);
+  const fmt=(v,d=5,required=0)=>v==null||!Number.isFinite(v)?`Insufficient data (need ${required || 'more'} candles; received ${candles.length})`:v.toFixed(d);
   const toggle=(key,label,desc,value)=> <div className="signal" key={key}><span><label style={{display:'flex',gap:8,alignItems:'center'}}><input type="checkbox" checked={!!enabled[key]} onChange={e=>setEnabled(p=>({...p,[key]:e.target.checked}))}/><span>{label}</span></label><small className="muted" style={{display:'block',marginLeft:23}}>{desc}</small></span><strong>{enabled[key] ? value : 'Hidden'}</strong></div>;
   return <div className="card" style={{marginTop:18}}>
     <div className="card-heading"><div><h3>Technical Indicators</h3><div className="muted">Calculated from {candles.length} fetched {symbol} candles · latest candle values</div></div><button className="period-btn" onClick={()=>setShowSettings(v=>!v)}>{showSettings?'Hide settings':'Indicator settings'}</button></div>
     <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap',marginBottom:12}}><span className="tag" style={{background:bias==='BULLISH'?'#153c36':bias==='BEARISH'?'#492532':'#3b3016',color:bias==='BULLISH'?'#21d6a0':bias==='BEARISH'?'#fb7185':'#fbbf24'}}>TECHNICAL BIAS: {bias}</span><span className="muted">Directional score: {score>0?'+':''}{score} / 4 · Not a trade instruction</span></div>
     {showSettings&&<div className="order-grid" style={{marginBottom:14}}>{[['emaFast','EMA fast'],['emaSlow','EMA slow'],['emaLong','EMA long'],['rsi','RSI period'],['bb','Bollinger period'],['atr','ATR period'],['adx','ADX period']].map(([key,label])=><div className="field" key={key}><label>{label}</label><input type="number" min="2" max="250" value={periods[key]} onChange={e=>setPeriods(p=>({...p,[key]:Math.max(2,Math.min(250,Number(e.target.value)||2))}))}/></div>)}</div>}
     <div className="dashboard-grid" style={{marginBottom:0}}><div>
-      {toggle('emaFast',`EMA ${periods.emaFast}`,'Short-term trend average',fmt(ef,symbol==='USDJPY'?3:5))}
-      {toggle('emaSlow',`EMA ${periods.emaSlow}`,'Medium-term trend average',fmt(es,symbol==='USDJPY'?3:5))}
-      {toggle('emaLong',`EMA ${periods.emaLong}`,'Long-term trend filter',fmt(el,symbol==='USDJPY'?3:5))}
-      {toggle('rsi',`RSI (${periods.rsi})`,'Above 70 overbought · below 30 oversold',fmt(r,2))}
+      {toggle('emaFast',`EMA ${periods.emaFast}`,'Short-term trend average',fmt(ef,symbol==='USDJPY'?3:5,periods.emaFast))}
+      {toggle('emaSlow',`EMA ${periods.emaSlow}`,'Medium-term trend average',fmt(es,symbol==='USDJPY'?3:5,periods.emaSlow))}
+      {toggle('emaLong',`EMA ${periods.emaLong}`,'Long-term trend filter',fmt(el,symbol==='USDJPY'?3:5,periods.emaLong))}
+      {toggle('rsi',`RSI (${periods.rsi})`,'Above 70 overbought · below 30 oversold',fmt(r,2,periods.rsi+1))}
       {toggle('macd','MACD (12, 26, 9)','Momentum line versus signal',m==null?'Insufficient data':`${m.toFixed(6)} / ${fmt(ms,6)}`)}
     </div><div>
       {toggle('bb',`Bollinger Bands (${periods.bb}, 2)`,'Upper / middle / lower volatility bands',bb?`${bb.upper.toFixed(5)} / ${bb.middle.toFixed(5)} / ${bb.lower.toFixed(5)}`:'Insufficient data')}
-      {toggle('atr',`ATR (${periods.atr})`,'Average true range · volatility, not direction',fmt(atr, symbol==='USDJPY'?3:5))}
-      {toggle('adx',`ADX (${periods.adx})`,'Below 20 weak · above 25 stronger trend',fmt(a,2))}
+      {toggle('atr',`ATR (${periods.atr})`,'Average true range · volatility, not direction',fmt(atr, symbol==='USDJPY'?3:5,periods.atr))}
+      {toggle('adx',`ADX (${periods.adx})`,'Below 20 weak · above 25 stronger trend',fmt(a,2,periods.adx*2))}
       {toggle('stoch','Stochastic (14, 3)','%K / %D momentum oscillator',sk==null?'Insufficient data':`${sk.toFixed(2)} / ${fmt(sd,2)}`)}
       {toggle('bbPosition','Price vs Bollinger','Position relative to volatility envelope',bb?(close>bb.upper?'Above upper band':close<bb.lower?'Below lower band':'Inside bands'):'Insufficient data')}
     </div></div>
@@ -218,7 +218,7 @@ function App() {
       try {
         setCandleLoading(true);
         setCandleError('');
-        const response = await fetch(`/api/candles?symbol=${encodeURIComponent(selectedMarket)}&interval=${encodeURIComponent(period)}&outputsize=100`);
+        const response = await fetch(`/api/candles?symbol=${encodeURIComponent(selectedMarket)}&interval=${encodeURIComponent(period)}&outputsize=300`);
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.details || data.error || 'Unable to load historical candles.');
         if (!active) return;
