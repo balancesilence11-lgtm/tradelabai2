@@ -1,361 +1,668 @@
-   import React, { useEffect, useMemo, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import {
-  Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
-  ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
-  Moon, Radio, Settings, ShieldCheck, SlidersHorizontal, Sparkles,
-  TrendingUp, Wallet
-} from 'lucide-react';
-import './style.css';
+  import React, { useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
 
-const initialMarkets = [
-  { symbol: 'EURUSD', name: 'Euro / US Dollar', price: '—' },
-  { symbol: 'GBPUSD', name: 'British Pound / US Dollar', price: '—' },
-  { symbol: 'USDJPY', name: 'US Dollar / Japanese Yen', price: '—' },
-  { symbol: 'XAUUSD', name: 'Gold / US Dollar', price: '—' },
-  { symbol: 'US30', name: 'Dow Jones Industrial Average', price: '—' },
-  { symbol: 'BTCUSD', name: 'Bitcoin / US Dollar', price: '—' }
+/* ------------------------------------------------------------------ *
+ * Configuration
+ * ------------------------------------------------------------------ */
+const CONFIG = {
+  ema: { fast: 20, slow: 50 },
+  rsi: { period: 14, overbought: 70, oversold: 30 },
+  macd: { fast: 12, slow: 26, signal: 9 },
+  bollinger: { period: 20, stdDev: 2 },
+  levels: { swingLookback: 5, maxLevels: 3, mergePct: 0.005, window: 120 },
+  totalCandles: 260,
+  visibleCandles: 120,
+};
+
+const INDICATORS = [
+  { name: "EMA", config: "20 and 50", purpose: "Trend direction" },
+  { name: "RSI", config: "14", purpose: "Overbought/oversold conditions" },
+  { name: "MACD", config: "12, 26, 9", purpose: "Momentum and trend changes" },
+  { name: "Bollinger Bands", config: "20, 2", purpose: "Volatility and price extremes" },
+  { name: "Support & Resistance", config: "Recent swing highs/lows", purpose: "Important price levels" },
 ];
 
-const supportedSymbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSD'];
+/* ------------------------------------------------------------------ *
+ * Sample data (replace generateCandles() with your real OHLC feed)
+ * Each candle: { open, high, low, close }
+ * ------------------------------------------------------------------ */
+function mulberry32(seed) {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-const navigation = [
-  { name: 'Dashboard', icon: LayoutDashboard },
-  { name: 'Market Analysis', icon: BarChart3 },
-  { name: 'AI Assistant', icon: Bot },
-  { name: 'Strategy Lab', icon: Activity },
-  { name: 'Trading Terminal', icon: TrendingUp },
-  { name: 'Smart Scanner', icon: SlidersHorizontal },
-  { name: 'Risk Centre', icon: ShieldCheck },
-  { name: 'Trade Journal', icon: Clock3 },
-  { name: 'Automation Centre', icon: Radio },
-  { name: 'Settings', icon: Settings }
-];
+function generateCandles(n, seed = 11) {
+  const rnd = mulberry32(seed);
+  const out = [];
+  let price = 100;
+  let drift = 0;
+  for (let i = 0; i < n; i++) {
+    if (i % 35 === 0) drift = (rnd() - 0.5) * 0.3;
+    const open = price;
+    const close = open + drift + (rnd() - 0.5) * 1.8;
+    const high = Math.max(open, close) + rnd() * 0.8;
+    const low = Math.min(open, close) - rnd() * 0.8;
+    out.push({ open, high, low, close });
+    price = close;
+  }
+  return out;
+}
 
-function CandlestickChart({ candles, loading, error, symbol }) {
-  if (loading) return <div className="empty">Loading historical candles…</div>;
-  if (error) return <div className="empty">{error}</div>;
-  if (!candles?.length) return <div className="empty">No historical candles available.</div>;
+/* ------------------------------------------------------------------ *
+ * Indicator math
+ * ------------------------------------------------------------------ */
+function ema(values, period) {
+  const out = new Array(values.length).fill(null);
+  const start = values.findIndex((v) => v != null);
+  if (start < 0 || values.length - start < period) return out;
+  const k = 2 / (period + 1);
+  let sum = 0;
+  for (let i = start; i < start + period; i++) sum += values[i];
+  let prev = sum / period;
+  out[start + period - 1] = prev;
+  for (let i = start + period; i < values.length; i++) {
+    prev = values[i] * k + prev * (1 - k);
+    out[i] = prev;
+  }
+  return out;
+}
 
-  const visible = candles.slice(-100);
-  const width = 1000, height = 270, left = 72, right = 18, top = 15, bottom = 35;
-  const highest = Math.max(...visible.map(c => Number(c.high)));
-  const lowest = Math.min(...visible.map(c => Number(c.low)));
-  const padding = (highest - lowest) * 0.08 || Math.abs(highest) * 0.001 || 0.001;
-  const max = highest + padding, min = lowest - padding;
-  const plotWidth = width - left - right, plotHeight = height - top - bottom;
-  const y = price => top + ((max - Number(price)) / (max - min)) * plotHeight;
-  const step = plotWidth / visible.length;
-  const candleWidth = Math.max(2, Math.min(9, step * 0.65));
-  const decimals = symbol === 'USDJPY' ? 3 : symbol === 'BTCUSD' ? 1 : symbol === 'XAUUSD' ? 2 : 5;
+function rsi(closes, period) {
+  const out = new Array(closes.length).fill(null);
+  if (closes.length <= period) return out;
+  let gain = 0;
+  let loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gain += d;
+    else loss -= d;
+  }
+  gain /= period;
+  loss /= period;
+  const calc = () => (loss === 0 ? 100 : 100 - 100 / (1 + gain / loss));
+  out[period] = calc();
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    gain = (gain * (period - 1) + Math.max(d, 0)) / period;
+    loss = (loss * (period - 1) + Math.max(-d, 0)) / period;
+    out[i] = calc();
+  }
+  return out;
+}
+
+function macd(closes, fast, slow, signalPeriod) {
+  const f = ema(closes, fast);
+  const s = ema(closes, slow);
+  const line = closes.map((_, i) => (f[i] != null && s[i] != null ? f[i] - s[i] : null));
+  const signal = ema(line, signalPeriod);
+  const hist = line.map((v, i) => (v != null && signal[i] != null ? v - signal[i] : null));
+  return { line, signal, hist };
+}
+
+function bollinger(closes, period, mult) {
+  const mid = new Array(closes.length).fill(null);
+  const upper = [...mid];
+  const lower = [...mid];
+  for (let i = period - 1; i < closes.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j];
+    const mean = sum / period;
+    let variance = 0;
+    for (let j = i - period + 1; j <= i; j++) variance += (closes[j] - mean) ** 2;
+    const sd = Math.sqrt(variance / period);
+    mid[i] = mean;
+    upper[i] = mean + mult * sd;
+    lower[i] = mean - mult * sd;
+  }
+  return { mid, upper, lower };
+}
+
+function swingLevels(candles, { swingLookback: L, maxLevels, mergePct, window }) {
+  const start = Math.max(L, candles.length - window);
+  const end = candles.length - L;
+  const highs = [];
+  const lows = [];
+  for (let i = start; i < end; i++) {
+    let isHigh = true;
+    let isLow = true;
+    for (let j = i - L; j <= i + L; j++) {
+      if (j === i) continue;
+      if (candles[j].high > candles[i].high) isHigh = false;
+      if (candles[j].low < candles[i].low) isLow = false;
+    }
+    if (isHigh) highs.push({ price: candles[i].high, index: i });
+    if (isLow) lows.push({ price: candles[i].low, index: i });
+  }
+  const dedupe = (list) => {
+    const kept = [];
+    for (let k = list.length - 1; k >= 0; k--) {
+      const item = list[k];
+      if (!kept.some((o) => Math.abs(o.price - item.price) / item.price < mergePct)) kept.push(item);
+      if (kept.length === maxLevels) break;
+    }
+    return kept;
+  };
+  return { highs: dedupe(highs), lows: dedupe(lows) };
+}
+
+/* ------------------------------------------------------------------ *
+ * Readings (plain-language signals for the summary table)
+ * ------------------------------------------------------------------ */
+const fmt = (n, d = 2) => (n == null || Number.isNaN(n) ? "–" : n.toFixed(d));
+const last = (arr) => arr[arr.length - 1];
+
+function buildReadings(d) {
+  const i = d.candles.length - 1;
+  const close = d.candles[i].close;
+
+  const fast = d.emaFast[i];
+  const slow = d.emaSlow[i];
+  const trend =
+    fast == null || slow == null
+      ? { text: "Not enough data", tone: "flat" }
+      : fast > slow
+      ? { text: `Uptrend: EMA 20 is above EMA 50 by ${fmt(fast - slow)}`, tone: "up" }
+      : { text: `Downtrend: EMA 20 is below EMA 50 by ${fmt(slow - fast)}`, tone: "down" };
+
+  const r = d.rsi[i];
+  const rsiReading =
+    r == null
+      ? { text: "Not enough data", tone: "flat" }
+      : r >= CONFIG.rsi.overbought
+      ? { text: `${fmt(r, 1)}: overbought`, tone: "down" }
+      : r <= CONFIG.rsi.oversold
+      ? { text: `${fmt(r, 1)}: oversold`, tone: "up" }
+      : { text: `${fmt(r, 1)}: neutral range`, tone: "flat" };
+
+  const m = d.macd.line[i];
+  const s = d.macd.signal[i];
+  const h = d.macd.hist[i];
+  let crossed = null;
+  for (let k = i; k > i - 5 && k > 0; k--) {
+    const a = d.macd.hist[k];
+    const b = d.macd.hist[k - 1];
+    if (a != null && b != null && Math.sign(a) !== Math.sign(b)) {
+      crossed = a > 0 ? "bullish" : "bearish";
+      break;
+    }
+  }
+  const macdReading =
+    m == null || s == null
+      ? { text: "Not enough data", tone: "flat" }
+      : {
+          text: `MACD ${m > s ? "above" : "below"} signal${
+            crossed ? `, ${crossed} crossover in the last 5 bars` : ""
+          }; histogram ${h >= 0 ? "positive" : "negative"}`,
+          tone: m > s ? "up" : "down",
+        };
+
+  const u = d.bb.upper[i];
+  const l = d.bb.lower[i];
+  const mid = d.bb.mid[i];
+  let bbReading = { text: "Not enough data", tone: "flat" };
+  if (u != null) {
+    const pctB = (close - l) / (u - l);
+    const width = ((u - l) / mid) * 100;
+    bbReading =
+      close > u
+        ? { text: `Closed above the upper band (width ${fmt(width)}%)`, tone: "down" }
+        : close < l
+        ? { text: `Closed below the lower band (width ${fmt(width)}%)`, tone: "up" }
+        : { text: `Inside the bands at ${fmt(pctB * 100, 0)}% of the range (width ${fmt(width)}%)`, tone: "flat" };
+  }
+
+  const above = d.levels.highs.filter((x) => x.price > close).sort((a, b) => a.price - b.price)[0];
+  const below = d.levels.lows.filter((x) => x.price < close).sort((a, b) => b.price - a.price)[0];
+  const srReading = {
+    text: `Resistance ${above ? fmt(above.price) : "none above"} · Support ${below ? fmt(below.price) : "none below"}`,
+    tone: "flat",
+  };
+
+  return {
+    EMA: trend,
+    RSI: rsiReading,
+    MACD: macdReading,
+    "Bollinger Bands": bbReading,
+    "Support & Resistance": srReading,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Chart
+ * ------------------------------------------------------------------ */
+const W = 1000;
+const PAD_L = 8;
+const PAD_R = 58;
+const GAP = 26;
+
+const C = {
+  up: "#1b8a68",
+  down: "#c4432f",
+  emaFast: "#2563d9",
+  emaSlow: "#e08a00",
+  band: "#7b5cc4",
+  support: "#1b8a68",
+  resistance: "#c4432f",
+  grid: "#dde3ea",
+  ink: "#1c2b3a",
+  muted: "#6b7a8a",
+};
+
+function linePath(values, x, y) {
+  let d = "";
+  let pen = false;
+  values.forEach((v, i) => {
+    if (v == null) {
+      pen = false;
+      return;
+    }
+    d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)} `;
+    pen = true;
+  });
+  return d;
+}
+
+function Chart({ data, show, hover, setHover }) {
+  const { candles, visible } = data;
+  const start = candles.length - visible;
+  const view = (arr) => arr.slice(start);
+  const vc = candles.slice(start);
+  const n = vc.length;
+  const plotW = W - PAD_L - PAD_R;
+  const step = plotW / n;
+  const x = (i) => PAD_L + (i + 0.5) * step;
+
+  // Panel layout
+  const panels = [{ id: "price", h: 340 }];
+  if (show.rsi) panels.push({ id: "rsi", h: 110 });
+  if (show.macd) panels.push({ id: "macd", h: 130 });
+  let cursor = 8;
+  panels.forEach((p) => {
+    p.top = cursor;
+    cursor += p.h + GAP;
+  });
+  const H = cursor - GAP + 8;
+  const panel = (id) => panels.find((p) => p.id === id);
+
+  // Price scale
+  const emaF = view(data.emaFast);
+  const emaS = view(data.emaSlow);
+  const bbU = view(data.bb.upper);
+  const bbL = view(data.bb.lower);
+  const bbM = view(data.bb.mid);
+  let lo = Math.min(...vc.map((c) => c.low));
+  let hi = Math.max(...vc.map((c) => c.high));
+  if (show.bb) {
+    bbU.forEach((v) => v != null && (hi = Math.max(hi, v)));
+    bbL.forEach((v) => v != null && (lo = Math.min(lo, v)));
+  }
+  const padP = (hi - lo) * 0.05;
+  lo -= padP;
+  hi += padP;
+  const pp = panel("price");
+  const yP = (v) => pp.top + pp.h - ((v - lo) / (hi - lo)) * pp.h;
+  const priceTicks = Array.from({ length: 6 }, (_, k) => lo + ((hi - lo) * k) / 5);
+
+  const hoverIdx = hover == null ? n - 1 : hover;
+
+  const onMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xv = ((e.clientX - rect.left) / rect.width) * W;
+    const idx = Math.floor((xv - PAD_L) / step);
+    setHover(Math.max(0, Math.min(n - 1, idx)));
+  };
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label={`${symbol} candlestick chart`}>
-      {[0, 1, 2, 3, 4].map(i => {
-        const value = max - ((max - min) * i / 4);
-        const py = top + (plotHeight * i / 4);
-        return <g key={i}>
-          <line x1={left} x2={width - right} y1={py} y2={py} stroke="#26364e" strokeDasharray="4 4" />
-          <text x={left - 8} y={py + 4} fill="#8290a8" fontSize="12" textAnchor="end">{value.toFixed(decimals)}</text>
-        </g>;
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      width="100%"
+      role="img"
+      aria-label="Price chart with indicators"
+      onMouseMove={onMove}
+      onMouseLeave={() => setHover(null)}
+      style={{ display: "block", touchAction: "pan-y" }}
+    >
+      {/* ---------- Price panel ---------- */}
+      <rect x={PAD_L} y={pp.top} width={plotW} height={pp.h} fill="#fff" stroke={C.grid} />
+      {priceTicks.map((t) => (
+        <g key={t}>
+          <line x1={PAD_L} x2={PAD_L + plotW} y1={yP(t)} y2={yP(t)} stroke={C.grid} strokeWidth="1" />
+          <text x={PAD_L + plotW + 6} y={yP(t) + 4} fontSize="11" fill={C.muted}>
+            {fmt(t)}
+          </text>
+        </g>
+      ))}
+
+      {show.bb && (
+        <g>
+          <path
+            d={
+              linePath(bbU, x, yP) +
+              [...bbL]
+                .map((v, i) => [v, i])
+                .reverse()
+                .filter(([v]) => v != null)
+                .map(([v, i]) => `L${x(i).toFixed(1)},${yP(v).toFixed(1)}`)
+                .join(" ") +
+              " Z"
+            }
+            fill={C.band}
+            fillOpacity="0.07"
+            stroke="none"
+          />
+          <path d={linePath(bbU, x, yP)} fill="none" stroke={C.band} strokeWidth="1.2" />
+          <path d={linePath(bbL, x, yP)} fill="none" stroke={C.band} strokeWidth="1.2" />
+          <path d={linePath(bbM, x, yP)} fill="none" stroke={C.band} strokeWidth="1" strokeDasharray="3 3" />
+        </g>
+      )}
+
+      {show.levels &&
+        [
+          ...data.levels.highs.map((l) => ({ ...l, kind: "resistance" })),
+          ...data.levels.lows.map((l) => ({ ...l, kind: "support" })),
+        ]
+          .filter((l) => l.price >= lo && l.price <= hi)
+          .map((l) => {
+            const color = l.kind === "support" ? C.support : C.resistance;
+            const x0 = l.index >= start ? x(l.index - start) : PAD_L;
+            return (
+              <g key={`${l.kind}-${l.index}`}>
+                <line
+                  x1={x0}
+                  x2={PAD_L + plotW}
+                  y1={yP(l.price)}
+                  y2={yP(l.price)}
+                  stroke={color}
+                  strokeWidth="1.2"
+                  strokeDasharray="6 4"
+                />
+                <text x={PAD_L + plotW - 4} y={yP(l.price) - 4} fontSize="10.5" fill={color} textAnchor="end">
+                  {l.kind === "support" ? "Support" : "Resistance"} {fmt(l.price)}
+                </text>
+              </g>
+            );
+          })}
+
+      {vc.map((c, i) => {
+        const color = c.close >= c.open ? C.up : C.down;
+        const bw = Math.max(1.5, step * 0.6);
+        const top = yP(Math.max(c.open, c.close));
+        const bot = yP(Math.min(c.open, c.close));
+        return (
+          <g key={i}>
+            <line x1={x(i)} x2={x(i)} y1={yP(c.high)} y2={yP(c.low)} stroke={color} strokeWidth="1" />
+            <rect x={x(i) - bw / 2} y={top} width={bw} height={Math.max(1, bot - top)} fill={color} />
+          </g>
+        );
       })}
-      {visible.map((c, i) => {
-        const x = left + i * step + step / 2;
-        const bullish = Number(c.close) >= Number(c.open);
-        const color = bullish ? '#13c99b' : '#fb7185';
-        const bodyTop = Math.min(y(c.open), y(c.close));
-        const bodyHeight = Math.max(1, Math.abs(y(c.open) - y(c.close)));
-        return <g key={`${c.time}-${i}`}>
-          <line x1={x} x2={x} y1={y(c.high)} y2={y(c.low)} stroke={color} strokeWidth="1.5" />
-          <rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} stroke={color} />
-        </g>;
-      })}
-      <text x={left} y={height - 8} fill="#8290a8" fontSize="11">{visible[0]?.time || ''}</text>
-      <text x={width - right} y={height - 8} fill="#8290a8" fontSize="11" textAnchor="end">{visible[visible.length - 1]?.time || ''}</text>
+
+      {show.ema && (
+        <g>
+          <path d={linePath(emaF, x, yP)} fill="none" stroke={C.emaFast} strokeWidth="1.8" />
+          <path d={linePath(emaS, x, yP)} fill="none" stroke={C.emaSlow} strokeWidth="1.8" />
+        </g>
+      )}
+
+      {/* ---------- RSI panel ---------- */}
+      {show.rsi &&
+        (() => {
+          const p = panel("rsi");
+          const y = (v) => p.top + p.h - (v / 100) * p.h;
+          const vals = view(data.rsi);
+          return (
+            <g>
+              <rect x={PAD_L} y={p.top} width={plotW} height={p.h} fill="#fff" stroke={C.grid} />
+              <rect
+                x={PAD_L}
+                y={y(CONFIG.rsi.overbought)}
+                width={plotW}
+                height={y(CONFIG.rsi.oversold) - y(CONFIG.rsi.overbought)}
+                fill={C.emaFast}
+                fillOpacity="0.05"
+              />
+              {[CONFIG.rsi.oversold, 50, CONFIG.rsi.overbought].map((t) => (
+                <g key={t}>
+                  <line
+                    x1={PAD_L}
+                    x2={PAD_L + plotW}
+                    y1={y(t)}
+                    y2={y(t)}
+                    stroke={t === 50 ? C.grid : C.muted}
+                    strokeDasharray={t === 50 ? "0" : "4 4"}
+                    strokeWidth="1"
+                  />
+                  <text x={PAD_L + plotW + 6} y={y(t) + 4} fontSize="11" fill={C.muted}>
+                    {t}
+                  </text>
+                </g>
+              ))}
+              <path d={linePath(vals, x, y)} fill="none" stroke={C.ink} strokeWidth="1.6" />
+              <text x={PAD_L + 6} y={p.top + 14} fontSize="11.5" fill={C.ink} fontWeight="600">
+                RSI {CONFIG.rsi.period}
+              </text>
+            </g>
+          );
+        })()}
+
+      {/* ---------- MACD panel ---------- */}
+      {show.macd &&
+        (() => {
+          const p = panel("macd");
+          const ml = view(data.macd.line);
+          const ms = view(data.macd.signal);
+          const mh = view(data.macd.hist);
+          const maxAbs =
+            Math.max(...[...ml, ...ms, ...mh].filter((v) => v != null).map((v) => Math.abs(v)), 0.01) * 1.1;
+          const y = (v) => p.top + p.h / 2 - (v / maxAbs) * (p.h / 2);
+          return (
+            <g>
+              <rect x={PAD_L} y={p.top} width={plotW} height={p.h} fill="#fff" stroke={C.grid} />
+              <line x1={PAD_L} x2={PAD_L + plotW} y1={y(0)} y2={y(0)} stroke={C.muted} strokeWidth="1" />
+              {mh.map((v, i) =>
+                v == null ? null : (
+                  <rect
+                    key={i}
+                    x={x(i) - Math.max(1, step * 0.55) / 2}
+                    y={Math.min(y(0), y(v))}
+                    width={Math.max(1, step * 0.55)}
+                    height={Math.abs(y(v) - y(0))}
+                    fill={v >= 0 ? C.up : C.down}
+                    fillOpacity="0.45"
+                  />
+                )
+              )}
+              <path d={linePath(ml, x, y)} fill="none" stroke={C.emaFast} strokeWidth="1.6" />
+              <path d={linePath(ms, x, y)} fill="none" stroke={C.emaSlow} strokeWidth="1.6" />
+              <text x={PAD_L + 6} y={p.top + 14} fontSize="11.5" fill={C.ink} fontWeight="600">
+                MACD {CONFIG.macd.fast}, {CONFIG.macd.slow}, {CONFIG.macd.signal}
+              </text>
+              <text x={PAD_L + plotW + 6} y={y(0) + 4} fontSize="11" fill={C.muted}>
+                0
+              </text>
+            </g>
+          );
+        })()}
+
+      {/* ---------- Crosshair ---------- */}
+      {hover != null && (
+        <line
+          x1={x(hoverIdx)}
+          x2={x(hoverIdx)}
+          y1={panels[0].top}
+          y2={H - 8}
+          stroke={C.ink}
+          strokeOpacity="0.35"
+          strokeDasharray="2 3"
+        />
+      )}
     </svg>
   );
 }
 
-function App() {
-  const [activePage, setActivePage] = useState('Dashboard');
-  const [selectedMarket, setSelectedMarket] = useState('EURUSD');
-  const [markets, setMarkets] = useState(initialMarkets);
-  const [marketStatus, setMarketStatus] = useState('Connecting…');
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [period, setPeriod] = useState('5min');
-  const [candles, setCandles] = useState([]);
-  const [candleLoading, setCandleLoading] = useState(false);
-  const [candleError, setCandleError] = useState('');
-  const [orderType, setOrderType] = useState('Market');
-  const [direction, setDirection] = useState('BUY');
-  const [lotSize, setLotSize] = useState('0.10');
-  const [stopLoss, setStopLoss] = useState('100');
-  const [takeProfit, setTakeProfit] = useState('200');
-  const [notifications, setNotifications] = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [trades, setTrades] = useState([]);
-  const [search, setSearch] = useState('');
-  const [orderMessage, setOrderMessage] = useState('');
-
-  const filteredMarkets = useMemo(() => markets.filter(m =>
-    m.symbol.toLowerCase().includes(search.toLowerCase()) ||
-    m.name.toLowerCase().includes(search.toLowerCase())
-  ), [markets, search]);
-
-  const currentMarket = markets.find(m => m.symbol === selectedMarket);
-
-  // Latest quote polling. This is periodic HTTP refresh, not tick streaming.
-  useEffect(() => {
-    let active = true;
-    if (!supportedSymbols.includes(selectedMarket)) {
-      setMarketStatus('Not supported');
-      setLastUpdated(null);
-      return () => { active = false; };
-    }
-    const fetchPrice = async () => {
-      try {
-        setMarketStatus('Updating…');
-        const response = await fetch(`/api/market?symbol=${encodeURIComponent(selectedMarket)}`);
-        const data = await response.json();
-        if (!response.ok || !data.ok) throw new Error(data.error || data.details || 'Market data unavailable');
-        if (!active) return;
-        setMarkets(previous => previous.map(m => m.symbol === selectedMarket
-          ? { ...m, price: String(data.price), live: true } : m));
-        setMarketStatus('LIVE');
-        setLastUpdated(data.timestamp ? new Date(data.timestamp) : new Date());
-      } catch (error) {
-        if (!active) return;
-        setMarketStatus('Connection error');
-        console.error('Market data error:', error);
-      }
-    };
-    fetchPrice();
-    const timer = setInterval(fetchPrice, 60000);
-    return () => { active = false; clearInterval(timer); };
-  }, [selectedMarket]);
-
-  // Historical candles polling.
-  useEffect(() => {
-    let active = true;
-    if (!supportedSymbols.includes(selectedMarket)) {
-      setCandles([]);
-      setCandleError('Historical data is not supported for this instrument (US30 is not connected).');
-      setCandleLoading(false);
-      return () => { active = false; };
-    }
-    const fetchCandles = async () => {
-      try {
-        setCandleLoading(true);
-        setCandleError('');
-        const response = await fetch(`/api/candles?symbol=${encodeURIComponent(selectedMarket)}&interval=${encodeURIComponent(period)}&outputsize=100`);
-        const data = await response.json();
-        if (!response.ok || !data.ok) throw new Error(data.details || data.error || 'Unable to load historical candles.');
-        if (!active) return;
-        setCandles(Array.isArray(data.candles) ? data.candles : []);
-      } catch (error) {
-        if (!active) return;
-        setCandleError(error.message);
-        console.error('Candlestick error:', error);
-      } finally {
-        if (active) setCandleLoading(false);
-      }
-    };
-    fetchCandles();
-    const timer = setInterval(fetchCandles, 60000);
-    return () => { active = false; clearInterval(timer); };
-  }, [selectedMarket, period]);
-
-  function placeDemoOrder() {
-    const volume = Number(lotSize), sl = Number(stopLoss), tp = Number(takeProfit);
-    if (!Number.isFinite(volume) || volume <= 0) return setOrderMessage('Enter a valid trading volume.');
-    if (!Number.isFinite(sl) || sl < 0) return setOrderMessage('Enter a valid stop loss.');
-    if (!Number.isFinite(tp) || tp < 0) return setOrderMessage('Enter a valid take profit.');
-    const trade = {
-      id: Date.now(), symbol: selectedMarket, direction,
-      lot: volume.toFixed(2), type: orderType,
-      time: new Date().toLocaleTimeString(), status: 'DEMO OPEN'
-    };
-    setTrades(previous => [trade, ...previous]);
-    setOrderMessage(`${direction} demo order created for ${selectedMarket}. No broker order was sent.`);
+/* ------------------------------------------------------------------ *
+ * App
+ * ------------------------------------------------------------------ */
+const STYLES = `
+  :root {
+    --bg: #eef2f6; --surface: #ffffff; --ink: #1c2b3a; --muted: #6b7a8a;
+    --line: #dde3ea; --up: #1b8a68; --down: #c4432f; --accent: #2563d9;
   }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121a23; --surface: #1a2430; --ink: #e6edf4; --muted: #92a2b3; --line: #2b3745; --accent: #6ea0ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif; line-height: 1.5; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); margin: 0 0 16px; font-size: .92rem; }
+  .toggles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .toggle { border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    padding: 6px 12px; border-radius: 6px; font: inherit; font-size: .88rem; cursor: pointer; }
+  .toggle[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .readout { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: .86rem; margin-bottom: 8px;
+    font-variant-numeric: tabular-nums; min-height: 2.8em; }
+  .readout b { font-weight: 600; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow-x: auto; }
+  .chartbox { min-width: 640px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 20px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: .9rem; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .84rem; }
+  tr:last-child td { border-bottom: 0; }
+  .tone { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--muted); }
+  .tone.up { background: var(--up); } .tone.down { background: var(--down); }
+  .note { color: var(--muted); font-size: .8rem; margin-top: 14px; }
+  .table-scroll { overflow-x: auto; }
+`;
+
+function App() {
+  const [show, setShow] = useState({ ema: true, bb: true, levels: true, rsi: true, macd: true });
+  const [hover, setHover] = useState(null);
+
+  const data = useMemo(() => {
+    const candles = generateCandles(CONFIG.totalCandles);
+    const closes = candles.map((c) => c.close);
+    const d = {
+      candles,
+      visible: CONFIG.visibleCandles,
+      emaFast: ema(closes, CONFIG.ema.fast),
+      emaSlow: ema(closes, CONFIG.ema.slow),
+      rsi: rsi(closes, CONFIG.rsi.period),
+      macd: macd(closes, CONFIG.macd.fast, CONFIG.macd.slow, CONFIG.macd.signal),
+      bb: bollinger(closes, CONFIG.bollinger.period, CONFIG.bollinger.stdDev),
+      levels: swingLevels(candles, CONFIG.levels),
+    };
+    d.readings = buildReadings(d);
+    return d;
+  }, []);
+
+  const toggles = [
+    ["ema", "EMA 20 / 50"],
+    ["bb", "Bollinger Bands"],
+    ["levels", "Support & Resistance"],
+    ["rsi", "RSI"],
+    ["macd", "MACD"],
+  ];
+
+  const start = data.candles.length - data.visible;
+  const idx = start + (hover == null ? data.visible - 1 : hover);
+  const c = data.candles[idx];
 
   return (
-    <div className="app-shell">
-      <style>{`
-        *{box-sizing:border-box} body{margin:0;font-family:Arial,sans-serif;background:#0b1220;color:#e5e7eb}
-        button,input,select{font:inherit}button{cursor:pointer}.app-shell{min-height:100vh;background:#0b1220}
-        .sidebar{width:245px;position:fixed;inset:0 auto 0 0;background:#101a2c;border-right:1px solid #253149;padding:22px 15px;overflow-y:auto;z-index:10}
-        .brand{font-size:21px;font-weight:800;color:#fff;margin-bottom:5px}.brand span{color:#19c99a}.brand-sub{color:#8290a8;font-size:11px;margin-bottom:32px}
-        .nav-label{font-size:10px;color:#75839a;text-transform:uppercase;letter-spacing:1.5px;margin:20px 10px 12px}
-        .nav-item{display:flex;align-items:center;gap:12px;width:100%;border:0;background:transparent;color:#aab6c9;padding:12px 11px;border-radius:8px;text-align:left;font-size:13px;margin-bottom:4px}
-        .nav-item:hover,.nav-item.active{background:#17354a;color:#20d6a1}.sidebar-bottom{margin-top:35px;border-top:1px solid #253149;padding-top:18px}
-        .main-area{margin-left:245px;min-height:100vh}.topbar{height:72px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #253149;background:#101a2c;position:sticky;top:0;z-index:5}
-        .top-title{font-weight:700;font-size:17px}.top-actions{display:flex;align-items:center;gap:18px;color:#aab6c9}.icon-button{background:transparent;border:0;color:inherit;display:flex;align-items:center}
-        .profile{display:flex;align-items:center;gap:10px;font-size:12px}.avatar{width:34px;height:34px;border-radius:50%;background:#176c60;display:grid;place-items:center;color:white;font-weight:bold}
-        .content{padding:27px;max-width:1600px;margin:auto}.welcome{display:flex;justify-content:space-between;align-items:center;margin-bottom:23px;gap:15px}
-        h1{font-size:23px;margin:0 0 7px;color:#fff}.muted{color:#8492a9;font-size:12px}.demo-badge{color:#fbbf24;background:#3b3016;padding:8px 12px;border-radius:20px;font-size:11px;font-weight:700}
-        .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;margin-bottom:20px}.card{background:#121e31;border:1px solid #26364e;border-radius:11px;padding:18px;min-width:0}
-        .stat-label{color:#8492a9;font-size:12px}.stat-value{font-size:23px;font-weight:700;margin:12px 0 7px;color:#fff}.positive{color:#21d6a0;font-size:12px}.negative{color:#fb7185;font-size:12px}
-        .dashboard-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(280px,1fr);gap:17px;margin-bottom:18px}
-        .card-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:10px}.card-heading h3{font-size:14px;margin:0;color:#f1f5f9}
-        .chart-price{font-size:23px;font-weight:700;margin-bottom:5px}.periods{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
-        .period-btn{background:#1c2a40;border:0;color:#9ba9bd;border-radius:5px;padding:6px 9px;font-size:11px}.period-btn.active{background:#087d69;color:white}
-        .chart-wrap{width:100%;height:270px}.market-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #26364e;gap:10px;cursor:pointer}
-        .market-row:last-child{border-bottom:0}.market-row.selected{background:#1b3044;margin:0 -9px;padding:12px 9px;border-radius:6px}
-        .market-symbol{font-size:12px;font-weight:700}.market-name{color:#8290a8;font-size:10px;margin-top:4px}.market-price{font-size:12px;text-align:right}.market-change{font-size:10px;margin-top:4px;text-align:right}
-        .search-box{width:100%;padding:10px;background:#0c1728;border:1px solid #2b3b52;color:white;border-radius:6px;outline:none;margin-bottom:8px;font-size:12px}
-        .bottom-grid{display:grid;grid-template-columns:1.2fr 1fr;gap:17px}.order-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field{margin-bottom:12px}
-        .field label{display:block;font-size:11px;color:#8492a9;margin-bottom:7px}.field input,.field select{width:100%;background:#0b1728;border:1px solid #2b3b52;color:white;border-radius:6px;padding:10px;outline:none}
-        .trade-buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}.buy-btn,.sell-btn{border:0;padding:12px;border-radius:6px;color:white;font-weight:700}
-        .buy-btn{background:#079b78}.sell-btn{background:#dc4662}.execute-btn{width:100%;background:#2563eb;border:0;color:white;padding:12px;border-radius:6px;font-weight:700}
-        .signal{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #26364e;font-size:12px;gap:10px}.signal:last-child{border-bottom:0}
-        .tag{background:#153c36;color:#21d6a0;padding:5px 8px;border-radius:5px;font-size:10px}.table-wrap{overflow-x:auto}
-        table{width:100%;border-collapse:collapse;min-width:450px}th,td{padding:12px 9px;text-align:left;border-bottom:1px solid #26364e;font-size:11px}th{color:#8290a8;font-weight:500}td{color:#dbe4f0}
-        .empty{color:#8290a8;text-align:center;padding:25px;font-size:12px}.page-placeholder{min-height:350px;display:grid;place-items:center;text-align:center;color:#8492a9}
-        .page-placeholder h2{color:white}.mobile-menu{display:none}
-        @media(max-width:1050px){.stats-grid{grid-template-columns:repeat(2,1fr)}.dashboard-grid{grid-template-columns:1fr}}
-        @media(max-width:700px){.sidebar{transform:translateX(-100%);transition:.2s}.sidebar.open{transform:translateX(0)}.main-area{margin-left:0}.mobile-menu{display:flex}
-          .topbar{padding:0 15px}.content{padding:16px}.bottom-grid{grid-template-columns:1fr}.welcome{align-items:flex-start;flex-direction:column}
-          .profile span{display:none}.top-actions{gap:12px}.card-heading{align-items:flex-start;flex-direction:column}}
-        @media(max-width:400px){.stats-grid{grid-template-columns:1fr 1fr;gap:8px}.stat-value{font-size:18px}.card{padding:13px}}
-      `}</style>
+    <>
+      <style>{STYLES}</style>
+      <div className="wrap">
+        <h1>Indicator dashboard</h1>
+        <p className="sub">Sample data. Hover the chart to read values for any candle.</p>
 
-      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
-        <div className="brand">TradeLab <span>AI</span></div>
-        <div className="brand-sub">PROFESSIONAL TRADING PLATFORM</div>
-        <div className="nav-label">Workspace</div>
-        {navigation.map(item => {
-          const Icon = item.icon;
-          return <button key={item.name} className={`nav-item ${activePage === item.name ? 'active' : ''}`}
-            onClick={() => { setActivePage(item.name); setSidebarOpen(false); }}>
-            <Icon size={17} />{item.name}
-          </button>;
-        })}
-        <div className="sidebar-bottom">
-          <div className="nav-label">Account</div>
-          <button className="nav-item"><Wallet size={17} />Account overview</button>
-          <button className="nav-item"><LockKeyhole size={17} />Security</button>
-          <button className="nav-item"><LogOut size={17} />Sign out</button>
-        </div>
-      </aside>
-
-      <main className="main-area">
-        <header className="topbar">
-          <div style={{display:'flex',alignItems:'center',gap:13}}>
-            <button className="icon-button mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={21}/></button>
-            <div className="top-title">{activePage}</div>
-          </div>
-          <div className="top-actions">
-            <button className="icon-button" onClick={() => setNotifications(!notifications)} title="Toggle notifications">
-              <Bell size={19} color={notifications ? '#20d6a1' : '#8492a9'}/>
+        <div className="toggles" role="group" aria-label="Show or hide indicators">
+          {toggles.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className="toggle"
+              aria-pressed={show[key]}
+              onClick={() => setShow((s) => ({ ...s, [key]: !s[key] }))}
+            >
+              {label}
             </button>
-            <button className="icon-button"><Moon size={19}/></button>
-            <div className="profile"><div className="avatar">TL</div><span>Trader Account</span><ChevronDown size={14}/></div>
+          ))}
+        </div>
+
+        <div className="readout" aria-live="off">
+          <span>O <b>{fmt(c.open)}</b></span>
+          <span>H <b>{fmt(c.high)}</b></span>
+          <span>L <b>{fmt(c.low)}</b></span>
+          <span>C <b>{fmt(c.close)}</b></span>
+          {show.ema && (
+            <>
+              <span style={{ color: C.emaFast }}>EMA 20 <b>{fmt(data.emaFast[idx])}</b></span>
+              <span style={{ color: C.emaSlow }}>EMA 50 <b>{fmt(data.emaSlow[idx])}</b></span>
+            </>
+          )}
+          {show.rsi && <span>RSI <b>{fmt(data.rsi[idx], 1)}</b></span>}
+          {show.macd && (
+            <span>
+              MACD <b>{fmt(data.macd.line[idx], 3)}</b> Signal <b>{fmt(data.macd.signal[idx], 3)}</b> Hist{" "}
+              <b>{fmt(data.macd.hist[idx], 3)}</b>
+            </span>
+          )}
+          {show.bb && (
+            <span style={{ color: C.band }}>
+              BB <b>{fmt(data.bb.lower[idx])}</b> – <b>{fmt(data.bb.upper[idx])}</b>
+            </span>
+          )}
+        </div>
+
+        <div className="panel">
+          <div className="chartbox">
+            <Chart data={data} show={show} hover={hover} setHover={setHover} />
           </div>
-        </header>
+        </div>
 
-        <section className="content">
-          {activePage === 'Dashboard' ? <>
-            <div className="welcome">
-              <div><h1>Welcome to TradeLab AI Pro</h1><div className="muted">Your multi-market trading analysis workspace.</div></div>
-              <div className="demo-badge">● DEMO MODE</div>
-            </div>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Indicator</th>
+                <th>Configuration</th>
+                <th>Purpose</th>
+                <th>Latest reading</th>
+              </tr>
+            </thead>
+            <tbody>
+              {INDICATORS.map((row) => {
+                const r = data.readings[row.name];
+                return (
+                  <tr key={row.name}>
+                    <td>{row.name}</td>
+                    <td>{row.config}</td>
+                    <td>{row.purpose}</td>
+                    <td>
+                      <span className={`tone ${r.tone}`} />
+                      {r.text}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
 
-            <div className="stats-grid">
-              <div className="card"><div className="stat-label">Demo Account Balance</div><div className="stat-value">$10,000.00</div><div className="positive">Virtual account</div></div>
-              <div className="card"><div className="stat-label">Demo Orders</div><div className="stat-value">{trades.length}</div><div className="muted">Simulated orders created</div></div>
-              <div className="card"><div className="stat-label">Market Status</div><div className="stat-value" style={{fontSize:19}}>{marketStatus}</div><div className="muted">{lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : 'Waiting for market data'}</div></div>
-              <div className="card"><div className="stat-label">Selected Instrument</div><div className="stat-value" style={{fontSize:19}}>{selectedMarket}</div><div className="muted">{currentMarket?.live ? 'Live price received' : 'Live price not confirmed'}</div></div>
-            </div>
-
-            <div className="dashboard-grid">
-              <div className="card">
-                <div className="card-heading">
-                  <div>
-                    <h3>{selectedMarket} Live Candlestick Chart</h3>
-                    <div className="chart-price" style={{marginTop:12}}>{currentMarket?.price || '—'}</div>
-                    <div className="muted">{currentMarket?.live ? 'Latest market quote · Twelve Data' : 'Waiting for live quote'}</div>
-                  </div>
-                  <div className="periods">
-                    {[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([value,label]) =>
-                      <button key={value} onClick={() => setPeriod(value)} className={`period-btn ${period === value ? 'active' : ''}`}>{label}</button>
-                    )}
-                  </div>
-                </div>
-                <div className="chart-wrap">
-                  <CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/>
-                </div>
-                <div className="muted">{candles.length} historical candles · {period} timeframe · refreshed every 60 seconds.</div>
-              </div>
-
-              <div className="card">
-                <div className="card-heading"><h3>Market Watch</h3><Activity size={17} color="#20d6a1"/></div>
-                <input className="search-box" placeholder="Search instruments..." value={search} onChange={e => setSearch(e.target.value)}/>
-                {filteredMarkets.map(market =>
-                  <div key={market.symbol} onClick={() => setSelectedMarket(market.symbol)}
-                    className={`market-row ${selectedMarket === market.symbol ? 'selected' : ''}`}>
-                    <div><div className="market-symbol">{market.symbol}</div><div className="market-name">{market.name}</div></div>
-                    <div><div className="market-price">{market.price}</div><div className="market-change muted">{market.live ? 'LIVE' : 'Not connected'}</div></div>
-                  </div>
-                )}
-                {filteredMarkets.length === 0 && <div className="empty">No instruments found.</div>}
-              </div>
-            </div>
-
-            <div className="bottom-grid">
-              <div className="card">
-                <div className="card-heading"><h3>Trading Terminal</h3><span className="tag">SIMULATION ONLY</span></div>
-                <div className="order-grid">
-                  <div className="field"><label>Instrument</label><select value={selectedMarket} onChange={e => {setSelectedMarket(e.target.value);setOrderMessage('');}}>{markets.map(m=><option key={m.symbol} value={m.symbol}>{m.symbol}</option>)}</select></div>
-                  <div className="field"><label>Order Type</label><select value={orderType} onChange={e=>setOrderType(e.target.value)}><option>Market</option><option>Limit</option><option>Stop</option></select></div>
-                  <div className="field"><label>Volume (Lots)</label><input type="number" min="0.01" step="0.01" value={lotSize} onChange={e=>setLotSize(e.target.value)}/></div>
-                  <div className="field"><label>Stop Loss (Points)</label><input type="number" min="0" value={stopLoss} onChange={e=>setStopLoss(e.target.value)}/></div>
-                  <div className="field"><label>Take Profit (Points)</label><input type="number" min="0" value={takeProfit} onChange={e=>setTakeProfit(e.target.value)}/></div>
-                </div>
-                <div className="trade-buttons">
-                  <button className="buy-btn" onClick={()=>setDirection('BUY')}><ArrowUpRight size={15}/> BUY</button>
-                  <button className="sell-btn" onClick={()=>setDirection('SELL')}><ArrowDownRight size={15}/> SELL</button>
-                </div>
-                <div className="muted" style={{marginBottom:12}}>Selected direction: <strong>{direction}</strong></div>
-                <button className="execute-btn" onClick={placeDemoOrder} disabled={!lotSize || Number(lotSize)<=0}>Place Demo Order</button>
-                {orderMessage && <p className="muted" style={{marginTop:12}}>{orderMessage}</p>}
-              </div>
-
-              <div className="card">
-                <div className="card-heading"><h3>AI Market Insights</h3><Sparkles size={18} color="#20d6a1"/></div>
-                <div className="signal"><span>Market direction</span><span className="tag">Bullish demo</span></div>
-                <div className="signal"><span>RSI indicator</span><span>56.4</span></div>
-                <div className="signal"><span>MACD</span><span className="positive">Positive demo</span></div>
-                <div className="signal"><span>Moving Average</span><span>Above MA demo</span></div>
-                <div className="signal"><span>Risk assessment</span><span className="tag">Moderate demo</span></div>
-                <p className="muted" style={{lineHeight:1.7}}>These are illustrative indicators, not live AI-generated trading signals. Actual technical analysis and AI signals will be connected in a later development stage.</p>
-              </div>
-            </div>
-
-            <div className="card" style={{marginTop:18}}>
-              <div className="card-heading"><h3>Recent Demo Orders</h3><span className="muted">{trades.length} orders</span></div>
-              <div className="table-wrap"><table>
-                <thead><tr><th>Instrument</th><th>Direction</th><th>Volume</th><th>Order Type</th><th>Time</th><th>Status</th></tr></thead>
-                <tbody>{trades.length === 0 ? <tr><td colSpan="6" className="empty">No demo orders yet. Create your first simulated order.</td></tr> :
-                  trades.map(t=><tr key={t.id}><td>{t.symbol}</td><td className={t.direction==='BUY'?'positive':'negative'}>{t.direction}</td><td>{t.lot}</td><td>{t.type}</td><td>{t.time}</td><td><span className="tag">{t.status}</span></td></tr>)}
-                </tbody>
-              </table></div>
-            </div>
-          </> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
-            <p>This module is part of the TradeLab AI Pro development plan.</p>
-            <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
-          </div></div>}
-
-          <div style={{textAlign:'center',padding:'25px 10px',color:'#718096',fontSize:11}}>
-            TradeLab AI Pro · Development Version · Demo Environment<br/>
-            Trading involves risk. No live broker execution is currently enabled.
-          </div>
-        </section>
-      </main>
-    </div>
+        <p className="note">
+          Readings describe where each indicator stands now. They are not trade signals on their own.
+        </p>
+      </div>
+    </>
   );
 }
 
-createRoot(document.getElementById('root')).render(
-  <React.StrictMode><App /></React.StrictMode>
-);
+createRoot(document.getElementById("root")).render(<App />);
