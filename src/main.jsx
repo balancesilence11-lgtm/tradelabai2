@@ -536,6 +536,71 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
 }
 
 
+
+function RiskCentre({ symbol, marketPrice }) {
+  const [balance, setBalance] = useState(10000);
+  const [riskPct, setRiskPct] = useState(1);
+  const [dailyLimitPct, setDailyLimitPct] = useState(3);
+  const [drawdownLimitPct, setDrawdownLimitPct] = useState(10);
+  const [entry, setEntry] = useState('');
+  const [stop, setStop] = useState('');
+  const [target, setTarget] = useState('');
+  const [dailyLoss, setDailyLoss] = useState(0);
+  const [peakBalance, setPeakBalance] = useState(10000);
+  const [riskMode, setRiskMode] = useState('fixed');
+
+  const price = Number(marketPrice);
+  const entryValue = Number(entry) || (Number.isFinite(price) && price > 0 ? price : 0);
+  const stopValue = Number(stop);
+  const targetValue = Number(target);
+  const stopDistance = Math.abs(entryValue - stopValue);
+  const targetDistance = Math.abs(targetValue - entryValue);
+  const riskCash = balance * riskPct / 100;
+  const dailyLimitCash = balance * dailyLimitPct / 100;
+  const drawdownCash = Math.max(0, (peakBalance - balance) / Math.max(peakBalance, 1) * 100);
+  const rewardRisk = stopDistance > 0 ? targetDistance / stopDistance : 0;
+  const estimatedUnits = stopDistance > 0 ? riskCash / stopDistance : 0;
+  const estimatedLots = estimatedUnits / 100000;
+  const dailyUsed = dailyLimitCash > 0 ? dailyLoss / dailyLimitCash * 100 : 0;
+  const valid = balance > 0 && riskPct > 0 && riskPct <= 5 && entryValue > 0 && stopDistance > 0 && targetDistance > 0;
+  const directionValid = targetValue > entryValue && stopValue < entryValue || targetValue < entryValue && stopValue > entryValue;
+  const blocked = dailyLoss >= dailyLimitCash || drawdownCash >= drawdownLimitPct;
+  const field = (label, value, setter, step='any') => <div className="field"><label>{label}</label><input type="number" min="0" step={step} value={value} onChange={e=>setter(e.target.value)} /></div>;
+
+  return <>
+    <div className="welcome"><div><h1>Risk Centre</h1><div className="muted">Position sizing, trade risk and account protection calculator.</div></div><div className="demo-badge">● RISK CONTROLS · CALCULATOR ONLY</div></div>
+    <div className="card">
+      <div className="card-heading"><div><h3>Account risk settings</h3><div className="muted">Configure the account assumptions and loss limits.</div></div><span className="tag">NO BROKER ENFORCEMENT</span></div>
+      <div className="order-grid" style={{marginTop:12}}>
+        {field('Account equity (USD)', balance, v=>{const n=Math.max(0,Number(v)||0);setBalance(n);setPeakBalance(old=>Math.max(old,n));},'100')}
+        <div className="field"><label>Risk per trade (%)</label><input type="number" min="0.1" max="5" step="0.1" value={riskPct} onChange={e=>setRiskPct(Math.max(0.1,Math.min(5,Number(e.target.value)||0.1)))}/></div>
+        <div className="field"><label>Daily loss limit (%)</label><input type="number" min="0.5" max="20" step="0.5" value={dailyLimitPct} onChange={e=>setDailyLimitPct(Math.max(0.5,Math.min(20,Number(e.target.value)||0.5)))}/></div>
+        <div className="field"><label>Maximum account drawdown (%)</label><input type="number" min="1" max="50" step="1" value={drawdownLimitPct} onChange={e=>setDrawdownLimitPct(Math.max(1,Math.min(50,Number(e.target.value)||1)))}/></div>
+        {field('Current daily loss (USD)', dailyLoss, v=>setDailyLoss(Math.max(0,Number(v)||0)),'10')}
+        {field('Peak account equity (USD)', peakBalance, v=>setPeakBalance(Math.max(balance,Number(v)||balance)),'100')}
+      </div>
+    </div>
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading"><div><h3>Position size calculator</h3><div className="muted">{symbol} · Uses selected market quote as the initial entry when available.</div></div><span className="tag">ESTIMATE</span></div>
+      <div className="order-grid" style={{marginTop:12}}>
+        {field('Entry price', entry, setEntry)}
+        {field('Stop-loss price', stop, setStop)}
+        {field('Take-profit price', target, setTarget)}
+      </div>
+      <div className="stats-grid" style={{marginTop:18}}>
+        <div className="card"><div className="stat-label">Cash risk allowance</div><div className="stat-value">${riskCash.toFixed(2)}</div><div className="muted">{riskPct.toFixed(1)}% of account equity</div></div>
+        <div className="card"><div className="stat-label">Stop distance</div><div className="stat-value">{stopDistance ? stopDistance.toFixed(5) : '—'}</div><div className="muted">Absolute price difference</div></div>
+        <div className="card"><div className="stat-label">Illustrative position units</div><div className="stat-value">{estimatedUnits ? estimatedUnits.toFixed(0) : '—'}</div><div className="muted">Simplified price-unit estimate</div></div>
+        <div className="card"><div className="stat-label">Reward / risk</div><div className="stat-value">{rewardRisk ? `${rewardRisk.toFixed(2)} : 1` : '—'}</div><div className="muted">Based on entry, stop and target</div></div>
+      </div>
+      <div className="signal"><span>Illustrative standard-lot equivalent</span><strong>{estimatedLots ? estimatedLots.toFixed(4) : '—'} lots</strong></div>
+      {!valid || !directionValid ? <p className="muted" style={{fontSize:11}}>Enter a valid account, entry, stop-loss and take-profit. For a BUY, stop must be below entry and target above; for a SELL, the reverse applies.</p> : <p className="muted" style={{fontSize:11}}>At the entered stop distance, the simplified calculation estimates a maximum loss of about ${riskCash.toFixed(2)} before fees, slippage and currency conversion.</p>}
+      <div className="card" style={{marginTop:12,borderColor:blocked?'#fb7185':'#245b4d'}}><div className="card-heading"><h3>Risk guard status</h3><span className={`tag`}>{blocked?'LIMIT BREACHED':'WITHIN CONFIGURED LIMITS'}</span></div><div className="signal"><span>Daily loss usage</span><strong>{dailyUsed.toFixed(1)}% (${dailyLoss.toFixed(2)} / ${dailyLimitCash.toFixed(2)})</strong></div><div style={{height:8,background:'#26364e',borderRadius:8,overflow:'hidden'}}><div style={{height:'100%',width:`${Math.min(100,dailyUsed)}%`,background:dailyUsed>=100?'#fb7185':'#20d6a1'}}/></div><div className="signal"><span>Peak-to-current drawdown</span><strong>{drawdownCash.toFixed(2)}% / {drawdownLimitPct.toFixed(1)}%</strong></div><div style={{height:8,background:'#26364e',borderRadius:8,overflow:'hidden'}}><div style={{height:'100%',width:`${Math.min(100,drawdownCash/drawdownLimitPct*100)}%`,background:drawdownCash>=drawdownLimitPct?'#fb7185':'#20d6a1'}}/></div>{blocked && <p className="negative" style={{fontSize:12}}>Configured loss threshold reached. The calculator flags elevated risk; it does not block orders at the broker.</p>}</div>
+    </div>
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{fontSize:11,lineHeight:1.7,margin:0}}><strong style={{color:'#fbbf24'}}>Important sizing limitation:</strong> Position units are a simplified price-distance calculation, not broker-accurate forex lot sizing. Contract sizes, quote-currency conversion, tick values, leverage, margin, spread, commissions and slippage differ by instrument and broker. Daily loss and drawdown inputs are manually maintained. These controls are advisory only and are not connected to live order execution.</p></div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -811,7 +876,7 @@ function App() {
             <div className="welcome"><div><h1>AI Trade Analysis Assistant</h1><div className="muted">Multi-factor technical assessment for the selected market. Analysis only; no automatic execution.</div></div><div className="demo-badge">● DEMO / ANALYSIS</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
