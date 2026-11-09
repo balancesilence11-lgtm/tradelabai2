@@ -79,8 +79,10 @@ const navigation = [
 
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
-  const [selectedMarket, setSelectedMarket] = useState('US30');
-  const [markets] = useState(initialMarkets);
+  const [selectedMarket, setSelectedMarket] = useState('EURUSD');
+const [markets, setMarkets] = useState(initialMarkets);
+const [marketStatus, setMarketStatus] = useState('Connecting...');
+const [lastUpdated, setLastUpdated] = useState(null);
   const [period, setPeriod] = useState('1D');
   const [orderType, setOrderType] = useState('Market');
   const [direction, setDirection] = useState('BUY');
