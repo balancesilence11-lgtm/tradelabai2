@@ -33,26 +33,25 @@ const navigation = [
 ];
 
 function CandlestickChart({ candles, loading, error, symbol }) {
+  const [show, setShow] = useState({ ema20: true, ema50: true, ema200: true, bb: true });
+  const [visibleCount, setVisibleCount] = useState(100);
+  const [pointer, setPointer] = useState(null);
   if (loading) return <div className="empty">Loading historical candles…</div>;
   if (error) return <div className="empty">{error}</div>;
   if (!candles?.length) return <div className="empty">No historical candles available.</div>;
 
-  const visible = candles.slice(-100);
+  const count = Math.min(candles.length, visibleCount);
+  const visible = candles.slice(-count);
   const width = 1000, height = 310, left = 72, right = 18, top = 28, bottom = 35;
-  // Calculate overlays from the full fetched history, then align them to the visible candles.
   const closes = candles.map(c => Number(c.close));
-  const ema20 = calcEMA(closes, 20);
-  const ema50 = calcEMA(closes, 50);
-  const ema200 = calcEMA(closes, 200);
+  const ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);
   const bands = calcBollinger(closes, 20, 2);
   const offset = candles.length - visible.length;
-  const visibleBands = bands.slice(offset);
-  const visibleEma20 = ema20.slice(offset);
-  const visibleEma50 = ema50.slice(offset);
-  const visibleEma200 = ema200.slice(offset);
+  const visibleBands = bands.slice(offset), visibleEma20 = ema20.slice(offset);
+  const visibleEma50 = ema50.slice(offset), visibleEma200 = ema200.slice(offset);
   const overlayValues = [
-    ...visibleEma20, ...visibleEma50, ...visibleEma200,
-    ...visibleBands.flatMap(b => b ? [b.upper, b.middle, b.lower] : [])
+    ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),
+    ...(show.ema200 ? visibleEma200 : []), ...(show.bb ? visibleBands.flatMap(b => b ? [b.upper,b.middle,b.lower] : []) : [])
   ].filter(v => v != null && Number.isFinite(v));
   const highest = Math.max(...visible.map(c => Number(c.high)), ...overlayValues);
   const lowest = Math.min(...visible.map(c => Number(c.low)), ...overlayValues);
@@ -69,47 +68,39 @@ function CandlestickChart({ candles, loading, error, symbol }) {
     const v = b?.[key];
     return v == null || !Number.isFinite(v) ? null : `${i === 0 || !visibleBands[i - 1]?.[key] ? 'M' : 'L'} ${xAt(i)} ${y(v)}`;
   }).filter(Boolean).join(' ');
+  const setOverlay = key => setShow(old => ({ ...old, [key]: !old[key] }));
+  const control = (key, label, color) => <label key={key} style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:10,color,cursor:'pointer'}}><input type="checkbox" checked={show[key]} onChange={() => setOverlay(key)} />{label}</label>;
 
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label={`${symbol} candlestick chart`}>
-      {[0, 1, 2, 3, 4].map(i => {
-        const value = max - ((max - min) * i / 4);
-        const py = top + (plotHeight * i / 4);
-        return <g key={i}>
-          <line x1={left} x2={width - right} y1={py} y2={py} stroke="#26364e" strokeDasharray="4 4" />
-          <text x={left - 8} y={py + 4} fill="#8290a8" fontSize="12" textAnchor="end">{value.toFixed(decimals)}</text>
-        </g>;
-      })}
-      {/* Price-chart overlays: moving averages and Bollinger envelope. */}
-      <path d={bandPath('upper')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9" />
-      <path d={bandPath('middle')} fill="none" stroke="#a78bfa" strokeWidth="1" opacity="0.55" />
-      <path d={bandPath('lower')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9" />
-      <path d={makePath(visibleEma200)} fill="none" stroke="#f59e0b" strokeWidth="2" />
-      <path d={makePath(visibleEma50)} fill="none" stroke="#38bdf8" strokeWidth="1.8" />
-      <path d={makePath(visibleEma20)} fill="none" stroke="#f472b6" strokeWidth="1.8" />
-      {visible.map((c, i) => {
-        const x = left + i * step + step / 2;
-        const bullish = Number(c.close) >= Number(c.open);
-        const color = bullish ? '#13c99b' : '#fb7185';
-        const bodyTop = Math.min(y(c.open), y(c.close));
-        const bodyHeight = Math.max(1, Math.abs(y(c.open) - y(c.close)));
-        return <g key={`${c.time}-${i}`}>
-          <line x1={x} x2={x} y1={y(c.high)} y2={y(c.low)} stroke={color} strokeWidth="1.5" />
-          <rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} stroke={color} />
-        </g>;
-      })}
-      <g fontSize="12" fontWeight="600">
-        <text x={left + 4} y="16" fill="#f472b6">EMA 20</text>
-        <text x={left + 82} y="16" fill="#38bdf8">EMA 50</text>
-        <text x={left + 160} y="16" fill="#f59e0b">EMA 200</text>
-        <text x={left + 258} y="16" fill="#a78bfa">Bollinger Bands (20, 2)</text>
-      </g>
-      <text x={left} y={height - 8} fill="#8290a8" fontSize="11">{visible[0]?.time || ''}</text>
-      <text x={width - right} y={height - 8} fill="#8290a8" fontSize="11" textAnchor="end">{visible[visible.length - 1]?.time || ''}</text>
-    </svg>
-  );
+  return <div style={{width:'100%',height:'100%',display:'flex',flexDirection:'column',gap:7}}>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
+      <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+        {control('ema20','EMA 20','#f472b6')}{control('ema50','EMA 50','#38bdf8')}
+        {control('ema200','EMA 200','#f59e0b')}{control('bb','Bollinger','#a78bfa')}
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:5}}>
+        <button className="period-btn" onClick={() => {setVisibleCount(n => Math.max(20,n-20));setPointer(null);}} title="Zoom in">＋</button>
+        <button className="period-btn" onClick={() => {setVisibleCount(n => Math.min(candles.length,n+20));setPointer(null);}} title="Zoom out">－</button>
+        <button className="period-btn" onClick={() => {setVisibleCount(100);setPointer(null);}}>Reset</button>
+      </div>
+    </div>
+    <div style={{flex:1,minHeight:0,position:'relative'}}>
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label={`${symbol} candlestick chart with technical overlays`}
+        onMouseMove={e => { const rect=e.currentTarget.getBoundingClientRect(); const ratio=(e.clientX-rect.left)/rect.width; const index=Math.max(0,Math.min(visible.length-1,Math.floor(((ratio*width)-left)/plotWidth*visible.length))); const py=(e.clientY-rect.top)/rect.height*height; setPointer({index,py}); }}
+        onMouseLeave={() => setPointer(null)}>
+        {[0,1,2,3,4].map(i => { const value=max-((max-min)*i/4), py=top+(plotHeight*i/4); return <g key={i}><line x1={left} x2={width-right} y1={py} y2={py} stroke="#26364e" strokeDasharray="4 4"/><text x={left-8} y={py+4} fill="#8290a8" fontSize="12" textAnchor="end">{value.toFixed(decimals)}</text></g>; })}
+        {show.bb && <><path d={bandPath('upper')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9"/><path d={bandPath('middle')} fill="none" stroke="#a78bfa" strokeWidth="1" opacity="0.55"/><path d={bandPath('lower')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9"/></>}
+        {show.ema200 && <path d={makePath(visibleEma200)} fill="none" stroke="#f59e0b" strokeWidth="2"/>}
+        {show.ema50 && <path d={makePath(visibleEma50)} fill="none" stroke="#38bdf8" strokeWidth="1.8"/>}
+        {show.ema20 && <path d={makePath(visibleEma20)} fill="none" stroke="#f472b6" strokeWidth="1.8"/>}
+        {visible.map((c,i) => { const x=xAt(i), bullish=Number(c.close)>=Number(c.open), color=bullish?'#13c99b':'#fb7185'; const bodyTop=Math.min(y(c.open),y(c.close)), bodyHeight=Math.max(1,Math.abs(y(c.open)-y(c.close))); return <g key={`${c.time}-${i}`}><line x1={x} x2={x} y1={y(c.high)} y2={y(c.low)} stroke={color} strokeWidth="1.5"/><rect x={x-candleWidth/2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} stroke={color}/></g>; })}
+        {pointer && (() => {const c=visible[pointer.index], x=xAt(pointer.index), py=Math.max(top,Math.min(height-bottom,pointer.py));return <g><line x1={x} x2={x} y1={top} y2={height-bottom} stroke="#dbeafe" strokeDasharray="4 4" opacity="0.75"/><line x1={left} x2={width-right} y1={py} y2={py} stroke="#dbeafe" strokeDasharray="4 4" opacity="0.75"/><rect x={Math.min(width-215,Math.max(left,x-95))} y={top+5} width="205" height="43" rx="5" fill="#0b1728" stroke="#52647e"/><text x={Math.min(width-205,Math.max(left+10,x-85))} y={top+21} fill="#e2e8f0" fontSize="11">{c.time}</text><text x={Math.min(width-205,Math.max(left+10,x-85))} y={top+38} fill="#20d6a1" fontSize="11">O {Number(c.open).toFixed(decimals)}  H {Number(c.high).toFixed(decimals)}  L {Number(c.low).toFixed(decimals)}  C {Number(c.close).toFixed(decimals)}</text></g>;})()}
+        <text x={left} y={height-8} fill="#8290a8" fontSize="11">{visible[0]?.time || ''}</text>
+        <text x={width-right} y={height-8} fill="#8290a8" fontSize="11" textAnchor="end">{visible[visible.length-1]?.time || ''}</text>
+      </svg>
+    </div>
+    <div className="muted">Showing {visible.length} of {candles.length} candles · Hover over chart for OHLC crosshair · use + / − to zoom.</div>
+  </div>;
 }
-
 
 
 // ---------------- Technical indicator calculations ----------------
