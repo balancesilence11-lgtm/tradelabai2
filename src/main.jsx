@@ -38,16 +38,37 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   if (!candles?.length) return <div className="empty">No historical candles available.</div>;
 
   const visible = candles.slice(-100);
-  const width = 1000, height = 270, left = 72, right = 18, top = 15, bottom = 35;
-  const highest = Math.max(...visible.map(c => Number(c.high)));
-  const lowest = Math.min(...visible.map(c => Number(c.low)));
+  const width = 1000, height = 310, left = 72, right = 18, top = 28, bottom = 35;
+  // Calculate overlays from the full fetched history, then align them to the visible candles.
+  const closes = candles.map(c => Number(c.close));
+  const ema20 = calcEMA(closes, 20);
+  const ema50 = calcEMA(closes, 50);
+  const ema200 = calcEMA(closes, 200);
+  const bands = calcBollinger(closes, 20, 2);
+  const offset = candles.length - visible.length;
+  const visibleBands = bands.slice(offset);
+  const visibleEma20 = ema20.slice(offset);
+  const visibleEma50 = ema50.slice(offset);
+  const visibleEma200 = ema200.slice(offset);
+  const overlayValues = [
+    ...visibleEma20, ...visibleEma50, ...visibleEma200,
+    ...visibleBands.flatMap(b => b ? [b.upper, b.middle, b.lower] : [])
+  ].filter(v => v != null && Number.isFinite(v));
+  const highest = Math.max(...visible.map(c => Number(c.high)), ...overlayValues);
+  const lowest = Math.min(...visible.map(c => Number(c.low)), ...overlayValues);
   const padding = (highest - lowest) * 0.08 || Math.abs(highest) * 0.001 || 0.001;
   const max = highest + padding, min = lowest - padding;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const y = price => top + ((max - Number(price)) / (max - min)) * plotHeight;
   const step = plotWidth / visible.length;
+  const xAt = i => left + i * step + step / 2;
   const candleWidth = Math.max(2, Math.min(9, step * 0.65));
   const decimals = symbol === 'USDJPY' ? 3 : symbol === 'BTCUSD' ? 1 : symbol === 'XAUUSD' ? 2 : 5;
+  const makePath = values => values.map((v, i) => v == null || !Number.isFinite(v) ? null : `${i === 0 || values[i - 1] == null ? 'M' : 'L'} ${xAt(i)} ${y(v)}`).filter(Boolean).join(' ');
+  const bandPath = key => visibleBands.map((b, i) => {
+    const v = b?.[key];
+    return v == null || !Number.isFinite(v) ? null : `${i === 0 || !visibleBands[i - 1]?.[key] ? 'M' : 'L'} ${xAt(i)} ${y(v)}`;
+  }).filter(Boolean).join(' ');
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label={`${symbol} candlestick chart`}>
@@ -59,6 +80,13 @@ function CandlestickChart({ candles, loading, error, symbol }) {
           <text x={left - 8} y={py + 4} fill="#8290a8" fontSize="12" textAnchor="end">{value.toFixed(decimals)}</text>
         </g>;
       })}
+      {/* Price-chart overlays: moving averages and Bollinger envelope. */}
+      <path d={bandPath('upper')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9" />
+      <path d={bandPath('middle')} fill="none" stroke="#a78bfa" strokeWidth="1" opacity="0.55" />
+      <path d={bandPath('lower')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9" />
+      <path d={makePath(visibleEma200)} fill="none" stroke="#f59e0b" strokeWidth="2" />
+      <path d={makePath(visibleEma50)} fill="none" stroke="#38bdf8" strokeWidth="1.8" />
+      <path d={makePath(visibleEma20)} fill="none" stroke="#f472b6" strokeWidth="1.8" />
       {visible.map((c, i) => {
         const x = left + i * step + step / 2;
         const bullish = Number(c.close) >= Number(c.open);
@@ -70,6 +98,12 @@ function CandlestickChart({ candles, loading, error, symbol }) {
           <rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} stroke={color} />
         </g>;
       })}
+      <g fontSize="12" fontWeight="600">
+        <text x={left + 4} y="16" fill="#f472b6">EMA 20</text>
+        <text x={left + 82} y="16" fill="#38bdf8">EMA 50</text>
+        <text x={left + 160} y="16" fill="#f59e0b">EMA 200</text>
+        <text x={left + 258} y="16" fill="#a78bfa">Bollinger Bands (20, 2)</text>
+      </g>
       <text x={left} y={height - 8} fill="#8290a8" fontSize="11">{visible[0]?.time || ''}</text>
       <text x={width - right} y={height - 8} fill="#8290a8" fontSize="11" textAnchor="end">{visible[visible.length - 1]?.time || ''}</text>
     </svg>
