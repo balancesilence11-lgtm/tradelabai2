@@ -10,6 +10,16 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // Health check
+    if (url.pathname === "/api/health") {
+      return Response.json({
+        ok: true,
+        service: "TradeLab AI market-data proxy",
+        status: "running"
+      });
+    }
+
+    // Market data
     if (url.pathname === "/api/market") {
       if (request.method !== "GET") {
         return Response.json(
@@ -18,11 +28,12 @@ export default {
         );
       }
 
-      const symbol = url.searchParams
+      const requestedSymbol = url.searchParams
         .get("symbol")
-        ?.toUpperCase();
+        ?.toUpperCase()
+        .replace("/", "");
 
-      const providerSymbol = SYMBOLS[symbol];
+      const providerSymbol = SYMBOLS[requestedSymbol];
 
       if (!providerSymbol) {
         return Response.json(
@@ -43,14 +54,10 @@ export default {
       );
 
       apiUrl.searchParams.set("symbol", providerSymbol);
-      apiUrl.searchParams.set(
-        "apikey",
-        env.TWELVE_DATA_API_KEY
-      );
+      apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
 
       try {
         const response = await fetch(apiUrl.toString());
-
         const data = await response.json();
 
         if (!response.ok || !data.price) {
@@ -61,7 +68,8 @@ export default {
         }
 
         return Response.json({
-          symbol,
+          ok: true,
+          symbol: requestedSymbol,
           providerSymbol,
           price: Number(data.price),
           source: "Twelve Data",
