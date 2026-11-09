@@ -81,13 +81,13 @@ export default {
         });
 
       } catch (error) {
-        return Response.json(
-          { error: "Unable to retrieve market data" },
-          { status: 502 }
-        );
-      }
-    }
+  console.error("Twelve Data error:", error.message);
 
-    return env.ASSETS.fetch(request);
-  }
-};
+  return Response.json(
+    {
+      error: "Unable to retrieve market data",
+      details: error.message
+    },
+    { status: 502 }
+  );
+}
