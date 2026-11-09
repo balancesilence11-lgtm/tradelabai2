@@ -100,29 +100,59 @@ function App() {
     [markets, search]
   );
 
-  const currentMarket = markets.find(m => m.symbol === selectedMarket);
+ useEffect(() => {
+  let active = true;
 
-  function placeDemoOrder() {
-    const newTrade = {
-      id: Date.now(),
-      symbol: selectedMarket,
-      direction,
-      lot: lotSize,
-      type: orderType,
-      status: 'SIMULATED',
-      time: new Date().toLocaleTimeString()
-    };
+  const fetchMarketPrice = async () => {
+    try {
+      setMarketStatus('Updating...');
 
-    setTrades(previous => [newTrade, ...previous]);
+      const response = await fetch(
+        `/api/market?symbol=${selectedMarket}`
+      );
 
-    alert(
-      `${direction} demo order created for ${selectedMarket}.\n` +
-      `Volume: ${lotSize} lots\n\n` +
-      `This is a simulation only. No real broker order was sent.`
-    );
-  }
+      const data = await response.json();
 
-  return (
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || 'Market data unavailable');
+      }
+
+      if (!active) return;
+
+      setMarkets(previous =>
+        previous.map(market =>
+          market.symbol === selectedMarket
+            ? {
+                ...market,
+                price: String(data.price),
+                live: true
+              }
+            : market
+        )
+      );
+
+      setMarketStatus('LIVE');
+      setLastUpdated(new Date(data.timestamp));
+
+    } catch (error) {
+      if (!active) return;
+
+      setMarketStatus('Connection error');
+      console.error('Market data error:', error);
+
+    }
+  };
+
+  fetchMarketPrice();
+
+  const interval = setInterval(fetchMarketPrice, 60000);
+
+  return () => {
+    active = false;
+    clearInterval(interval);
+  };
+
+}, [selectedMarket]);
     <div className="app-shell">
 
       <style>{`
