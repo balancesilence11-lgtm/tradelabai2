@@ -19,7 +19,7 @@ export default {
       });
     }
 
-    // Market data
+    // Market data endpoint
     if (url.pathname === "/api/market") {
       if (request.method !== "GET") {
         return Response.json(
@@ -28,12 +28,12 @@ export default {
         );
       }
 
-      const requestedSymbol = url.searchParams
+      const symbol = url.searchParams
         .get("symbol")
         ?.toUpperCase()
         .replace("/", "");
 
-      const providerSymbol = SYMBOLS[requestedSymbol];
+      const providerSymbol = SYMBOLS[symbol];
 
       if (!providerSymbol) {
         return Response.json(
@@ -54,22 +54,25 @@ export default {
       );
 
       apiUrl.searchParams.set("symbol", providerSymbol);
-      apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
+      apiUrl.searchParams.set(
+        "apikey",
+        env.TWELVE_DATA_API_KEY
+      );
 
       try {
         const response = await fetch(apiUrl.toString());
         const data = await response.json();
 
         if (!response.ok || !data.price) {
-          return Response.json(
-            { error: data.message || "Market data unavailable" },
-            { status: 502 }
-          );
+          return Response.json({
+            error: "Twelve Data rejected the request",
+            details: data.message || "No price returned"
+          }, { status: 502 });
         }
 
         return Response.json({
           ok: true,
-          symbol: requestedSymbol,
+          symbol,
           providerSymbol,
           price: Number(data.price),
           source: "Twelve Data",
@@ -81,13 +84,15 @@ export default {
         });
 
       } catch (error) {
-  console.error("Twelve Data error:", error.message);
+        console.error("Twelve Data error:", error.message);
 
-  return Response.json(
-    {
-      error: "Unable to retrieve market data",
-      details: error.message
-    },
-    { status: 502 }
-  );
-}
+        return Response.json({
+          error: "Unable to retrieve market data",
+          details: error.message
+        }, { status: 502 });
+      }
+    }
+
+    return env.ASSETS.fetch(request);
+  }
+};
