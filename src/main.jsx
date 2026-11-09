@@ -33,7 +33,7 @@ const navigation = [
 ];
 
 function CandlestickChart({ candles, loading, error, symbol }) {
-  const [show, setShow] = useState({ ema20: true, ema50: true, ema200: true, bb: true, levels: true });
+  const [show, setShow] = useState({ ema20: true, ema50: true, ema200: true, bb: true, levels: true, trendlines: true, structure: true });
   const [visibleCount, setVisibleCount] = useState(100);
   const [pointer, setPointer] = useState(null);
   if (loading) return <div className="empty">Loading historical candles…</div>;
@@ -47,13 +47,18 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);
   const bands = calcBollinger(closes, 20, 2);
   const levels = detectSupportResistance(candles.slice(-180));
+  const swings = detectSwingPoints(visible);
+  const trendlines = buildTrendlines(swings);
+  const structure = detectMarketStructure(visible, swings);
   const offset = candles.length - visible.length;
   const visibleBands = bands.slice(offset), visibleEma20 = ema20.slice(offset);
   const visibleEma50 = ema50.slice(offset), visibleEma200 = ema200.slice(offset);
   const overlayValues = [
     ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),
     ...(show.ema200 ? visibleEma200 : []), ...(show.bb ? visibleBands.flatMap(b => b ? [b.upper,b.middle,b.lower] : []) : []),
-    ...(show.levels ? levels.map(level => level.price) : [])
+    ...(show.levels ? levels.map(level => level.price) : []),
+    ...(show.trendlines ? trendlines.flatMap(line => [line.start.price, line.end.price]) : []),
+    ...(show.structure && structure.event ? [structure.event.level] : [])
   ].filter(v => v != null && Number.isFinite(v));
   const highest = Math.max(...visible.map(c => Number(c.high)), ...overlayValues);
   const lowest = Math.min(...visible.map(c => Number(c.low)), ...overlayValues);
@@ -77,7 +82,7 @@ function CandlestickChart({ candles, loading, error, symbol }) {
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
       <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
         {control('ema20','EMA 20','#f472b6')}{control('ema50','EMA 50','#38bdf8')}
-        {control('ema200','EMA 200','#f59e0b')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}
+        {control('ema200','EMA 200','#f59e0b')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}{control('trendlines','Trendlines','#c4b5fd')}{control('structure','BOS / CHoCH','#facc15')}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:5}}>
         <button className="period-btn" onClick={() => {setVisibleCount(n => Math.max(20,n-20));setPointer(null);}} title="Zoom in">＋</button>
@@ -95,16 +100,68 @@ function CandlestickChart({ candles, loading, error, symbol }) {
         {show.ema50 && <path d={makePath(visibleEma50)} fill="none" stroke="#38bdf8" strokeWidth="1.8"/>}
         {show.ema20 && <path d={makePath(visibleEma20)} fill="none" stroke="#f472b6" strokeWidth="1.8"/>}
         {show.levels && levels.map((level,i) => <g key={`level-${i}`}><line x1={left} x2={width-right} y1={y(level.price)} y2={y(level.price)} stroke={level.type==='Resistance'?'#fb7185':'#34d399'} strokeWidth="1.5" strokeDasharray="7 4" opacity="0.9"/><text x={width-right-4} y={y(level.price)-4} textAnchor="end" fill={level.type==='Resistance'?'#fb7185':'#34d399'} fontSize="11">{level.type} {level.price.toFixed(decimals)}</text></g>)}
+        {show.trendlines && trendlines.map((line,i) => { const x1=xAt(line.start.index), x2=xAt(line.end.index); return <g key={`trend-${i}`}><line x1={x1} y1={y(line.start.price)} x2={x2} y2={y(line.end.price)} stroke={line.type==='Uptrend'?'#34d399':'#fb7185'} strokeWidth="2" strokeDasharray="8 4"/><text x={x2} y={y(line.end.price)-7} fill={line.type==='Uptrend'?'#34d399':'#fb7185'} fontSize="10" textAnchor="end">{line.type} line</text></g>; })}
+        {show.structure && structure.event && <g><line x1={left} x2={width-right} y1={y(structure.event.level)} y2={y(structure.event.level)} stroke="#facc15" strokeWidth="1.5" strokeDasharray="3 5"/><rect x={width-right-100} y={Math.max(top+4,y(structure.event.level)-24)} width="96" height="19" rx="4" fill="#30270c" stroke="#facc15"/><text x={width-right-52} y={Math.max(top+17,y(structure.event.level)-11)} textAnchor="middle" fill="#facc15" fontSize="10">{structure.event.label}</text></g>}
         {visible.map((c,i) => { const x=xAt(i), bullish=Number(c.close)>=Number(c.open), color=bullish?'#13c99b':'#fb7185'; const bodyTop=Math.min(y(c.open),y(c.close)), bodyHeight=Math.max(1,Math.abs(y(c.open)-y(c.close))); return <g key={`${c.time}-${i}`}><line x1={x} x2={x} y1={y(c.high)} y2={y(c.low)} stroke={color} strokeWidth="1.5"/><rect x={x-candleWidth/2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} stroke={color}/></g>; })}
         {pointer && (() => {const c=visible[pointer.index], x=xAt(pointer.index), py=Math.max(top,Math.min(height-bottom,pointer.py));return <g><line x1={x} x2={x} y1={top} y2={height-bottom} stroke="#dbeafe" strokeDasharray="4 4" opacity="0.75"/><line x1={left} x2={width-right} y1={py} y2={py} stroke="#dbeafe" strokeDasharray="4 4" opacity="0.75"/><rect x={Math.min(width-215,Math.max(left,x-95))} y={top+5} width="205" height="43" rx="5" fill="#0b1728" stroke="#52647e"/><text x={Math.min(width-205,Math.max(left+10,x-85))} y={top+21} fill="#e2e8f0" fontSize="11">{c.time}</text><text x={Math.min(width-205,Math.max(left+10,x-85))} y={top+38} fill="#20d6a1" fontSize="11">O {Number(c.open).toFixed(decimals)}  H {Number(c.high).toFixed(decimals)}  L {Number(c.low).toFixed(decimals)}  C {Number(c.close).toFixed(decimals)}</text></g>;})()}
         <text x={left} y={height-8} fill="#8290a8" fontSize="11">{visible[0]?.time || ''}</text>
         <text x={width-right} y={height-8} fill="#8290a8" fontSize="11" textAnchor="end">{visible[visible.length-1]?.time || ''}</text>
       </svg>
     </div>
-    <div className="muted">Showing {visible.length} of {candles.length} candles · Hover over chart for OHLC crosshair · use + / − to zoom.</div>
+    <div className="muted">Showing {visible.length} of {candles.length} candles · Hover over chart for OHLC crosshair · use + / − to zoom. {structure.event ? `Latest structure: ${structure.event.label} at ${structure.event.level.toFixed(decimals)}.` : 'No confirmed BOS/CHoCH break in the visible window.'}</div>
   </div>;
 }
 
+
+// Confirmed swing points use three candles on each side to reduce noisy pivots.
+function detectSwingPoints(candles, strength=3) {
+  const highs=[], lows=[];
+  for(let i=strength;i<candles.length-strength;i++) {
+    const h=Number(candles[i].high), l=Number(candles[i].low);
+    const window=candles.slice(i-strength,i+strength+1);
+    if(window.every((c,j)=>j===strength || h>=Number(c.high))) highs.push({index:i,price:h});
+    if(window.every((c,j)=>j===strength || l<=Number(c.low))) lows.push({index:i,price:l});
+  }
+  return {highs,lows};
+}
+
+// Draws simple lines through the two latest confirmed swing lows/highs.
+function buildTrendlines(swings) {
+  const lines=[];
+  if(swings.lows.length>=2) {
+    const pair=swings.lows.slice(-2);
+    if(pair[1].index>pair[0].index) lines.push({type:'Uptrend',start:pair[0],end:pair[1]});
+  }
+  if(swings.highs.length>=2) {
+    const pair=swings.highs.slice(-2);
+    if(pair[1].index>pair[0].index) lines.push({type:'Downtrend',start:pair[0],end:pair[1]});
+  }
+  return lines;
+}
+
+// Flags a close beyond the latest confirmed swing. BOS follows the prior break direction;
+// CHoCH marks a break in the opposite direction. This is a price-action heuristic.
+function detectMarketStructure(candles, swings) {
+  if(candles.length<15 || !swings.highs.length || !swings.lows.length) return {event:null,direction:0};
+  let direction=0, lastEvent=null;
+  const events=[];
+  let highCursor=0, lowCursor=0, activeHigh=null, activeLow=null;
+  for(let i=0;i<candles.length;i++) {
+    while(highCursor<swings.highs.length && swings.highs[highCursor].index<i) activeHigh=swings.highs[highCursor++];
+    while(lowCursor<swings.lows.length && swings.lows[lowCursor].index<i) activeLow=swings.lows[lowCursor++];
+    const close=Number(candles[i].close);
+    if(activeHigh && close>activeHigh.price && (!lastEvent || lastEvent.level!==activeHigh.price || lastEvent.direction!==1)) {
+      const label=direction===-1?'Bullish CHoCH':'Bullish BOS';
+      lastEvent={label,level:activeHigh.price,direction:1,index:i}; events.push(lastEvent); direction=1;
+      activeHigh=null;
+    } else if(activeLow && close<activeLow.price && (!lastEvent || lastEvent.level!==activeLow.price || lastEvent.direction!==-1)) {
+      const label=direction===1?'Bearish CHoCH':'Bearish BOS';
+      lastEvent={label,level:activeLow.price,direction:-1,index:i}; events.push(lastEvent); direction=-1;
+      activeLow=null;
+    }
+  }
+  return {event:lastEvent,direction,events};
+}
 
 // Identify repeated swing highs/lows and group nearby prices into practical chart levels.
 function detectSupportResistance(candles) {
