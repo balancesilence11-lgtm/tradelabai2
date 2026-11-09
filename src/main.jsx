@@ -708,6 +708,98 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
 }
 
 
+function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTimeframeChange }) {
+  const symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSD'];
+  const [results, setResults] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const [filter, setFilter] = useState('ALL');
+  const [sortBy, setSortBy] = useState('score');
+  const [lastScan, setLastScan] = useState(null);
+  const [scanProgress, setScanProgress] = useState('');
+  const [minAdx, setMinAdx] = useState('15');
+
+  const runScan = async () => {
+    setScanning(true); setScanError(''); setResults([]); setScanProgress('Preparing market scan…');
+    const found = [];
+    try {
+      // Scan sequentially to reduce the chance of exhausting the market-data provider quota.
+      for (let index = 0; index < symbols.length; index++) {
+        const symbol = symbols[index];
+        setScanProgress(`Scanning ${symbol} (${index + 1}/${symbols.length})…`);
+        try {
+          const response = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&outputsize=180`);
+          const data = await response.json();
+          if (!response.ok || !data.ok || !Array.isArray(data.candles)) throw new Error(data.details || data.error || 'Candle data unavailable');
+          const candles = data.candles;
+          const closes = candles.map(c => Number(c.close));
+          if (candles.length < 60 || closes.some(v => !Number.isFinite(v))) throw new Error('Insufficient clean candle history');
+          const ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50);
+          const rsiSeries = calcRSI(closes, 14), macd = calcMACD(closes), adxSeries = calcADX(candles, 14);
+          const i = closes.length - 1, price = closes[i], e20 = ema20[i], e50 = ema50[i];
+          const rsi = rsiSeries[i], macdHist = macd.histogram[i], adx = adxSeries[i];
+          if ([e20,e50,rsi,macdHist].some(v => v == null || !Number.isFinite(v))) throw new Error('Indicators need more candle history');
+          let score = 0; const reasons = [];
+          if (e20 > e50) { score += 2; reasons.push('EMA 20 above EMA 50'); }
+          else if (e20 < e50) { score -= 2; reasons.push('EMA 20 below EMA 50'); }
+          if (price > e20) { score += 1; reasons.push('Price above EMA 20'); }
+          else if (price < e20) { score -= 1; reasons.push('Price below EMA 20'); }
+          if (rsi >= 52 && rsi < 70) { score += 1; reasons.push('RSI bullish momentum'); }
+          else if (rsi <= 48 && rsi > 30) { score -= 1; reasons.push('RSI bearish momentum'); }
+          else if (rsi >= 70) reasons.push('RSI overbought zone');
+          else if (rsi <= 30) reasons.push('RSI oversold zone');
+          if (macdHist > 0) { score += 2; reasons.push('MACD histogram positive'); }
+          else if (macdHist < 0) { score -= 2; reasons.push('MACD histogram negative'); }
+          if (Number.isFinite(adx) && adx >= Number(minAdx)) reasons.push(`Trend strength confirmed (ADX ${adx.toFixed(1)})`);
+          else reasons.push('Weak / developing trend (ADX)');
+          const signal = score >= 4 ? 'STRONG BUY' : score >= 2 ? 'BUY' : score <= -4 ? 'STRONG SELL' : score <= -2 ? 'SELL' : 'NEUTRAL';
+          found.push({symbol,price,rsi,adx:Number.isFinite(adx)?adx:null,macdHist,ema20:e20,ema50:e50,score,signal,reasons,candles:candles.length,scannedAt:new Date().toISOString()});
+        } catch (err) {
+          found.push({symbol,signal:'NO DATA',score:0,error:err.message,reasons:[]});
+        }
+      }
+      setResults(found); setLastScan(new Date());
+      if (found.every(r => r.signal === 'NO DATA')) setScanError('No instruments returned usable candle data. Check the market-data connection and try again.');
+    } catch (err) { setScanError(err.message || 'Scanner failed.'); }
+    finally { setScanning(false); setScanProgress(''); }
+  };
+
+  const visible = results.filter(r => filter === 'ALL' || (filter === 'ACTIONABLE' ? ['BUY','STRONG BUY','SELL','STRONG SELL'].includes(r.signal) : filter === r.signal));
+  const sorted = [...visible].sort((a,b) => sortBy === 'symbol' ? a.symbol.localeCompare(b.symbol) : sortBy === 'price' ? (b.price||0)-(a.price||0) : Math.abs(b.score)-Math.abs(a.score));
+  const cardStyle = {background:'#0e192b',border:'1px solid #293a52',borderRadius:8,padding:12};
+  const inputStyle = {background:'#0b1728',border:'1px solid #2b3b52',color:'#fff',borderRadius:6,padding:'9px 10px',fontSize:12};
+  const signalColor = signal => signal.includes('BUY') ? '#20d6a1' : signal.includes('SELL') ? '#fb7185' : signal === 'NO DATA' ? '#fbbf24' : '#aab6c9';
+  const fmt = (v,symbol) => v == null || !Number.isFinite(v) ? '—' : Number(v).toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5);
+
+  return <>
+    <div className="welcome"><div><h1>Smart Market Scanner</h1><div className="muted">Scan supported instruments for multi-indicator momentum and trend confluence.</div></div><div className="demo-badge">● TECHNICAL SCAN · ANALYSIS ONLY</div></div>
+    <div className="card" style={{marginBottom:16}}>
+      <div className="card-heading" style={{flexWrap:'wrap'}}><h3>Scanner controls</h3><span className="muted">{lastScan ? `Last scan: ${lastScan.toLocaleTimeString()}` : 'No scan run yet'}</span></div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <label style={{fontSize:11,color:'#9ba9bd'}}>Timeframe <select style={inputStyle} value={timeframe} onChange={e=>onTimeframeChange(e.target.value)} disabled={scanning}>{[['1min','1 minute'],['5min','5 minutes'],['15min','15 minutes'],['30min','30 minutes'],['1h','1 hour'],['4h','4 hours']].map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
+        <label style={{fontSize:11,color:'#9ba9bd'}}>Minimum ADX <select style={inputStyle} value={minAdx} onChange={e=>setMinAdx(e.target.value)} disabled={scanning}><option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option></select></label>
+        <button className="execute-btn" onClick={runScan} disabled={scanning}>{scanning ? 'Scanning…' : 'Run market scan'}</button>
+      </div>
+      {scanning && <div style={{marginTop:12,color:'#20d6a1',fontSize:12}}>{scanProgress}</div>}
+      {scanError && <div style={{marginTop:12,color:'#fbbf24',fontSize:12}}>{scanError}</div>}
+      <p className="muted" style={{lineHeight:1.6,margin:'13px 0 0'}}>Scans EURUSD, GBPUSD, USDJPY, XAUUSD and BTCUSD using historical candles from the connected market-data service. Data is refreshed only when you run a scan; it is not a tick-by-tick feed.</p>
+    </div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Markets scanned</div><div className="stat-value">{results.length ? results.length : '—'}</div><div className="muted">Of {symbols.length} supported symbols</div></div>
+      <div className="card"><div className="stat-label">Bullish setups</div><div className="stat-value positive">{results.filter(r=>r.signal.includes('BUY')).length}</div><div className="muted">Rule-based confluence</div></div>
+      <div className="card"><div className="stat-label">Bearish setups</div><div className="stat-value negative">{results.filter(r=>r.signal.includes('SELL')).length}</div><div className="muted">Rule-based confluence</div></div>
+      <div className="card"><div className="stat-label">Neutral / unavailable</div><div className="stat-value">{results.filter(r=>['NEUTRAL','NO DATA'].includes(r.signal)).length}</div><div className="muted">No directional consensus</div></div>
+    </div>
+    <div className="card" style={{marginBottom:16}}>
+      <div className="card-heading" style={{flexWrap:'wrap'}}><h3>Scan results</h3><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><select style={inputStyle} value={filter} onChange={e=>setFilter(e.target.value)}><option value="ALL">All results</option><option value="ACTIONABLE">Actionable only</option><option value="STRONG BUY">Strong buy</option><option value="BUY">Buy</option><option value="NEUTRAL">Neutral</option><option value="SELL">Sell</option><option value="STRONG SELL">Strong sell</option><option value="NO DATA">No data</option></select><select style={inputStyle} value={sortBy} onChange={e=>setSortBy(e.target.value)}><option value="score">Sort by signal strength</option><option value="symbol">Sort by symbol</option><option value="price">Sort by price</option></select></div></div>
+      {!results.length ? <div className="empty">Run a market scan to populate the results table.</div> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Last candle close</th><th>Signal</th><th>Score</th><th>RSI 14</th><th>ADX 14</th><th>MACD histogram</th><th>Action</th></tr></thead><tbody>{sorted.map(r=><tr key={r.symbol}><td><strong>{r.symbol}</strong><div className="muted">{r.candles ? `${r.candles} candles` : r.error}</div></td><td>{fmt(r.price,r.symbol)}</td><td style={{color:signalColor(r.signal),fontWeight:700}}>{r.signal}</td><td>{r.signal==='NO DATA'?'—':`${r.score>0?'+':''}${r.score}`}</td><td>{r.rsi==null?'—':r.rsi.toFixed(1)}</td><td>{r.adx==null?'—':r.adx.toFixed(1)}</td><td>{r.macdHist==null?'—':r.macdHist.toPrecision(4)}</td><td><button className="period-btn" disabled={r.signal==='NO DATA'} onClick={()=>{onSelectMarket(r.symbol);}}>Open market</button></td></tr>)}</tbody></table></div>}
+    </div>
+    {results.length>0 && <div className="card"><div className="card-heading"><h3>Signal reasoning</h3><span className="muted">Rule-based indicator checks</span></div><div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:10}}>{results.filter(r=>r.signal!=='NO DATA').map(r=><div key={r.symbol} style={cardStyle}><div style={{display:'flex',justifyContent:'space-between',gap:8,marginBottom:8}}><strong>{r.symbol}</strong><strong style={{color:signalColor(r.signal)}}>{r.signal}</strong></div><div className="muted" style={{lineHeight:1.8}}>{r.reasons.map((reason,i)=><div key={i}>• {reason}</div>)}</div></div>)}</div></div>}
+    <div className="card" style={{marginTop:16,borderColor:'#5b4520'}}><p className="muted" style={{fontSize:11,lineHeight:1.7,margin:0}}><strong style={{color:'#fbbf24'}}>Important:</strong> Scanner scores are transparent technical rules, not machine-learning predictions or guaranteed trade signals. A BUY/SELL label is not a recommendation to enter automatically. Confirm spread, session, news, higher-timeframe context and your risk limits before considering any trade. US30 is listed elsewhere in the app but is not included because its market-data feed is not connected.</p></div>
+  </>;
+}
+
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -983,7 +1075,7 @@ function App() {
             <div className="welcome"><div><h1>AI Trade Analysis Assistant</h1><div className="muted">Multi-factor technical assessment for the selected market. Analysis only; no automatic execution.</div></div><div className="demo-badge">● DEMO / ANALYSIS</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
