@@ -601,6 +601,113 @@ function RiskCentre({ symbol, marketPrice }) {
   </>;
 }
 
+function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
+  const storageKey = 'tradelab_trade_journal_v1';
+  const [entries, setEntries] = useState(() => {
+    try { const saved = localStorage.getItem(storageKey); const parsed = saved ? JSON.parse(saved) : []; return Array.isArray(parsed) ? parsed : []; }
+    catch { return []; }
+  });
+  const [form, setForm] = useState({ symbol: defaultSymbol, direction: 'BUY', entry: marketPrice || '', units: '1000', setup: 'Trend continuation', notes: '', tags: '' });
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [marketFilter, setMarketFilter] = useState('ALL');
+  const [closeInputs, setCloseInputs] = useState({});
+  const [message, setMessage] = useState('');
+
+  useEffect(() => { try { localStorage.setItem(storageKey, JSON.stringify(entries)); } catch (e) { console.warn('Journal storage unavailable', e); } }, [entries]);
+  useEffect(() => { setForm(old => ({ ...old, symbol: defaultSymbol, entry: old.symbol !== defaultSymbol || !old.entry || old.entry === '—' ? (marketPrice && marketPrice !== '—' ? marketPrice : '') : old.entry })); }, [defaultSymbol, marketPrice]);
+
+  const closed = entries.filter(t => t.status === 'CLOSED');
+  const wins = closed.filter(t => t.pnl > 0), losses = closed.filter(t => t.pnl < 0);
+  const net = closed.reduce((s,t) => s + Number(t.pnl || 0), 0);
+  const grossWin = wins.reduce((s,t) => s + t.pnl, 0), grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnl, 0));
+  const winRate = closed.length ? wins.length / closed.length * 100 : 0;
+  const profitFactor = grossLoss ? grossWin / grossLoss : grossWin ? Infinity : 0;
+  const avgWin = wins.length ? grossWin / wins.length : 0, avgLoss = losses.length ? grossLoss / losses.length : 0;
+  const markets = [...new Set(entries.map(t => t.symbol))];
+  const visible = entries.filter(t => (statusFilter === 'ALL' || t.status === statusFilter) && (marketFilter === 'ALL' || t.symbol === marketFilter) && `${t.symbol} ${t.direction} ${t.setup} ${t.notes} ${t.tags}`.toLowerCase().includes(query.toLowerCase()));
+  const equity = closed.slice().reverse().reduce((arr,t) => [...arr, (arr.length ? arr[arr.length-1] : 0) + Number(t.pnl || 0)], [0]);
+  const chartW = 600, chartH = 125, minEq = Math.min(0,...equity), maxEq = Math.max(0,...equity), rangeEq = maxEq-minEq || 1;
+  const equityPoints = equity.map((v,i) => `${equity.length < 2 ? chartW/2 : 12 + i/(equity.length-1)*(chartW-24)},${chartH-12-(v-minEq)/rangeEq*(chartH-24)}`).join(' ');
+  const money = v => `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`;
+
+  function addEntry(e) {
+    e.preventDefault();
+    const entry = Number(form.entry), units = Number(form.units);
+    if (!form.symbol || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(units) || units <= 0) { setMessage('Enter a valid entry price and position units.'); return; }
+    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, symbol: form.symbol.toUpperCase().trim(), direction: form.direction, entry, units, setup: form.setup, notes: form.notes.trim(), tags: form.tags.trim(), status: 'OPEN', openedAt: new Date().toISOString(), closedAt: null, exit: null, pnl: null };
+    setEntries(old => [item, ...old]);
+    setForm(old => ({ ...old, entry: marketPrice || '', notes: '', tags: '' }));
+    setMessage('Trade journal entry saved on this device.');
+  }
+  function closeEntry(id) {
+    const exit = Number(closeInputs[id]);
+    if (!Number.isFinite(exit) || exit <= 0) { setMessage('Enter a valid exit price before closing.'); return; }
+    setEntries(old => old.map(t => t.id !== id || t.status !== 'OPEN' ? t : { ...t, exit, closedAt: new Date().toISOString(), status: 'CLOSED', pnl: (t.direction === 'BUY' ? exit-t.entry : t.entry-exit) * t.units }));
+    setMessage('Trade marked closed and P/L calculated using price difference × units.');
+  }
+  function deleteEntry(id) { if (window.confirm('Delete this journal entry?')) setEntries(old => old.filter(t => t.id !== id)); }
+  function exportCsv() {
+    const cols = ['symbol','direction','status','entry','exit','units','pnl','setup','tags','notes','openedAt','closedAt'];
+    const quote = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
+    const csv = [cols.join(','), ...entries.map(t => cols.map(k => quote(t[k])).join(','))].join('\n');
+    const url = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8;'}));
+    const a = document.createElement('a'); a.href = url; a.download = 'tradelab-trade-journal.csv'; a.click(); URL.revokeObjectURL(url);
+  }
+
+  const inputStyle = {width:'100%',background:'#0b1728',border:'1px solid #2b3b52',color:'#fff',borderRadius:6,padding:10,fontSize:12};
+  const labelStyle = {display:'block',fontSize:11,color:'#8492a9',marginBottom:6};
+  const smallBtn = {background:'#1c2a40',border:'1px solid #33445e',color:'#dbeafe',borderRadius:6,padding:'8px 10px',fontSize:11};
+  return <>
+    <div className="welcome"><div><h1>Trade Journal</h1><div className="muted">Record, review and learn from your simulated trading decisions.</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><span className="demo-badge">● PERSONAL / DEMO</span><button style={smallBtn} onClick={exportCsv}>Export CSV</button></div></div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Closed-trade net P/L</div><div className={`stat-value ${net>=0?'positive':'negative'}`}>{money(net)}</div><div className="muted">{closed.length} closed trades</div></div>
+      <div className="card"><div className="stat-label">Win rate</div><div className="stat-value">{winRate.toFixed(1)}%</div><div className="muted">{wins.length} wins · {losses.length} losses</div></div>
+      <div className="card"><div className="stat-label">Profit factor</div><div className="stat-value">{profitFactor === Infinity ? '∞' : profitFactor.toFixed(2)}</div><div className="muted">Gross profit ÷ gross loss</div></div>
+      <div className="card"><div className="stat-label">Open positions</div><div className="stat-value">{entries.filter(t=>t.status==='OPEN').length}</div><div className="muted">Awaiting manual close</div></div>
+    </div>
+    <div className="dashboard-grid" style={{gridTemplateColumns:'minmax(300px,0.9fr) minmax(0,1.5fr)'}}>
+      <form className="card" onSubmit={addEntry}>
+        <div className="card-heading"><h3>Record a trade</h3><span className="tag">MANUAL ENTRY</span></div>
+        <div className="order-grid">
+          <div className="field"><label>Instrument</label><input style={inputStyle} value={form.symbol} onChange={e=>setForm({...form,symbol:e.target.value.toUpperCase()})} placeholder="EURUSD" required/></div>
+          <div className="field"><label>Direction</label><select style={inputStyle} value={form.direction} onChange={e=>setForm({...form,direction:e.target.value})}><option>BUY</option><option>SELL</option></select></div>
+          <div className="field"><label>Entry price</label><input style={inputStyle} type="number" step="any" min="0" value={form.entry} onChange={e=>setForm({...form,entry:e.target.value})} required/></div>
+          <div className="field"><label>Position units</label><input style={inputStyle} type="number" step="any" min="0" value={form.units} onChange={e=>setForm({...form,units:e.target.value})} required/></div>
+        </div>
+        <div className="field"><label>Setup / strategy</label><select style={inputStyle} value={form.setup} onChange={e=>setForm({...form,setup:e.target.value})}><option>Trend continuation</option><option>Breakout</option><option>Pullback</option><option>Support / resistance</option><option>Reversal</option><option>News / event</option><option>Other</option></select></div>
+        <div className="field"><label>Tags (comma separated)</label><input style={inputStyle} value={form.tags} onChange={e=>setForm({...form,tags:e.target.value})} placeholder="London session, EMA, patience"/></div>
+        <div className="field"><label>Trade notes</label><textarea style={{...inputStyle,minHeight:76,resize:'vertical'}} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="Why did you take this trade? What confirmed the setup?"/></div>
+        <button className="execute-btn" type="submit">＋ Save journal entry</button>
+        {message && <p className="muted" style={{lineHeight:1.5}}>{message}</p>}
+        <p className="muted" style={{fontSize:10,lineHeight:1.6}}>Entries are stored in this browser on this device. This form does not send or execute broker orders.</p>
+      </form>
+      <div className="card">
+        <div className="card-heading"><h3>Closed-trade equity curve</h3><span className="muted">Cumulative realised P/L</span></div>
+        {closed.length < 1 ? <div className="empty">Close a journal trade to start building your performance curve.</div> : <svg viewBox={`0 0 ${chartW} ${chartH}`} style={{width:'100%',height:155,overflow:'visible'}}><line x1="0" y1={chartH-12-(0-minEq)/rangeEq*(chartH-24)} x2={chartW} y2={chartH-12-(0-minEq)/rangeEq*(chartH-24)} stroke="#52627a" strokeDasharray="4 4"/><polyline points={equityPoints} fill="none" stroke="#20d6a1" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round"/></svg>}
+        <div className="stats-grid" style={{gridTemplateColumns:'1fr 1fr',marginTop:14,marginBottom:0}}><div><div className="stat-label">Average win</div><div className="stat-value positive">{money(avgWin)}</div></div><div><div className="stat-label">Average loss</div><div className="stat-value negative">{money(-avgLoss)}</div></div></div>
+        <p className="muted" style={{fontSize:10,lineHeight:1.6,marginTop:16}}>P/L is an estimate calculated as price movement × units. It does not include contract specifications, pip/tick values, currency conversion, spread, commissions, swaps or slippage.</p>
+      </div>
+    </div>
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading" style={{flexWrap:'wrap'}}><h3>Trade history</h3><span className="muted">{visible.length} of {entries.length} records</span></div>
+      <div style={{display:'grid',gridTemplateColumns:'minmax(160px,2fr) repeat(2,minmax(120px,1fr))',gap:9,marginBottom:14}}>
+        <input style={inputStyle} value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search symbol, setup, notes…"/>
+        <select style={inputStyle} value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option value="ALL">All statuses</option><option value="OPEN">Open</option><option value="CLOSED">Closed</option></select>
+        <select style={inputStyle} value={marketFilter} onChange={e=>setMarketFilter(e.target.value)}><option value="ALL">All instruments</option>{markets.map(m=><option key={m}>{m}</option>)}</select>
+      </div>
+      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>Units</th><th>Setup / notes</th><th>Status / P&amp;L</th><th>Action</th></tr></thead>
+        <tbody>{visible.length===0 ? <tr><td colSpan="8" className="empty">No journal records match. Add a trade using the form above.</td></tr> : visible.map(t=><tr key={t.id}>
+          <td><strong>{t.symbol}</strong><div className="muted">{new Date(t.openedAt).toLocaleString()}</div></td><td className={t.direction==='BUY'?'positive':'negative'}>{t.direction}</td><td>{t.entry}</td><td>{t.exit ?? '—'}</td><td>{Number(t.units).toLocaleString()}</td>
+          <td><strong>{t.setup}</strong><div className="muted" style={{maxWidth:210,whiteSpace:'normal'}}>{t.notes || t.tags || '—'}</div></td>
+          <td>{t.status==='OPEN' ? <span className="tag">OPEN</span> : <span className={t.pnl>=0?'positive':'negative'}>{money(t.pnl)}</span>}</td>
+          <td>{t.status==='OPEN' ? <div style={{display:'flex',gap:5,alignItems:'center'}}><input aria-label="Exit price" type="number" step="any" min="0" placeholder="Exit" value={closeInputs[t.id] || ''} onChange={e=>setCloseInputs({...closeInputs,[t.id]:e.target.value})} style={{...inputStyle,width:90,padding:7}}/><button style={smallBtn} onClick={()=>closeEntry(t.id)}>Close</button><button style={smallBtn} title="Delete" onClick={()=>deleteEntry(t.id)}>×</button></div> : <button style={smallBtn} onClick={()=>deleteEntry(t.id)}>Delete</button>}</td>
+        </tr>)}</tbody></table></div>
+    </div>
+  </>;
+}
+
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -876,7 +983,7 @@ function App() {
             <div className="welcome"><div><h1>AI Trade Analysis Assistant</h1><div className="muted">Multi-factor technical assessment for the selected market. Analysis only; no automatic execution.</div></div><div className="demo-badge">● DEMO / ANALYSIS</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
