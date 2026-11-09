@@ -335,6 +335,146 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
   </div>;
 }
 
+// Historical simulation uses close-confirmed signals and executes at the next
+// candle close-to-close interval. Costs are charged on each position change.
+function runStrategyBacktest(candles, config) {
+  if (!Array.isArray(candles) || candles.length < 60) return { error: `At least 60 candles are required. Available: ${candles?.length || 0}.` };
+  const clean = candles.filter(c => Number.isFinite(Number(c.close)) && Number(c.close) > 0);
+  if (clean.length < 60) return { error: 'Not enough valid closing prices to run this backtest.' };
+  const closes = clean.map(c => Number(c.close));
+  const fast = calcEMA(closes, config.fast);
+  const slow = calcEMA(closes, config.slow);
+  const rsi = calcRSI(closes, config.rsiPeriod);
+  const lookback = Math.max(5, config.lookback);
+  const fee = Math.max(0, config.costBps) / 10000;
+  const initial = Math.max(100, config.capital);
+  let equity = initial, position = 0, activeTrade = null;
+  const curve = [{ index: 0, time: clean[0].time, equity }];
+  const trades = [];
+  const signalAt = i => {
+    if (config.strategy === 'ema') {
+      if (fast[i] == null || slow[i] == null) return 0;
+      return fast[i] > slow[i] ? 1 : -1;
+    }
+    if (config.strategy === 'rsi') {
+      if (rsi[i] == null) return position;
+      if (rsi[i] <= config.oversold) return 1;
+      if (rsi[i] >= config.overbought) return -1;
+      return position;
+    }
+    if (i < lookback) return position;
+    const prior = clean.slice(i - lookback, i);
+    const ceiling = Math.max(...prior.map(c => Number(c.high)));
+    const floor = Math.min(...prior.map(c => Number(c.low)));
+    if (closes[i] > ceiling) return 1;
+    if (closes[i] < floor) return -1;
+    return position;
+  };
+  const closeTrade = (index, reason) => {
+    if (!activeTrade) return;
+    equity *= (1 - fee);
+    const pnlPct = (equity / activeTrade.startEquity - 1) * 100;
+    trades.push({
+      id: trades.length + 1,
+      side: activeTrade.side,
+      entryTime: activeTrade.entryTime,
+      exitTime: clean[index].time,
+      entryPrice: activeTrade.entryPrice,
+      exitPrice: closes[index],
+      pnlPct,
+      pnlCash: equity - activeTrade.startEquity,
+      reason
+    });
+    activeTrade = null;
+  };
+  for (let i = 1; i < clean.length; i++) {
+    if (position !== 0) equity *= (1 + position * (closes[i] / closes[i - 1] - 1));
+    const desired = signalAt(i);
+    if (desired !== position) {
+      if (position !== 0) closeTrade(i, desired === 0 ? 'Signal exit' : 'Reversal');
+      if (desired !== 0) {
+        const beforeEntryCost = equity;
+        equity *= (1 - fee);
+        activeTrade = { side: desired === 1 ? 'LONG' : 'SHORT', entryTime: clean[i].time, entryPrice: closes[i], startEquity: beforeEntryCost };
+      }
+      position = desired;
+    }
+    curve.push({ index: i, time: clean[i].time, equity });
+  }
+  if (position !== 0) closeTrade(clean.length - 1, 'End of data');
+  if (curve.length) curve[curve.length - 1] = { ...curve[curve.length - 1], equity };
+  const wins = trades.filter(t => t.pnlCash > 0), losses = trades.filter(t => t.pnlCash < 0);
+  const grossProfit = wins.reduce((s,t) => s + t.pnlCash, 0);
+  const grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnlCash, 0));
+  let peak = initial, maxDrawdown = 0;
+  curve.forEach(p => { peak = Math.max(peak, p.equity); const dd = peak > 0 ? (peak - p.equity) / peak * 100 : 0; maxDrawdown = Math.max(maxDrawdown, dd); });
+  const finalEquity = equity;
+  const buyHold = (closes.at(-1) / closes[0] - 1) * 100;
+  return {
+    trades, curve, initial, finalEquity,
+    netReturn: (finalEquity / initial - 1) * 100,
+    buyHold, winRate: trades.length ? wins.length / trades.length * 100 : 0,
+    profitFactor: grossLoss === 0 ? (grossProfit > 0 ? Infinity : 0) : grossProfit / grossLoss,
+    maxDrawdown, tradeCount: trades.length, wins: wins.length, losses: losses.length,
+    costBps: config.costBps, candlesUsed: clean.length
+  };
+}
+
+function StrategyLab({ candles, symbol, timeframe, loading, error }) {
+  const [strategy, setStrategy] = useState('ema');
+  const [fastPeriod, setFastPeriod] = useState(20);
+  const [slowPeriod, setSlowPeriod] = useState(50);
+  const [rsiPeriod, setRsiPeriod] = useState(14);
+  const [oversold, setOversold] = useState(30);
+  const [overbought, setOverbought] = useState(70);
+  const [lookback, setLookback] = useState(20);
+  const [capital, setCapital] = useState(10000);
+  const [costBps, setCostBps] = useState(1.5);
+  const [runKey, setRunKey] = useState(0);
+  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps };
+  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps, runKey]);
+  const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
+  const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  const chart = result?.curve || [];
+  const minEq = chart.length ? Math.min(...chart.map(p=>p.equity)) : 0;
+  const maxEq = chart.length ? Math.max(...chart.map(p=>p.equity)) : 1;
+  const range = maxEq - minEq || 1;
+  const path = chart.map((p,i)=>`${i===0?'M':'L'} ${20+i/(Math.max(1,chart.length-1))*960} ${12+(maxEq-p.equity)/range*176}`).join(' ');
+  return <>
+    <div className="welcome"><div><h1>Strategy Lab & Backtesting</h1><div className="muted">Test rule-based strategies against the currently loaded historical candles.</div></div><div className="demo-badge">● HISTORICAL SIMULATION</div></div>
+    <div className="card">
+      <div className="card-heading"><div><h3>Strategy builder</h3><div className="muted">{symbol} · {timeframe} · {candles.length} candles available</div></div><span className="tag">NO LIVE ORDERS</span></div>
+      {(loading || error) && <div className="empty">{loading ? 'Loading historical data…' : error}</div>}
+      <div className="order-grid" style={{marginTop:12}}>
+        <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="ema">EMA crossover</option><option value="rsi">RSI mean-reversion</option><option value="breakout">Price breakout</option></select></div>
+        <div className="field"><label>Starting capital (USD)</label><input type="number" min="100" step="100" value={capital} onChange={e=>setCapital(Math.max(100,Number(e.target.value)||100))}/></div>
+        <div className="field"><label>Trading cost per side (bps)</label><input type="number" min="0" max="100" step="0.1" value={costBps} onChange={e=>setCostBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
+        {strategy==='ema' && <><div className="field"><label>Fast EMA</label><input type="number" min="2" max="150" value={fastPeriod} onChange={e=>setFastPeriod(Math.max(2,Math.min(150,Number(e.target.value)||2)))}/></div><div className="field"><label>Slow EMA</label><input type="number" min="3" max="250" value={slowPeriod} onChange={e=>setSlowPeriod(Math.max(3,Math.min(250,Number(e.target.value)||3)))}/></div></>}
+        {strategy==='rsi' && <><div className="field"><label>RSI period</label><input type="number" min="2" max="50" value={rsiPeriod} onChange={e=>setRsiPeriod(Math.max(2,Math.min(50,Number(e.target.value)||2)))}/></div><div className="field"><label>Oversold threshold</label><input type="number" min="5" max="45" value={oversold} onChange={e=>setOversold(Math.max(5,Math.min(45,Number(e.target.value)||5)))}/></div><div className="field"><label>Overbought threshold</label><input type="number" min="55" max="95" value={overbought} onChange={e=>setOverbought(Math.max(55,Math.min(95,Number(e.target.value)||55)))}/></div></>}
+        {strategy==='breakout' && <div className="field"><label>Breakout lookback candles</label><input type="number" min="5" max="100" value={lookback} onChange={e=>setLookback(Math.max(5,Math.min(100,Number(e.target.value)||5)))}/></div>}
+      </div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
+    </div>
+    {result?.error ? <div className="card" style={{marginTop:18}}><div className="empty">{result.error}</div></div> : <>
+      <div className="stats-grid" style={{marginTop:18}}>
+        <div className="card"><div className="stat-label">Net return</div><div className="stat-value" style={{color:result.netReturn>=0?'#21d6a0':'#fb7185'}}>{pct(result.netReturn)}</div><div className="muted">Final equity: {money(result.finalEquity)}</div></div>
+        <div className="card"><div className="stat-label">Win rate</div><div className="stat-value">{result.winRate.toFixed(1)}%</div><div className="muted">{result.wins} wins / {result.tradeCount} closed trades</div></div>
+        <div className="card"><div className="stat-label">Profit factor</div><div className="stat-value">{Number.isFinite(result.profitFactor)?result.profitFactor.toFixed(2):'∞'}</div><div className="muted">Gross profit ÷ gross loss</div></div>
+        <div className="card"><div className="stat-label">Maximum drawdown</div><div className="stat-value" style={{color:'#fb7185'}}>{result.maxDrawdown.toFixed(2)}%</div><div className="muted">Peak-to-trough equity decline</div></div>
+      </div>
+      <div className="card" style={{marginTop:18}}>
+        <div className="card-heading"><div><h3>Equity curve</h3><div className="muted">Start: {money(result.initial)} · End: {money(result.finalEquity)}</div></div><span className="tag">{result.tradeCount} trades</span></div>
+        <div style={{height:220,width:'100%'}}><svg viewBox="0 0 1000 205" width="100%" height="100%" preserveAspectRatio="none"><line x1="20" x2="980" y1="188" y2="188" stroke="#26364e"/><line x1="20" x2="980" y1="12" y2="12" stroke="#26364e" strokeDasharray="4 4"/><path d={path} fill="none" stroke={result.netReturn>=0?'#21d6a0':'#fb7185'} strokeWidth="2.5"/><text x="20" y="202" fill="#8290a8" fontSize="10">First candle</text><text x="980" y="202" textAnchor="end" fill="#8290a8" fontSize="10">Last candle</text></svg></div>
+        <div className="signal"><span>Buy-and-hold reference (before costs)</span><strong style={{color:result.buyHold>=0?'#21d6a0':'#fb7185'}}>{pct(result.buyHold)}</strong></div>
+        <div className="signal"><span>Data window</span><strong>{result.candlesUsed} candles</strong></div>
+      </div>
+      <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Closed trades</h3><span className="muted">Most recent 20 shown · {result.tradeCount} total</span></div><div className="table-wrap"><table><thead><tr><th>#</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Net P/L</th><th>Exit reason</th></tr></thead><tbody>{result.trades.length===0?<tr><td colSpan="8" className="empty">No completed trades for this strategy and data window.</td></tr>:result.trades.slice(-20).reverse().map(t=><tr key={t.id}><td>{t.id}</td><td className={t.side==='LONG'?'positive':'negative'}>{t.side}</td><td>{t.entryTime}</td><td>{t.exitTime}</td><td>{t.entryPrice.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</td><td>{t.exitPrice.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</td><td className={t.pnlCash>=0?'positive':'negative'}>{money(t.pnlCash)} ({pct(t.pnlPct)})</td><td>{t.reason}</td></tr>)}</tbody></table></div></div>
+    </>}
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{fontSize:11,lineHeight:1.7,margin:0}}><strong style={{color:'#fbbf24'}}>Backtest limitations:</strong> This is a local historical simulation using the currently fetched candle sample, not a broker-grade tester. It assumes close-price fills, constant percentage transaction costs, full-equity exposure and no margin, swaps, spread changes, liquidity constraints or intrabar stop execution. Results can be distorted by the limited 300-candle sample and are not a forecast. Test on more data and out-of-sample periods before relying on any strategy.</p></div>
+  </>;
+}
+
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -610,7 +750,7 @@ function App() {
             <div className="welcome"><div><h1>AI Trade Analysis Assistant</h1><div className="muted">Multi-factor technical assessment for the selected market. Analysis only; no automatic execution.</div></div><div className="demo-badge">● DEMO / ANALYSIS</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
