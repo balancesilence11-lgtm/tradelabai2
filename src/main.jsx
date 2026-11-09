@@ -33,7 +33,7 @@ const navigation = [
 ];
 
 function CandlestickChart({ candles, loading, error, symbol }) {
-  const [show, setShow] = useState({ ema20: true, ema50: true, ema200: true, bb: true });
+  const [show, setShow] = useState({ ema20: true, ema50: true, ema200: true, bb: true, levels: true });
   const [visibleCount, setVisibleCount] = useState(100);
   const [pointer, setPointer] = useState(null);
   if (loading) return <div className="empty">Loading historical candles…</div>;
@@ -46,12 +46,14 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const closes = candles.map(c => Number(c.close));
   const ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);
   const bands = calcBollinger(closes, 20, 2);
+  const levels = detectSupportResistance(candles.slice(-180));
   const offset = candles.length - visible.length;
   const visibleBands = bands.slice(offset), visibleEma20 = ema20.slice(offset);
   const visibleEma50 = ema50.slice(offset), visibleEma200 = ema200.slice(offset);
   const overlayValues = [
     ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),
-    ...(show.ema200 ? visibleEma200 : []), ...(show.bb ? visibleBands.flatMap(b => b ? [b.upper,b.middle,b.lower] : []) : [])
+    ...(show.ema200 ? visibleEma200 : []), ...(show.bb ? visibleBands.flatMap(b => b ? [b.upper,b.middle,b.lower] : []) : []),
+    ...(show.levels ? levels.map(level => level.price) : [])
   ].filter(v => v != null && Number.isFinite(v));
   const highest = Math.max(...visible.map(c => Number(c.high)), ...overlayValues);
   const lowest = Math.min(...visible.map(c => Number(c.low)), ...overlayValues);
@@ -75,7 +77,7 @@ function CandlestickChart({ candles, loading, error, symbol }) {
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
       <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
         {control('ema20','EMA 20','#f472b6')}{control('ema50','EMA 50','#38bdf8')}
-        {control('ema200','EMA 200','#f59e0b')}{control('bb','Bollinger','#a78bfa')}
+        {control('ema200','EMA 200','#f59e0b')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:5}}>
         <button className="period-btn" onClick={() => {setVisibleCount(n => Math.max(20,n-20));setPointer(null);}} title="Zoom in">＋</button>
@@ -92,6 +94,7 @@ function CandlestickChart({ candles, loading, error, symbol }) {
         {show.ema200 && <path d={makePath(visibleEma200)} fill="none" stroke="#f59e0b" strokeWidth="2"/>}
         {show.ema50 && <path d={makePath(visibleEma50)} fill="none" stroke="#38bdf8" strokeWidth="1.8"/>}
         {show.ema20 && <path d={makePath(visibleEma20)} fill="none" stroke="#f472b6" strokeWidth="1.8"/>}
+        {show.levels && levels.map((level,i) => <g key={`level-${i}`}><line x1={left} x2={width-right} y1={y(level.price)} y2={y(level.price)} stroke={level.type==='Resistance'?'#fb7185':'#34d399'} strokeWidth="1.5" strokeDasharray="7 4" opacity="0.9"/><text x={width-right-4} y={y(level.price)-4} textAnchor="end" fill={level.type==='Resistance'?'#fb7185':'#34d399'} fontSize="11">{level.type} {level.price.toFixed(decimals)}</text></g>)}
         {visible.map((c,i) => { const x=xAt(i), bullish=Number(c.close)>=Number(c.open), color=bullish?'#13c99b':'#fb7185'; const bodyTop=Math.min(y(c.open),y(c.close)), bodyHeight=Math.max(1,Math.abs(y(c.open)-y(c.close))); return <g key={`${c.time}-${i}`}><line x1={x} x2={x} y1={y(c.high)} y2={y(c.low)} stroke={color} strokeWidth="1.5"/><rect x={x-candleWidth/2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} stroke={color}/></g>; })}
         {pointer && (() => {const c=visible[pointer.index], x=xAt(pointer.index), py=Math.max(top,Math.min(height-bottom,pointer.py));return <g><line x1={x} x2={x} y1={top} y2={height-bottom} stroke="#dbeafe" strokeDasharray="4 4" opacity="0.75"/><line x1={left} x2={width-right} y1={py} y2={py} stroke="#dbeafe" strokeDasharray="4 4" opacity="0.75"/><rect x={Math.min(width-215,Math.max(left,x-95))} y={top+5} width="205" height="43" rx="5" fill="#0b1728" stroke="#52647e"/><text x={Math.min(width-205,Math.max(left+10,x-85))} y={top+21} fill="#e2e8f0" fontSize="11">{c.time}</text><text x={Math.min(width-205,Math.max(left+10,x-85))} y={top+38} fill="#20d6a1" fontSize="11">O {Number(c.open).toFixed(decimals)}  H {Number(c.high).toFixed(decimals)}  L {Number(c.low).toFixed(decimals)}  C {Number(c.close).toFixed(decimals)}</text></g>;})()}
         <text x={left} y={height-8} fill="#8290a8" fontSize="11">{visible[0]?.time || ''}</text>
@@ -102,6 +105,31 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   </div>;
 }
 
+
+// Identify repeated swing highs/lows and group nearby prices into practical chart levels.
+function detectSupportResistance(candles) {
+  if (!candles || candles.length < 12) return [];
+  const pivots = [];
+  const leftRight = 3;
+  for (let i = leftRight; i < candles.length - leftRight; i++) {
+    const high = Number(candles[i].high), low = Number(candles[i].low);
+    const window = candles.slice(i-leftRight, i+leftRight+1);
+    if (window.every((c,j) => j===leftRight || high >= Number(c.high))) pivots.push({price:high,type:'Resistance'});
+    if (window.every((c,j) => j===leftRight || low <= Number(c.low))) pivots.push({price:low,type:'Support'});
+  }
+  const current = Number(candles[candles.length-1].close);
+  const tolerance = Math.max(Math.abs(current)*0.0012, 0.00001);
+  const groups = [];
+  pivots.forEach(p => {
+    let group = groups.find(g => g.type===p.type && Math.abs(g.price-p.price)<=tolerance);
+    if (!group) groups.push({price:p.price,type:p.type,touches:1,total:p.price});
+    else { group.touches++; group.total+=p.price; group.price=group.total/group.touches; }
+  });
+  return groups.filter(g=>g.touches>=2).map(g=>({...g,price:g.total/g.touches}))
+    .sort((a,b)=>b.touches-a.touches)
+    .filter(g=>g.type==='Support'?g.price<current:g.price>current)
+    .slice(0,3);
+}
 
 // ---------------- Technical indicator calculations ----------------
 const average = values => values.length ? values.reduce((a,b)=>a+b,0)/values.length : null;
