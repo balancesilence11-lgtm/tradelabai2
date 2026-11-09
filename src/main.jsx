@@ -257,6 +257,84 @@ function IndicatorSuite({candles,symbol}){
   </div>;
 }
 
+
+// Transparent rules-based analysis engine. It combines live-feed candles with
+// technical studies; the score is confluence, not a machine-learning probability.
+function AIAnalysisPanel({ candles, symbol, timeframe }) {
+  const analysis = useMemo(() => {
+    if (!candles || candles.length < 60) return { ready:false, reason:`At least 60 candles are required. Currently available: ${candles?.length || 0}.` };
+    const closes = candles.map(c => Number(c.close));
+    const ema20 = calcEMA(closes,20), ema50 = calcEMA(closes,50), ema200 = calcEMA(closes,200);
+    const rsi = calcRSI(closes,14), macd = calcMACD(closes), atr = calcATR(candles,14), adx = calcADX(candles,14);
+    const last = a => { for(let i=a.length-1;i>=0;i--) if(a[i] != null && Number.isFinite(a[i])) return a[i]; return null; };
+    const price = closes.at(-1), e20=last(ema20), e50=last(ema50), e200=last(ema200);
+    const rv=last(rsi), ml=last(macd.line), ms=last(macd.signal), av=last(adx), at=last(atr);
+    const swings = detectSwingPoints(candles.slice(-180));
+    const structure = detectMarketStructure(candles.slice(-180), swings);
+    const levels = detectSupportResistance(candles.slice(-180));
+    const recentEvent = structure.event && structure.event.index >= Math.max(0,180-30) ? structure.event : null;
+    const votes = [];
+    if(e20!=null && e50!=null) votes.push({name:'EMA 20 / 50 alignment',dir:e20>e50?1:-1,detail:e20>e50?'EMA 20 is above EMA 50':'EMA 20 is below EMA 50'});
+    if(e200!=null) votes.push({name:'EMA 200 trend filter',dir:price>e200?1:-1,detail:price>e200?'Price is above EMA 200':'Price is below EMA 200'});
+    if(ml!=null && ms!=null) votes.push({name:'MACD momentum',dir:ml>ms?1:ml<ms?-1:0,detail:ml>ms?'MACD is above its signal line':ml<ms?'MACD is below its signal line':'MACD and signal are equal'});
+    if(rv!=null) votes.push({name:'RSI momentum',dir:rv>52?1:rv<48?-1:0,detail:`RSI is ${rv.toFixed(1)}${rv>=70?' (overbought zone)':rv<=30?' (oversold zone)':''}`});
+    if(recentEvent) votes.push({name:'Market structure',dir:recentEvent.direction,detail:recentEvent.label+' detected recently'});
+    const score = votes.reduce((sum,v)=>sum+v.dir,0);
+    const maxVotes = votes.length;
+    const direction = score>=2?'BUY':score<=-2?'SELL':'WAIT';
+    const adxStrong = av!=null && av>=20;
+    const aligned = votes.filter(v=>v.dir===(direction==='BUY'?1:-1)).length;
+    const confluence = direction==='WAIT'?0:Math.round((aligned/Math.max(1,maxVotes))*100);
+    const nearestSupport = levels.filter(l=>l.type==='Support' && l.price<price).sort((a,b)=>b.price-a.price)[0];
+    const nearestResistance = levels.filter(l=>l.type==='Resistance' && l.price>price).sort((a,b)=>a.price-b.price)[0];
+    const canBuildSetup = direction!=='WAIT' && at!=null && at>0;
+    const stop = canBuildSetup ? price + (direction==='BUY'?-1:1)*1.5*at : null;
+    const target = canBuildSetup ? price + (direction==='BUY'?1:-1)*3*at : null;
+    const riskDistance = canBuildSetup ? Math.abs(price-stop) : null;
+    const rewardRisk = canBuildSetup ? Math.abs(target-price)/riskDistance : null;
+    let quality='Insufficient confluence';
+    if(direction!=='WAIT') quality=confluence>=80 && adxStrong?'Strong confluence':confluence>=60?'Moderate confluence':'Low confluence';
+    const notes=[];
+    if(e200==null) notes.push('EMA 200 is unavailable until at least 200 candles are loaded.');
+    if(av==null) notes.push('ADX is not yet available for trend-strength confirmation.');
+    else if(!adxStrong) notes.push('ADX is below 20: trend strength is weak or not established.');
+    if(recentEvent) notes.push(`${recentEvent.label} at ${recentEvent.level.toFixed(symbol==='USDJPY'?3: symbol==='BTCUSD'?1:5)}.`);
+    else notes.push('No recent BOS/CHoCH event confirmed by the current swing-point rule.');
+    if(direction==='WAIT') notes.push('Directional evidence is mixed; the engine is withholding a directional setup.');
+    return {ready:true,price,rv,av,at,e20,e50,e200,ml,ms,direction,score,maxVotes,confluence,quality,notes,votes,stop,target,rewardRisk,canBuildSetup,nearestSupport,nearestResistance,structure:recentEvent};
+  },[candles,symbol]);
+
+  const fmt = value => value==null || !Number.isFinite(value) ? '—' : value.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5);
+  if(!analysis.ready) return <div className="card"><div className="card-heading"><h3>TradeLab AI Analysis Engine</h3><span className="tag">RULES-BASED ENGINE</span></div><div className="empty">{analysis.reason} Select a supported market or timeframe with more history.</div></div>;
+  const bullish=analysis.direction==='BUY', bearish=analysis.direction==='SELL';
+  const accent=bullish?'#21d6a0':bearish?'#fb7185':'#fbbf24';
+  return <div className="card" style={{marginTop:18}}>
+    <div className="card-heading"><div><h3>TradeLab AI · Trade Analysis</h3><div className="muted">{symbol} · {timeframe} · {candles.length} candles · refreshed with market data</div></div><span className="tag">TRANSPARENT ANALYSIS</span></div>
+    <div className="stats-grid" style={{marginBottom:16}}>
+      <div className="card"><div className="stat-label">Directional assessment</div><div className="stat-value" style={{color:accent}}>{analysis.direction}</div><div className="muted">{analysis.quality}</div></div>
+      <div className="card"><div className="stat-label">Confluence score</div><div className="stat-value">{analysis.score>0?'+':''}{analysis.score} / {analysis.maxVotes}</div><div className="muted">{analysis.confluence}% aligned inputs · not win probability</div></div>
+      <div className="card"><div className="stat-label">Trend strength (ADX)</div><div className="stat-value">{analysis.av==null?'—':analysis.av.toFixed(1)}</div><div className="muted">{analysis.av==null?'Insufficient data':analysis.av>=25?'Strong trend':'Weak / developing trend'}</div></div>
+      <div className="card"><div className="stat-label">Volatility (ATR 14)</div><div className="stat-value" style={{fontSize:19}}>{fmt(analysis.at)}</div><div className="muted">Average true range</div></div>
+    </div>
+    <div className="dashboard-grid" style={{marginBottom:0}}>
+      <div><h4 style={{marginTop:0}}>Evidence and confluence</h4>
+        {analysis.votes.map((v,i)=><div className="signal" key={i}><span>{v.name}<small className="muted" style={{display:'block',marginTop:4}}>{v.detail}</small></span><strong style={{color:v.dir>0?'#21d6a0':v.dir<0?'#fb7185':'#fbbf24'}}>{v.dir>0?'Bullish':v.dir<0?'Bearish':'Neutral'}</strong></div>)}
+        {analysis.notes.map((n,i)=><p className="muted" key={i} style={{fontSize:11,lineHeight:1.6,margin:'8px 0'}}>• {n}</p>)}
+      </div>
+      <div><h4 style={{marginTop:0}}>Illustrative setup levels</h4>
+        <div className="signal"><span>Reference price</span><strong>{fmt(analysis.price)}</strong></div>
+        <div className="signal"><span>ATR-based stop level (1.5 × ATR)</span><strong style={{color:'#fb7185'}}>{analysis.canBuildSetup?fmt(analysis.stop):'Not available'}</strong></div>
+        <div className="signal"><span>ATR-based target (3 × ATR)</span><strong style={{color:'#21d6a0'}}>{analysis.canBuildSetup?fmt(analysis.target):'Not available'}</strong></div>
+        <div className="signal"><span>Illustrative reward:risk</span><strong>{analysis.canBuildSetup?`1 : ${analysis.rewardRisk.toFixed(2)}`:'—'}</strong></div>
+        <div className="signal"><span>Nearest support</span><strong>{analysis.nearestSupport?fmt(analysis.nearestSupport.price):'Not detected'}</strong></div>
+        <div className="signal"><span>Nearest resistance</span><strong>{analysis.nearestResistance?fmt(analysis.nearestResistance.price):'Not detected'}</strong></div>
+        <div className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:10}}>These are analytical reference levels only. They do not account for spread, slippage, commissions, contract size or broker-specific pip/point values.</div>
+      </div>
+    </div>
+    <div style={{marginTop:15,padding:12,borderRadius:8,background:'#101d30',border:'1px solid #26364e',fontSize:11,lineHeight:1.7,color:'#aab8cc'}}><strong style={{color:'#fbbf24'}}>Important:</strong> This is a transparent, rules-based technical confluence engine, not a trained predictive AI model. The confluence percentage is the share of directional inputs aligned; it is not a probability of profit. WAIT means evidence is mixed. Use demo testing and independent risk checks before considering any trade. No orders are placed by this analysis.</div>
+  </div>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -528,6 +606,10 @@ function App() {
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
+          </> : activePage === 'AI Assistant' ? <>
+            <div className="welcome"><div><h1>AI Trade Analysis Assistant</h1><div className="muted">Multi-factor technical assessment for the selected market. Analysis only; no automatic execution.</div></div><div className="demo-badge">● DEMO / ANALYSIS</div></div>
+            <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
+            <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
           </> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
