@@ -30,6 +30,7 @@ const navigation = [
   { name: 'Trading Terminal', icon: TrendingUp },
   { name: 'Smart Scanner', icon: SlidersHorizontal },
   { name: 'Risk Centre', icon: ShieldCheck },
+  { name: 'Portfolio Risk', icon: ShieldCheck },
   { name: 'Trade Journal', icon: Clock3 },
   { name: 'Automation Centre', icon: Radio },
   { name: 'Account Overview', icon: Wallet },
@@ -1180,6 +1181,111 @@ function SettingsPage() {
   </>;
 }
 
+
+function PortfolioRiskPage() {
+  const [account, setAccount] = useState(() => {
+    try { return { balance: 10000, equity: 10000, dailyLoss: 0, peakEquity: 10000, openRisk: 0, ...JSON.parse(localStorage.getItem('tradelab_portfolio_risk_v1') || '{}') }; }
+    catch { return { balance: 10000, equity: 10000, dailyLoss: 0, peakEquity: 10000, openRisk: 0 }; }
+  });
+  const [riskPct, setRiskPct] = useState(1);
+  const [stopPips, setStopPips] = useState(30);
+  const [pipValue, setPipValue] = useState(10);
+  const [dailyLimitPct, setDailyLimitPct] = useState(3);
+  const [drawdownLimitPct, setDrawdownLimitPct] = useState(10);
+  const [positions, setPositions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('tradelab_risk_positions_v1') || '[]'); } catch { return []; }
+  });
+  const [symbol, setSymbol] = useState('EURUSD');
+  const [direction, setDirection] = useState('BUY');
+  const [volume, setVolume] = useState('0.10');
+  const [entry, setEntry] = useState('');
+  const [stop, setStop] = useState('');
+  const [target, setTarget] = useState('');
+  const [notice, setNotice] = useState('');
+  useEffect(() => { localStorage.setItem('tradelab_portfolio_risk_v1', JSON.stringify(account)); }, [account]);
+  useEffect(() => { localStorage.setItem('tradelab_risk_positions_v1', JSON.stringify(positions)); }, [positions]);
+
+  const balance = Math.max(0, Number(account.balance) || 0);
+  const equity = Math.max(0, Number(account.equity) || 0);
+  const riskCash = balance * riskPct / 100;
+  const calculatedLots = stopPips > 0 && pipValue > 0 ? riskCash / (stopPips * pipValue) : 0;
+  const dailyLossCash = Math.max(0, Number(account.dailyLoss) || 0);
+  const dailyLossPct = balance ? dailyLossCash / balance * 100 : 0;
+  const drawdownPct = Number(account.peakEquity) > 0 ? Math.max(0, (Number(account.peakEquity) - equity) / Number(account.peakEquity) * 100) : 0;
+  const openRiskCash = positions.reduce((sum, p) => sum + (Number(p.risk) || 0), 0) + (Number(account.openRisk) || 0);
+  const dailyBreached = dailyLossPct >= dailyLimitPct;
+  const drawdownBreached = drawdownPct >= drawdownLimitPct;
+  const totalRiskPct = balance ? openRiskCash / balance * 100 : 0;
+  const addPosition = () => {
+    const e = Number(entry), sl = Number(stop), tp = Number(target), lots = Number(volume);
+    if (!(e > 0 && sl > 0 && tp > 0 && lots > 0) || e === sl) { setNotice('Enter valid entry, stop-loss, take-profit and volume values.'); return; }
+    const reward = Math.abs(tp - e), riskDistance = Math.abs(e - sl);
+    if ((direction === 'BUY' && (sl >= e || tp <= e)) || (direction === 'SELL' && (sl <= e || tp >= e))) { setNotice('Check direction: stop-loss and take-profit are on the wrong side of entry.'); return; }
+    const risk = riskDistance * lots * 100000;
+    const rewardCash = reward * lots * 100000;
+    const item = { id: Date.now(), symbol, direction, entry: e, stop: sl, target: tp, volume: lots, risk, reward: rewardCash, rr: rewardCash / risk };
+    setPositions(prev => [...prev, item]); setNotice('Demo position added to portfolio risk monitor.');
+    setEntry(''); setStop(''); setTarget('');
+  };
+  const card = { background:'#111c2d', border:'1px solid #26364d', borderRadius:14, padding:18 };
+  const field = { width:'100%', background:'#0b1422', color:'#e8eef8', border:'1px solid #34445b', borderRadius:8, padding:'10px 11px', marginTop:6 };
+  const label = { display:'block', color:'#9aabc0', fontSize:12, marginBottom:12 };
+  const metric = (title, value, note, bad=false) => <div style={card}><div style={{color:'#9aabc0',fontSize:12}}>{title}</div><div style={{fontSize:25,fontWeight:750,margin:'9px 0',color:bad?'#ff7373':'#e8eef8'}}>{value}</div><div style={{fontSize:11,color:'#8b9bb0'}}>{note}</div></div>;
+  return <div>
+    <div className="welcome"><div><h1>Portfolio Risk Management</h1><div className="muted">Position sizing, account limits, drawdown and combined demo exposure.</div></div><div className="demo-badge">● DEMO RISK ENGINE</div></div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:13,marginBottom:18}}>
+      {metric('Account balance',`$${balance.toFixed(2)}`,'Editable demo account')}
+      {metric('Account equity',`$${equity.toFixed(2)}`,'Current simulated equity')}
+      {metric('Daily loss',`${dailyLossPct.toFixed(2)}%`,`$${dailyLossCash.toFixed(2)} of ${dailyLimitPct}% limit`,dailyBreached)}
+      {metric('Maximum drawdown',`${drawdownPct.toFixed(2)}%`,`Peak equity $${Number(account.peakEquity||0).toFixed(2)}`,drawdownBreached)}
+      {metric('Open portfolio risk',`$${openRiskCash.toFixed(2)}`,`${totalRiskPct.toFixed(2)}% of balance`)}
+    </div>
+    {(dailyBreached || drawdownBreached) && <div style={{...card,borderColor:'#b94b4b',color:'#ff8585',marginBottom:16}}>Risk limit breached. Review exposure and stop opening new demo positions until the account is within limits.</div>}
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))',gap:16}}>
+      <div style={card}>
+        <h3 style={{marginTop:0}}>Account & risk limits</h3>
+        <label style={label}>Account balance ($)<input style={field} type="number" min="0" value={account.balance} onChange={e=>setAccount(a=>({...a,balance:e.target.value}))}/></label>
+        <label style={label}>Account equity ($)<input style={field} type="number" min="0" value={account.equity} onChange={e=>setAccount(a=>({...a,equity:e.target.value}))}/></label>
+        <label style={label}>Peak equity ($)<input style={field} type="number" min="0" value={account.peakEquity} onChange={e=>setAccount(a=>({...a,peakEquity:e.target.value}))}/></label>
+        <label style={label}>Today's realized loss ($)<input style={field} type="number" min="0" value={account.dailyLoss} onChange={e=>setAccount(a=>({...a,dailyLoss:e.target.value}))}/></label>
+        <label style={label}>Daily loss limit (%)<input style={field} type="number" min="0.1" max="100" step="0.1" value={dailyLimitPct} onChange={e=>setDailyLimitPct(Math.max(0.1,Number(e.target.value)||0.1))}/></label>
+        <label style={label}>Maximum drawdown limit (%)<input style={field} type="number" min="0.1" max="100" step="0.1" value={drawdownLimitPct} onChange={e=>setDrawdownLimitPct(Math.max(0.1,Number(e.target.value)||0.1))}/></label>
+      </div>
+      <div style={card}>
+        <h3 style={{marginTop:0}}>Position sizing calculator</h3>
+        <label style={label}>Risk per trade: {riskPct.toFixed(2)}%<input style={field} type="range" min="0.25" max="3" step="0.25" value={riskPct} onChange={e=>setRiskPct(Number(e.target.value))}/></label>
+        <label style={label}>Stop-loss distance (pips)<input style={field} type="number" min="0.1" step="0.1" value={stopPips} onChange={e=>setStopPips(Number(e.target.value))}/></label>
+        <label style={label}>Pip value per standard lot ($)<input style={field} type="number" min="0.01" step="0.01" value={pipValue} onChange={e=>setPipValue(Number(e.target.value))}/></label>
+        <div style={{background:'#0b1422',padding:14,borderRadius:10,marginTop:8}}>
+          <div style={{color:'#9aabc0',fontSize:12}}>Maximum planned loss</div><div style={{fontSize:24,fontWeight:750,margin:'5px 0'}}>${riskCash.toFixed(2)}</div>
+          <div style={{color:'#20d6a1',fontSize:18,fontWeight:700}}>Suggested volume: {calculatedLots.toFixed(2)} lots</div>
+          <small style={{color:'#8798ad'}}>Formula: risk cash ÷ (stop pips × pip value per lot). Confirm pip value for the instrument and account currency with your broker.</small>
+        </div>
+      </div>
+      <div style={card}>
+        <h3 style={{marginTop:0}}>Add demo position exposure</h3>
+        <label style={label}>Instrument<select style={field} value={symbol} onChange={e=>setSymbol(e.target.value)}>{['EURUSD','GBPUSD','USDJPY','XAUUSD','US30','BTCUSD'].map(x=><option key={x}>{x}</option>)}</select></label>
+        <label style={label}>Direction<select style={field} value={direction} onChange={e=>setDirection(e.target.value)}><option>BUY</option><option>SELL</option></select></label>
+        <label style={label}>Entry price<input style={field} value={entry} onChange={e=>setEntry(e.target.value)} type="number" step="any"/></label>
+        <label style={label}>Stop-loss price<input style={field} value={stop} onChange={e=>setStop(e.target.value)} type="number" step="any"/></label>
+        <label style={label}>Take-profit price<input style={field} value={target} onChange={e=>setTarget(e.target.value)} type="number" step="any"/></label>
+        <label style={label}>Volume (lots/contracts)<input style={field} value={volume} onChange={e=>setVolume(e.target.value)} type="number" min="0.01" step="0.01"/></label>
+        <button className="execute-btn" onClick={addPosition}>Add demo exposure</button>
+        {notice && <p className="muted">{notice}</p>}
+        <small style={{color:'#8798ad'}}>Illustrative exposure estimate only. The simple contract multiplier is not suitable for every CFD, index, metal or crypto contract.</small>
+      </div>
+    </div>
+    <div style={{...card,marginTop:16}}>
+      <div className="card-heading"><h3>Open portfolio positions</h3><button className="period-btn" onClick={()=>{setPositions([]);setNotice('Demo exposure list cleared.');}}>Clear demo list</button></div>
+      <div className="table-wrap"><table><thead><tr><th>Symbol</th><th>Side</th><th>Volume</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk est.</th><th>Reward est.</th><th>R:R</th><th></th></tr></thead><tbody>
+      {positions.length===0?<tr><td colSpan="10" className="empty">No demo positions added yet.</td></tr>:positions.map(p=><tr key={p.id}><td>{p.symbol}</td><td>{p.direction}</td><td>{p.volume}</td><td>{p.entry}</td><td>{p.stop}</td><td>{p.target}</td><td>${p.risk.toFixed(2)}</td><td>${p.reward.toFixed(2)}</td><td>{p.rr.toFixed(2)}R</td><td><button className="period-btn" onClick={()=>setPositions(prev=>prev.filter(x=>x.id!==p.id))}>Remove</button></td></tr>)}
+      </tbody></table></div>
+    </div>
+    <p className="muted" style={{marginTop:12}}>Risk calculations are local demo estimates, not broker margin calculations or financial advice. They do not block orders in the Trading Terminal yet. All account values and positions are stored in this browser only.</p>
+  </div>;
+}
+
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -1459,7 +1565,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
