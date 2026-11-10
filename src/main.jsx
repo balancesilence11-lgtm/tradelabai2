@@ -696,11 +696,7 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
 
   useEffect(() => { try { localStorage.setItem(storageKey, JSON.stringify(entries)); } catch (e) { console.warn('Journal storage unavailable', e); } }, [entries]);
   useEffect(() => { setForm(old => ({ ...old, symbol: defaultSymbol, entry: old.symbol !== defaultSymbol || !old.entry || old.entry === '—' ? (marketPrice && marketPrice !== '—' ? marketPrice : '') : old.entry })); }, [defaultSymbol, marketPrice]);
-useEffect(() => { localStorage.setItem('tradelab_risk_pct_v1', String(riskPct)); }, [riskPct]);
-useEffect(() => { localStorage.setItem('tradelab_stop_pips_v1', String(stopPips)); }, [stopPips]);
-useEffect(() => { localStorage.setItem('tradelab_pip_value_v1', String(pipValue)); }, [pipValue]);
-useEffect(() => { localStorage.setItem('tradelab_daily_limit_v1', String(dailyLimitPct)); }, [dailyLimitPct]);
-useEffect(() => { localStorage.setItem('tradelab_drawdown_limit_v1', String(drawdownLimitPct)); }, [drawdownLimitPct]);
+
   const closed = entries.filter(t => t.status === 'CLOSED');
   const wins = closed.filter(t => t.pnl > 0), losses = closed.filter(t => t.pnl < 0);
   const net = closed.reduce((s,t) => s + Number(t.pnl || 0), 0);
