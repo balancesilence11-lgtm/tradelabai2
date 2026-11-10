@@ -1295,7 +1295,450 @@ const [drawdownLimitPct, setDrawdownLimitPct] = useState(() => Number(localStora
   </div>;
 }
 
+function AdvancedAnalyticsPage() {
+  const [entries, setEntries] = useState(() => {
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem('tradelab_trade_journal_v1') || '[]'
+      );
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
 
+  const [period, setPeriod] = useState('ALL');
+
+  useEffect(() => {
+    const refresh = () => {
+      try {
+        const saved = JSON.parse(
+          localStorage.getItem('tradelab_trade_journal_v1') || '[]'
+        );
+        setEntries(Array.isArray(saved) ? saved : []);
+      } catch {}
+    };
+
+    window.addEventListener('storage', refresh);
+    const timer = window.setInterval(refresh, 2000);
+
+    return () => {
+      window.removeEventListener('storage', refresh);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const analytics = useMemo(() => {
+    const closed = entries.filter(t =>
+      String(t.status || '').toUpperCase().includes('CLOSED')
+    );
+
+    const open = entries.filter(t => {
+      const status = String(t.status || '').toUpperCase();
+      return status.includes('OPEN') || status === 'ACTIVE';
+    });
+
+    const filtered = period === 'ALL'
+      ? closed
+      : closed.filter(t => {
+          const date = new Date(t.closedAt || t.time || t.date);
+          const days = Number(period);
+          return !Number.isNaN(date.getTime()) &&
+            (Date.now() - date.getTime()) <= days * 86400000;
+        });
+
+    const wins = filtered.filter(t => Number(t.pnl) > 0);
+    const losses = filtered.filter(t => Number(t.pnl) < 0);
+
+    const netProfit = filtered.reduce(
+      (sum, t) => sum + (Number(t.pnl) || 0), 0
+    );
+
+    const grossProfit = wins.reduce(
+      (sum, t) => sum + Number(t.pnl), 0
+    );
+
+    const grossLoss = Math.abs(losses.reduce(
+      (sum, t) => sum + Number(t.pnl), 0
+    ));
+
+    const winRate = filtered.length
+      ? wins.length / filtered.length * 100
+      : 0;
+
+    const profitFactor = grossLoss
+      ? grossProfit / grossLoss
+      : grossProfit > 0 ? Infinity : 0;
+
+    const currencyMap = {};
+
+    open.forEach(t => {
+      const symbol = String(t.symbol || '')
+        .replace('/', '')
+        .toUpperCase();
+
+      if (symbol.length < 6) return;
+
+      const base = symbol.slice(0, 3);
+      const quote = symbol.slice(3, 6);
+      const direction = String(t.direction || 'BUY').toUpperCase();
+
+      const entry = Number(t.entry) || 0;
+
+      let units = Number(t.units || t.volume || 0);
+
+      if (!units && Number(t.lot) > 0) {
+        units = Number(t.lot) * 100000;
+      }
+
+      if (!units) return;
+
+      const sign = direction === 'SELL' ? -1 : 1;
+
+      currencyMap[base] = (currencyMap[base] || 0) + sign * units;
+      currencyMap[quote] = (currencyMap[quote] || 0) - sign * units * entry;
+    });
+
+    const exposures = Object.entries(currencyMap)
+      .map(([currency, amount]) => ({
+        currency,
+        amount,
+        gross: Math.abs(amount)
+      }))
+      .sort((a, b) => b.gross - a.gross);
+
+    const totalExposure = exposures.reduce(
+      (sum, item) => sum + item.gross, 0
+    );
+
+    const concentration = exposures.map(item => ({
+      ...item,
+      percentage: totalExposure
+        ? item.gross / totalExposure * 100
+        : 0
+    }));
+
+    const currencyPairs = [];
+
+    for (let i = 0; i < open.length; i++) {
+      for (let j = i + 1; j < open.length; j++) {
+        const first = String(open[i].symbol || '').replace('/', '');
+        const second = String(open[j].symbol || '').replace('/', '');
+
+        const shared = [...new Set([
+          first.slice(0, 3),
+          first.slice(3, 6)
+        ].filter(c => c && second.includes(c)))];
+
+        if (shared.length) {
+          currencyPairs.push({
+            first: open[i].symbol,
+            second: open[j].symbol,
+            shared: shared.join(', ')
+          });
+        }
+      }
+    }
+
+    return {
+      open,
+      closed: filtered,
+      wins,
+      losses,
+      netProfit,
+      grossProfit,
+      grossLoss,
+      winRate,
+      profitFactor,
+      exposures: concentration,
+      totalExposure,
+      currencyPairs
+    };
+  }, [entries, period]);
+
+  const money = value =>
+    `${value < 0 ? '-' : ''}$${Math.abs(value).toFixed(2)}`;
+
+  const cardStyle = {
+    background: '#121e31',
+    border: '1px solid #26364e',
+    borderRadius: 11,
+    padding: 18,
+    minWidth: 0
+  };
+
+  return <>
+    <div className="welcome">
+      <div>
+        <h1>Advanced Trading Analytics</h1>
+        <div className="muted">
+          Portfolio exposure, currency concentration and performance analysis.
+        </div>
+      </div>
+      <div className="demo-badge">● DEMO ANALYTICS</div>
+    </div>
+
+    <div className="stats-grid">
+      <div className="card">
+        <div className="stat-label">Open Positions</div>
+        <div className="stat-value">{analytics.open.length}</div>
+        <div className="muted">From Trade Journal</div>
+      </div>
+
+      <div className="card">
+        <div className="stat-label">Closed Trades</div>
+        <div className="stat-value">{analytics.closed.length}</div>
+        <div className="muted">Selected period</div>
+      </div>
+
+      <div className="card">
+        <div className="stat-label">Win Rate</div>
+        <div className="stat-value">{analytics.winRate.toFixed(1)}%</div>
+        <div className="muted">Winning closed trades</div>
+      </div>
+
+      <div className="card">
+        <div className="stat-label">Net Profit / Loss</div>
+        <div className={`stat-value ${analytics.netProfit >= 0 ? 'positive' : 'negative'}`}>
+          {money(analytics.netProfit)}
+        </div>
+        <div className="muted">Recorded journal results</div>
+      </div>
+    </div>
+
+    <div className="dashboard-grid">
+      <div className="card">
+        <div className="card-heading">
+          <h3>Portfolio Performance</h3>
+          <span className="tag">JOURNAL DATA</span>
+        </div>
+
+        <div className="field">
+          <label>Performance period</label>
+          <select value={period} onChange={e => setPeriod(e.target.value)}>
+            <option value="ALL">All Time</option>
+            <option value="7">Last 7 Days</option>
+            <option value="30">Last 30 Days</option>
+            <option value="90">Last 90 Days</option>
+          </select>
+        </div>
+
+        <div className="signal">
+          <span>Gross Profit</span>
+          <strong className="positive">{money(analytics.grossProfit)}</strong>
+        </div>
+
+        <div className="signal">
+          <span>Gross Loss</span>
+          <strong className="negative">{money(analytics.grossLoss)}</strong>
+        </div>
+
+        <div className="signal">
+          <span>Profit Factor</span>
+          <strong>
+            {Number.isFinite(analytics.profitFactor)
+              ? analytics.profitFactor.toFixed(2)
+              : '∞'}
+          </strong>
+        </div>
+
+        <div className="signal">
+          <span>Winning Trades</span>
+          <strong>{analytics.wins.length}</strong>
+        </div>
+
+        <div className="signal">
+          <span>Losing Trades</span>
+          <strong>{analytics.losses.length}</strong>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-heading">
+          <h3>Portfolio Exposure</h3>
+          <span className="tag">OPEN TRADES</span>
+        </div>
+
+        <div className="signal">
+          <span>Open positions</span>
+          <strong>{analytics.open.length}</strong>
+        </div>
+
+        <div className="signal">
+          <span>Currency exposure entries</span>
+          <strong>{analytics.exposures.length}</strong>
+        </div>
+
+        <div className="signal">
+          <span>Gross currency exposure</span>
+          <strong>{money(analytics.totalExposure)}</strong>
+        </div>
+
+        <p className="muted" style={{lineHeight:1.7}}>
+          Exposure is estimated from recorded trade units and entry prices.
+          It is not broker-verified account exposure or margin.
+        </p>
+      </div>
+    </div>
+
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading">
+        <h3>Currency Exposure Analysis</h3>
+        <span className="tag">ESTIMATED</span>
+      </div>
+
+      {analytics.exposures.length === 0
+        ? <div className="empty">
+            No open journal positions with usable units and entry prices.
+          </div>
+        : <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Currency / Asset</th>
+                  <th>Net Exposure</th>
+                  <th>Gross Exposure</th>
+                  <th>Concentration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics.exposures.map(item => (
+                  <tr key={item.currency}>
+                    <td>{item.currency}</td>
+                    <td className={item.amount >= 0 ? 'positive' : 'negative'}>
+                      {money(item.amount)}
+                    </td>
+                    <td>{money(item.gross)}</td>
+                    <td>{item.percentage.toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+      }
+    </div>
+
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading">
+        <h3>Risk Concentration Warnings</h3>
+        <span className="tag">PORTFOLIO REVIEW</span>
+      </div>
+
+      {analytics.open.length === 0
+        ? <div className="empty">
+            No open positions available for concentration analysis.
+          </div>
+        : <>
+            {analytics.exposures
+              .filter(item => item.percentage >= 40)
+              .map(item => (
+                <div className="signal" key={item.currency}>
+                  <span>{item.currency} concentration</span>
+                  <strong className="negative">
+                    Elevated · {item.percentage.toFixed(1)}%
+                  </strong>
+                </div>
+              ))
+            }
+
+            {analytics.exposures.every(item => item.percentage < 40) &&
+              <div className="signal">
+                <span>Currency concentration</span>
+                <strong className="positive">No elevated concentration detected</strong>
+              </div>
+            }
+          </>
+      }
+    </div>
+
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading">
+        <h3>Shared-Currency Overlap</h3>
+        <span className="tag">CORRELATION WATCH</span>
+      </div>
+
+      {analytics.currencyPairs.length === 0
+        ? <div className="empty">
+            No shared-currency overlap detected between open positions.
+          </div>
+        : <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Position 1</th>
+                  <th>Position 2</th>
+                  <th>Shared Currency</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics.currencyPairs.map((item, index) => (
+                  <tr key={index}>
+                    <td>{item.first}</td>
+                    <td>{item.second}</td>
+                    <td>{item.shared}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+      }
+
+      <p className="muted" style={{lineHeight:1.7}}>
+        Shared-currency overlap is a concentration indicator, not a
+        statistical correlation coefficient. Statistical correlation
+        requires synchronized historical returns for multiple markets.
+      </p>
+    </div>
+
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading">
+        <h3>Open Position Summary</h3>
+        <span className="muted">{analytics.open.length} positions</span>
+      </div>
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Instrument</th>
+              <th>Direction</th>
+              <th>Entry</th>
+              <th>Units</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {analytics.open.length === 0
+              ? <tr>
+                  <td colSpan="5" className="empty">
+                    No open journal trades recorded.
+                  </td>
+                </tr>
+              : analytics.open.map((trade, index) => (
+                  <tr key={trade.id || index}>
+                    <td>{trade.symbol}</td>
+                    <td>{trade.direction}</td>
+                    <td>{trade.entry || '—'}</td>
+                    <td>{trade.units || trade.volume || trade.lot || '—'}</td>
+                    <td><span className="tag">{trade.status}</span></td>
+                  </tr>
+                ))
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}>
+      <p className="muted" style={{lineHeight:1.7,margin:0}}>
+        Analytics are based on locally recorded Trade Journal information.
+        Missing trade data can affect the calculations. These tools are
+        analytical estimates and do not execute trades or replace broker
+        risk controls.
+      </p>
+    </div>
+  </>;
+}
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
