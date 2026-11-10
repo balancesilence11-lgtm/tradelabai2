@@ -696,7 +696,11 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
 
   useEffect(() => { try { localStorage.setItem(storageKey, JSON.stringify(entries)); } catch (e) { console.warn('Journal storage unavailable', e); } }, [entries]);
   useEffect(() => { setForm(old => ({ ...old, symbol: defaultSymbol, entry: old.symbol !== defaultSymbol || !old.entry || old.entry === '—' ? (marketPrice && marketPrice !== '—' ? marketPrice : '') : old.entry })); }, [defaultSymbol, marketPrice]);
-
+useEffect(() => { localStorage.setItem('tradelab_risk_pct_v1', String(riskPct)); }, [riskPct]);
+useEffect(() => { localStorage.setItem('tradelab_stop_pips_v1', String(stopPips)); }, [stopPips]);
+useEffect(() => { localStorage.setItem('tradelab_pip_value_v1', String(pipValue)); }, [pipValue]);
+useEffect(() => { localStorage.setItem('tradelab_daily_limit_v1', String(dailyLimitPct)); }, [dailyLimitPct]);
+useEffect(() => { localStorage.setItem('tradelab_drawdown_limit_v1', String(drawdownLimitPct)); }, [drawdownLimitPct]);
   const closed = entries.filter(t => t.status === 'CLOSED');
   const wins = closed.filter(t => t.pnl > 0), losses = closed.filter(t => t.pnl < 0);
   const net = closed.reduce((s,t) => s + Number(t.pnl || 0), 0);
@@ -1187,11 +1191,11 @@ function PortfolioRiskPage() {
     try { return { balance: 10000, equity: 10000, dailyLoss: 0, peakEquity: 10000, openRisk: 0, ...JSON.parse(localStorage.getItem('tradelab_portfolio_risk_v1') || '{}') }; }
     catch { return { balance: 10000, equity: 10000, dailyLoss: 0, peakEquity: 10000, openRisk: 0 }; }
   });
-  const [riskPct, setRiskPct] = useState(1);
-  const [stopPips, setStopPips] = useState(30);
-  const [pipValue, setPipValue] = useState(10);
-  const [dailyLimitPct, setDailyLimitPct] = useState(3);
-  const [drawdownLimitPct, setDrawdownLimitPct] = useState(10);
+ const [riskPct, setRiskPct] = useState(() => Number(localStorage.getItem('tradelab_risk_pct_v1') ?? 1));
+const [stopPips, setStopPips] = useState(() => Number(localStorage.getItem('tradelab_stop_pips_v1') ?? 30));
+const [pipValue, setPipValue] = useState(() => Number(localStorage.getItem('tradelab_pip_value_v1') ?? 10));
+const [dailyLimitPct, setDailyLimitPct] = useState(() => Number(localStorage.getItem('tradelab_daily_limit_v1') ?? 3));
+const [drawdownLimitPct, setDrawdownLimitPct] = useState(() => Number(localStorage.getItem('tradelab_drawdown_limit_v1') ?? 10));
   const [positions, setPositions] = useState(() => {
     try { return JSON.parse(localStorage.getItem('tradelab_risk_positions_v1') || '[]'); } catch { return []; }
   });
