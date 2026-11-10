@@ -338,49 +338,78 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
 }
 
 function AIAssistant({ candles, symbol, timeframe }) {
-  const [question, setQuestion] = useState('What is the current market trend?');
+  const [question, setQuestion] = useState('Give me a full analysis of the current market.');
   const [answer, setAnswer] = useState('');
   const [history, setHistory] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const fmt = value => Number.isFinite(value) ? value.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5) : '—';
+
   const ask = () => {
-    const closes = candles.map(c => Number(c.close));
-    if (candles.length < 60) {
-      const reply = `I need at least 60 historical candles to assess ${symbol}. The chart currently has ${candles.length}. Please wait for market data or select a supported instrument.`;
-      setAnswer(reply); setHistory(h => [{q:question,a:reply}, ...h]); return;
-    }
-    const e20 = calcEMA(closes,20).at(-1), e50 = calcEMA(closes,50).at(-1);
-    const rsi = calcRSI(closes,14).at(-1), macd = calcMACD(closes), adx = calcADX(candles,14).at(-1);
-    const atr = calcATR(candles,14).at(-1), price = closes.at(-1);
-    const structure = detectMarketStructure(candles.slice(-180), detectSwingPoints(candles.slice(-180))).event;
-    const trend = e20 > e50 ? 'bullish' : e20 < e50 ? 'bearish' : 'mixed';
-    const macdHist = macd.histogram.at(-1);
-    const momentum = rsi >= 55 ? 'positive' : rsi <= 45 ? 'negative' : 'neutral';
-    const prompt = question.toLowerCase();
-    let reply;
-    if (prompt.includes('risk') || prompt.includes('stop') || prompt.includes('position')) {
-      reply = `Risk review for ${symbol}: current reference price ${price}. ATR(14) is ${Number.isFinite(atr)?atr.toFixed(symbol==='USDJPY'?3:5):'not available'}. ATR can help estimate volatility, but position size must be calculated from your account equity, risk percentage, contract specification and stop distance. Do not use a fixed lot size across different instruments.`;
-    } else if (prompt.includes('rsi') || prompt.includes('momentum')) {
-      reply = `RSI(14) is ${Number.isFinite(rsi)?rsi.toFixed(1):'not available'} on ${timeframe}. Momentum is ${momentum}. Readings above 70 may indicate overbought conditions and below 30 may indicate oversold conditions; neither is an automatic entry signal.`;
-    } else if (prompt.includes('strategy') || prompt.includes('backtest')) {
-      reply = `For ${symbol}, start by testing a simple EMA 20/50 trend-following rule in Strategy Lab. Include transaction costs, inspect drawdown and trade count, and compare an out-of-sample segment. A profitable historical result is not proof of future performance.`;
-    } else {
-      reply = `${symbol} (${timeframe}) technical snapshot: price ${price}; EMA 20/50 trend is ${trend}; RSI(14) ${Number.isFinite(rsi)?rsi.toFixed(1):'—'}; MACD histogram ${Number.isFinite(macdHist)?macdHist.toPrecision(4):'—'}; ADX(14) ${Number.isFinite(adx)?adx.toFixed(1):'—'}. ${structure ? `Latest detected structure event: ${structure.label}.` : 'No recent BOS/CHoCH event was confirmed.'} Overall, the evidence is ${trend==='mixed'?'not aligned':trend}; wait for confirmation and check higher timeframes, spread and news before considering a trade.`;
-    }
-    setAnswer(reply); setHistory(h => [{q:question,a:reply}, ...h]);
+    if (!question.trim() || busy) return;
+    setBusy(true);
+    try {
+      if (!Array.isArray(candles) || candles.length < 60) {
+        const reply = `Not enough market history yet. ${symbol} currently has ${candles?.length || 0} candles on ${timeframe}; at least 60 are required. Wait for the chart to load or choose a supported instrument.`;
+        setAnswer(reply); setHistory(h => [{q:question,a:reply}, ...h].slice(0,6)); return;
+      }
+      const closes = candles.map(c => Number(c.close));
+      const price = closes.at(-1);
+      const e20 = calcEMA(closes,20).at(-1), e50 = calcEMA(closes,50).at(-1), e200 = calcEMA(closes,200).at(-1);
+      const rsi = calcRSI(closes,14).at(-1);
+      const macd = calcMACD(closes), macdHist = macd.histogram.at(-1), previousHist = macd.histogram.at(-2);
+      const adx = calcADX(candles,14).at(-1), atr = calcATR(candles,14).at(-1);
+      const bands = calcBollinger(closes,20,2).at(-1);
+      const stochastic = calcStochastic(candles).k.at(-1);
+      const swings = detectSwingPoints(candles.slice(-180));
+      const structure = detectMarketStructure(candles.slice(-180), swings).event;
+      const sr = detectSupportResistance(candles.slice(-180));
+      const trend = e20 > e50 ? 'BULLISH' : e20 < e50 ? 'BEARISH' : 'MIXED';
+      const longTrend = e200 == null ? 'not available (need 200 candles)' : price > e200 ? 'above EMA 200' : 'below EMA 200';
+      const momentum = rsi >= 55 ? 'positive' : rsi <= 45 ? 'negative' : 'neutral';
+      const macdState = macdHist > 0 ? 'positive' : macdHist < 0 ? 'negative' : 'neutral';
+      const prompt = question.toLowerCase();
+      let reply;
+      const overview = `MARKET SNAPSHOT — ${symbol} · ${timeframe}\nReference price: ${fmt(price)}\nEMA 20: ${fmt(e20)} | EMA 50: ${fmt(e50)} | EMA 200: ${fmt(e200)}\nTrend: ${trend} (${longTrend})\nRSI(14): ${fmt(rsi)} — ${momentum} momentum\nMACD histogram: ${Number.isFinite(macdHist)?macdHist.toPrecision(5):'—'} — ${macdState}${Number.isFinite(previousHist)&&Number.isFinite(macdHist)?(macdHist>previousHist?' and increasing':' and decreasing'):''}\nADX(14): ${fmt(adx)} — ${Number.isFinite(adx)?(adx>=25?'trend strength is established':'trend strength is weak/developing'):'not available'}\nATR(14): ${fmt(atr)} — recent average range\nStochastic %K: ${fmt(stochastic)}\nMarket structure: ${structure?.label || 'No confirmed recent BOS/CHoCH event'}\n`;
+      if (prompt.includes('risk') || prompt.includes('stop') || prompt.includes('position') || prompt.includes('lot')) {
+        reply = `${overview}\nRISK GUIDANCE\nATR(14) is ${fmt(atr)}. Consider using volatility and a technically meaningful invalidation level to plan a stop. Position size should be calculated from account equity, chosen risk percentage, stop distance and the broker's contract specification. Do not use the same lot size across different instruments. This assistant does not know your broker's contract size or account balance.`;
+      } else if (prompt.includes('rsi') || prompt.includes('momentum') || prompt.includes('overbought') || prompt.includes('oversold')) {
+        reply = `${overview}\nRSI INTERPRETATION\nRSI above 70 is commonly described as overbought and below 30 as oversold. These readings are not automatic reversal signals. In a strong trend, RSI can remain elevated or depressed. Look for price structure and MACD confirmation before acting.`;
+      } else if (prompt.includes('macd')) {
+        reply = `${overview}\nMACD INTERPRETATION\nA positive histogram means the MACD line is above its signal line; a negative histogram means it is below. A rising histogram suggests improving momentum relative to the prior candle, but it is not a standalone entry signal. Confirm with trend and market structure.`;
+      } else if (prompt.includes('support') || prompt.includes('resistance') || prompt.includes('levels')) {
+        const support = sr.filter(level=>level.type==='Support').sort((a,b)=>b.price-a.price)[0]?.price;
+        const resistance = sr.filter(level=>level.type==='Resistance').sort((a,b)=>a.price-b.price)[0]?.price;
+        reply = `${overview}\nKEY PRICE AREAS\nNearest detected support: ${fmt(Number(support))}\nNearest detected resistance: ${fmt(Number(resistance))}\nThese are approximate levels derived from recent swing data, not guaranteed turning points. Wait for a reaction or confirmed break before treating a level as actionable.`;
+      } else if (prompt.includes('strategy') || prompt.includes('backtest')) {
+        reply = `${overview}\nSTRATEGY TESTING IDEA\nA simple starting hypothesis is an EMA 20/50 trend filter with RSI confirmation: only evaluate long signals when EMA 20 is above EMA 50, and short signals when EMA 20 is below EMA 50. Define exits before testing. Include spread, commission and slippage; review trade count, drawdown and out-of-sample results. Historical performance does not guarantee future results.`;
+      } else if (prompt.includes('bos') || prompt.includes('choch') || prompt.includes('structure') || prompt.includes('smart money') || prompt.includes('smc')) {
+        reply = `${overview}\nMARKET STRUCTURE\n${structure ? `Latest detected event: ${structure.label} near ${fmt(Number(structure.level))}.` : 'No recent BOS/CHoCH event was confirmed by the current swing-point rule.'}\nA break of structure should be assessed using candle closes and the broader trend. A single wick through a swing level can be a liquidity sweep rather than a confirmed structural break.`;
+      } else if (prompt.includes('entry') || prompt.includes('buy') || prompt.includes('sell') || prompt.includes('setup') || prompt.includes('trade idea')) {
+        const aligned = trend==='BULLISH' ? rsi>=50 && macdHist>0 : trend==='BEARISH' ? rsi<=50 && macdHist<0 : false;
+        reply = `${overview}\nSETUP REVIEW\nDirectional alignment: ${aligned?'some trend and momentum inputs agree':'not sufficiently aligned'}\nAssessment: ${aligned?`A ${trend.toLowerCase()} bias may be worth monitoring for a confirmed pullback or breakout retest.`:'WAIT — avoid forcing an entry while the evidence is mixed.'}\nBefore any trade, define the invalidation level, calculate position size, and check spread, session conditions and scheduled news. No entry is being executed.`;
+      } else {
+        reply = `${overview}\nSUMMARY\nThe current short-term EMA trend is ${trend.toLowerCase()}, while momentum is ${momentum}. ${trend==='MIXED'?'The moving-average evidence is mixed; wait for clearer direction.':`The current trend bias is ${trend.toLowerCase()}, but confirmation from price structure and a higher timeframe is still important.`} This is a rules-based technical reading, not a prediction or a probability of profit.`;
+      }
+      setAnswer(reply); setHistory(h => [{q:question,a:reply}, ...h].slice(0,6));
+    } catch (error) {
+      const reply = `I could not complete this analysis because some indicator data was unavailable. Please reload the chart and try again. Details: ${error?.message || 'unknown calculation error'}`;
+      setAnswer(reply); setHistory(h => [{q:question,a:reply}, ...h].slice(0,6));
+    } finally { setBusy(false); }
   };
+  const quickQuestions = ['Give me a full analysis of the current market.','Is momentum bullish or bearish?','Explain RSI and MACD.','Find support and resistance.','Review a possible entry setup.','Explain BOS and CHoCH.','How should I manage risk?','Suggest a strategy to backtest.'];
   return <>
-    <div className="welcome"><div><h1>TradeLab AI Assistant</h1><div className="muted">Ask questions about the selected market, indicators, strategies and risk.</div></div><div className="demo-badge">● LOCAL RULE-BASED ASSISTANT</div></div>
+    <div className="welcome"><div><h1>TradeLab AI Assistant</h1><div className="muted">Market-aware analysis using the currently selected instrument and loaded candles.</div></div><div className="demo-badge">● MARKET-AWARE RULE-BASED ASSISTANT</div></div>
     <div className="card">
-      <div className="card-heading"><h3>Market-aware assistant</h3><span className="muted">{symbol} · {timeframe} · {candles.length} candles</span></div>
-      <p className="muted" style={{lineHeight:1.6}}>This assistant calculates responses from the currently loaded candle data. It is not connected to a remote language model and does not place trades.</p>
-      <div className="field"><label>Your question</label><textarea value={question} onChange={e=>setQuestion(e.target.value)} rows="3" style={{width:'100%',background:'#0b1728',border:'1px solid #2b3b52',color:'#fff',borderRadius:7,padding:12}} placeholder="Ask about trend, RSI, risk or a strategy…"/></div>
-      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:10}}>{['What is the current market trend?','Explain RSI momentum','How should I think about risk?','Which strategy should I backtest?'].map(q=><button className="period-btn" key={q} onClick={()=>setQuestion(q)}>{q}</button>)}</div>
-      <button className="execute-btn" style={{marginTop:14}} onClick={ask} disabled={!question.trim()}>Ask TradeLab AI</button>
-      {answer && <div className="signal" style={{display:'block',marginTop:18,padding:16,whiteSpace:'pre-wrap',lineHeight:1.7}}><strong style={{color:'#20d6a1',display:'block',marginBottom:8}}>TradeLab AI response</strong>{answer}</div>}
+      <div className="card-heading"><h3>Ask about your live chart</h3><span className="muted">{symbol} · {timeframe} · {candles.length} candles</span></div>
+      <p className="muted" style={{lineHeight:1.6}}>TradeLab reads the selected chart and calculates technical observations. It is not connected to a remote language model and does not place trades.</p>
+      <div className="field"><label>Your question</label><textarea value={question} onChange={e=>setQuestion(e.target.value)} rows="3" style={{width:'100%',background:'#0b1728',border:'1px solid #2b3b52',color:'#fff',borderRadius:7,padding:12}} placeholder="Ask about trend, momentum, structure, entries or risk…"/></div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:10}}>{quickQuestions.map(q=><button className="period-btn" key={q} onClick={()=>setQuestion(q)}>{q}</button>)}</div>
+      <button className="execute-btn" style={{marginTop:14}} onClick={ask} disabled={!question.trim()||busy}>{busy?'Analysing chart…':'Ask TradeLab AI'}</button>
+      {answer && <div className="signal" style={{display:'block',marginTop:18,padding:16,whiteSpace:'pre-wrap',lineHeight:1.7}}><strong style={{color:'#20d6a1',display:'block',marginBottom:8}}>TradeLab AI analysis</strong>{answer}</div>}
     </div>
-    {history.length>1 && <div className="card" style={{marginTop:16}}><h3>Recent questions</h3>{history.slice(1,6).map((item,i)=><div className="signal" key={i} style={{display:'block'}}><strong>{item.q}</strong><p className="muted" style={{lineHeight:1.6}}>{item.a}</p></div>)}</div>}
+    {history.length>1 && <div className="card" style={{marginTop:16}}><h3>Recent questions</h3>{history.slice(1,6).map((item,i)=><div className="signal" key={i} style={{display:'block'}}><strong>{item.q}</strong><p className="muted" style={{lineHeight:1.6,whiteSpace:'pre-wrap'}}>{item.a}</p></div>)}</div>}
   </>;
 }
-
 // Historical simulation uses close-confirmed signals and executes at the next
 // candle close-to-close interval. Costs are charged on each position change.
 function runStrategyBacktest(candles, config) {
