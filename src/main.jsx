@@ -685,11 +685,12 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
     try { const saved = localStorage.getItem(storageKey); const parsed = saved ? JSON.parse(saved) : []; return Array.isArray(parsed) ? parsed : []; }
     catch { return []; }
   });
-  const [form, setForm] = useState({ symbol: defaultSymbol, direction: 'BUY', entry: marketPrice || '', units: '1000', setup: 'Trend continuation', notes: '', tags: '' });
+  const [form, setForm] = useState({ symbol: defaultSymbol, direction: 'BUY', entry: marketPrice || '', units: '1000', setup: 'Trend continuation', notes: '', tags: '', entryReason: '', emotion: 'Calm / disciplined', mistake: false, lesson: '' });
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [marketFilter, setMarketFilter] = useState('ALL');
   const [closeInputs, setCloseInputs] = useState({});
+  const [closeMeta, setCloseMeta] = useState({});
   const [message, setMessage] = useState('');
 
   useEffect(() => { try { localStorage.setItem(storageKey, JSON.stringify(entries)); } catch (e) { console.warn('Journal storage unavailable', e); } }, [entries]);
@@ -703,7 +704,7 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
   const profitFactor = grossLoss ? grossWin / grossLoss : grossWin ? Infinity : 0;
   const avgWin = wins.length ? grossWin / wins.length : 0, avgLoss = losses.length ? grossLoss / losses.length : 0;
   const markets = [...new Set(entries.map(t => t.symbol))];
-  const visible = entries.filter(t => (statusFilter === 'ALL' || t.status === statusFilter) && (marketFilter === 'ALL' || t.symbol === marketFilter) && `${t.symbol} ${t.direction} ${t.setup} ${t.notes} ${t.tags}`.toLowerCase().includes(query.toLowerCase()));
+  const visible = entries.filter(t => (statusFilter === 'ALL' || t.status === statusFilter) && (marketFilter === 'ALL' || t.symbol === marketFilter) && `${t.symbol} ${t.direction} ${t.setup} ${t.notes} ${t.tags} ${t.entryReason || ''} ${t.exitReason || ''} ${t.emotion || ''} ${t.lesson || ''}`.toLowerCase().includes(query.toLowerCase()));
   const equity = closed.slice().reverse().reduce((arr,t) => [...arr, (arr.length ? arr[arr.length-1] : 0) + Number(t.pnl || 0)], [0]);
   const chartW = 600, chartH = 125, minEq = Math.min(0,...equity), maxEq = Math.max(0,...equity), rangeEq = maxEq-minEq || 1;
   const equityPoints = equity.map((v,i) => `${equity.length < 2 ? chartW/2 : 12 + i/(equity.length-1)*(chartW-24)},${chartH-12-(v-minEq)/rangeEq*(chartH-24)}`).join(' ');
@@ -713,20 +714,20 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
     e.preventDefault();
     const entry = Number(form.entry), units = Number(form.units);
     if (!form.symbol || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(units) || units <= 0) { setMessage('Enter a valid entry price and position units.'); return; }
-    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, symbol: form.symbol.toUpperCase().trim(), direction: form.direction, entry, units, setup: form.setup, notes: form.notes.trim(), tags: form.tags.trim(), status: 'OPEN', openedAt: new Date().toISOString(), closedAt: null, exit: null, pnl: null };
+    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, symbol: form.symbol.toUpperCase().trim(), direction: form.direction, entry, units, setup: form.setup, notes: form.notes.trim(), tags: form.tags.trim(), entryReason: form.entryReason.trim(), emotion: form.emotion, mistake: !!form.mistake, lesson: form.lesson.trim(), exitReason: '', status: 'OPEN', openedAt: new Date().toISOString(), closedAt: null, exit: null, pnl: null };
     setEntries(old => [item, ...old]);
-    setForm(old => ({ ...old, entry: marketPrice || '', notes: '', tags: '' }));
+    setForm(old => ({ ...old, entry: marketPrice || '', notes: '', tags: '', entryReason: '', mistake: false, lesson: '' }));
     setMessage('Trade journal entry saved on this device.');
   }
   function closeEntry(id) {
     const exit = Number(closeInputs[id]);
     if (!Number.isFinite(exit) || exit <= 0) { setMessage('Enter a valid exit price before closing.'); return; }
-    setEntries(old => old.map(t => t.id !== id || t.status !== 'OPEN' ? t : { ...t, exit, closedAt: new Date().toISOString(), status: 'CLOSED', pnl: (t.direction === 'BUY' ? exit-t.entry : t.entry-exit) * t.units }));
+    setEntries(old => old.map(t => t.id !== id || t.status !== 'OPEN' ? t : { ...t, exit, exitReason: (closeMeta[id]?.reason || '').trim(), closedAt: new Date().toISOString(), status: 'CLOSED', pnl: (t.direction === 'BUY' ? exit-t.entry : t.entry-exit) * t.units }));
     setMessage('Trade marked closed and P/L calculated using price difference × units.');
   }
   function deleteEntry(id) { if (window.confirm('Delete this journal entry?')) setEntries(old => old.filter(t => t.id !== id)); }
   function exportCsv() {
-    const cols = ['symbol','direction','status','entry','exit','units','pnl','setup','tags','notes','openedAt','closedAt'];
+    const cols = ['symbol','direction','status','entry','exit','units','pnl','setup','tags','entryReason','exitReason','emotion','mistake','lesson','notes','openedAt','closedAt'];
     const quote = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
     const csv = [cols.join(','), ...entries.map(t => cols.map(k => quote(t[k])).join(','))].join('\n');
     const url = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8;'}));
@@ -755,10 +756,14 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
         </div>
         <div className="field"><label>Setup / strategy</label><select style={inputStyle} value={form.setup} onChange={e=>setForm({...form,setup:e.target.value})}><option>Trend continuation</option><option>Breakout</option><option>Pullback</option><option>Support / resistance</option><option>Reversal</option><option>News / event</option><option>Other</option></select></div>
         <div className="field"><label>Tags (comma separated)</label><input style={inputStyle} value={form.tags} onChange={e=>setForm({...form,tags:e.target.value})} placeholder="London session, EMA, patience"/></div>
+        <div className="field"><label>Why did you enter? (entry confirmation)</label><textarea style={{...inputStyle,minHeight:58,resize:'vertical'}} value={form.entryReason} onChange={e=>setForm({...form,entryReason:e.target.value})} placeholder="e.g. EMA alignment, breakout retest, volume confirmation"/></div>
+        <div className="field"><label>Emotional state</label><select style={inputStyle} value={form.emotion} onChange={e=>setForm({...form,emotion:e.target.value})}><option>Calm / disciplined</option><option>Confident</option><option>Fearful</option><option>Greedy</option><option>Impatient</option><option>Revenge trading</option><option>Uncertain</option></select></div>
+        <label style={{display:'flex',gap:8,alignItems:'center',fontSize:12,margin:'8px 0'}}><input type="checkbox" checked={form.mistake} onChange={e=>setForm({...form,mistake:e.target.checked})}/> This trade involved a mistake / rule violation</label>
+        <div className="field"><label>Lesson to remember</label><textarea style={{...inputStyle,minHeight:54,resize:'vertical'}} value={form.lesson} onChange={e=>setForm({...form,lesson:e.target.value})} placeholder="What will I repeat or change next time?"/></div>
         <div className="field"><label>Trade notes</label><textarea style={{...inputStyle,minHeight:76,resize:'vertical'}} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="Why did you take this trade? What confirmed the setup?"/></div>
         <button className="execute-btn" type="submit">＋ Save journal entry</button>
         {message && <p className="muted" style={{lineHeight:1.5}}>{message}</p>}
-        <p className="muted" style={{fontSize:10,lineHeight:1.6}}>Entries are stored in this browser on this device. This form does not send or execute broker orders.</p>
+        <p className="muted" style={{fontSize:10,lineHeight:1.6}}>Entries are stored in this browser on this device. This form does not send or execute broker orders. New review fields are saved with each entry; older records remain available.</p>
       </form>
       <div className="card">
         <div className="card-heading"><h3>Closed-trade equity curve</h3><span className="muted">Cumulative realised P/L</span></div>
@@ -774,12 +779,12 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
         <select style={inputStyle} value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option value="ALL">All statuses</option><option value="OPEN">Open</option><option value="CLOSED">Closed</option></select>
         <select style={inputStyle} value={marketFilter} onChange={e=>setMarketFilter(e.target.value)}><option value="ALL">All instruments</option>{markets.map(m=><option key={m}>{m}</option>)}</select>
       </div>
-      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>Units</th><th>Setup / notes</th><th>Status / P&amp;L</th><th>Action</th></tr></thead>
+      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>Units</th><th>Setup / review</th><th>Status / P&amp;L</th><th>Exit reason / action</th></tr></thead>
         <tbody>{visible.length===0 ? <tr><td colSpan="8" className="empty">No journal records match. Add a trade using the form above.</td></tr> : visible.map(t=><tr key={t.id}>
           <td><strong>{t.symbol}</strong><div className="muted">{new Date(t.openedAt).toLocaleString()}</div></td><td className={t.direction==='BUY'?'positive':'negative'}>{t.direction}</td><td>{t.entry}</td><td>{t.exit ?? '—'}</td><td>{Number(t.units).toLocaleString()}</td>
-          <td><strong>{t.setup}</strong><div className="muted" style={{maxWidth:210,whiteSpace:'normal'}}>{t.notes || t.tags || '—'}</div></td>
+          <td><strong>{t.setup}</strong><div className="muted" style={{maxWidth:230,whiteSpace:'normal'}}>{t.tags || 'No tags'} · {t.emotion || 'Emotion not recorded'}{t.mistake ? ' · RULE BREAK' : ''}</div><div className="muted" style={{maxWidth:230,whiteSpace:'normal',marginTop:4}}>{t.entryReason || t.notes || 'No entry rationale recorded'}{t.lesson ? ` · Lesson: ${t.lesson}` : ''}</div></td>
           <td>{t.status==='OPEN' ? <span className="tag">OPEN</span> : <span className={t.pnl>=0?'positive':'negative'}>{money(t.pnl)}</span>}</td>
-          <td>{t.status==='OPEN' ? <div style={{display:'flex',gap:5,alignItems:'center'}}><input aria-label="Exit price" type="number" step="any" min="0" placeholder="Exit" value={closeInputs[t.id] || ''} onChange={e=>setCloseInputs({...closeInputs,[t.id]:e.target.value})} style={{...inputStyle,width:90,padding:7}}/><button style={smallBtn} onClick={()=>closeEntry(t.id)}>Close</button><button style={smallBtn} title="Delete" onClick={()=>deleteEntry(t.id)}>×</button></div> : <button style={smallBtn} onClick={()=>deleteEntry(t.id)}>Delete</button>}</td>
+          <td>{t.status==='OPEN' ? <div style={{display:'grid',gap:5,minWidth:150}}><input aria-label="Exit price" type="number" step="any" min="0" placeholder="Exit price" value={closeInputs[t.id] || ''} onChange={e=>setCloseInputs({...closeInputs,[t.id]:e.target.value})} style={{...inputStyle,padding:7}}/><input aria-label="Exit reason" placeholder="Exit reason (optional)" value={closeMeta[t.id]?.reason || ''} onChange={e=>setCloseMeta({...closeMeta,[t.id]:{...closeMeta[t.id],reason:e.target.value}})} style={{...inputStyle,padding:7}}/><div style={{display:'flex',gap:5}}><button style={smallBtn} onClick={()=>closeEntry(t.id)}>Close trade</button><button style={smallBtn} title="Delete" onClick={()=>deleteEntry(t.id)}>×</button></div></div> : <div><div className="muted" style={{maxWidth:170,whiteSpace:'normal'}}>{t.exitReason || 'No exit reason recorded'}</div><button style={{...smallBtn,marginTop:5}} onClick={()=>deleteEntry(t.id)}>Delete</button></div>}</td>
         </tr>)}</tbody></table></div>
     </div>
   </>;
