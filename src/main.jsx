@@ -950,26 +950,89 @@ function TradingTerminalPage({ symbol, price, candles }) {
   </>;
 }
 
-function AutomationCentrePage() {
-  const [strategy,setStrategy] = useState('EMA crossover');
-  const [timeframe,setTimeframe] = useState('5min');
+function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5min' }) {
+  const [strategy,setStrategy] = useState('Confluence');
   const [risk,setRisk] = useState('0.5');
   const [maxTrades,setMaxTrades] = useState('3');
   const [dailyLimit,setDailyLimit] = useState('2');
   const [status,setStatus] = useState('STOPPED');
+  const [trades,setTrades] = useState([]);
   const [log,setLog] = useState([]);
-  function changeStatus(next) { setStatus(next); setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:`Paper automation ${next.toLowerCase()}.`},...old].slice(0,20)); }
+  const [lastProcessed,setLastProcessed] = useState('');
+  const [lastSignal,setLastSignal] = useState(null);
+  const fmt = (value, market=symbol) => value==null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(market==='USDJPY'?3:market==='BTCUSD'?1:market==='XAUUSD'?2:5);
+
+  const analysis = useMemo(() => {
+    if (!Array.isArray(candles) || candles.length < 205) return {signal:'WAIT',reason:'At least 205 candles are required for EMA 200 and indicator confirmation.'};
+    const closes = candles.map(c=>Number(c.close));
+    const ema20 = calcEMA(closes,20), ema50 = calcEMA(closes,50), ema200 = calcEMA(closes,200);
+    const rsi = calcRSI(closes,14), macd = calcMACD(closes), adx = calcADX(candles,14), atr = calcATR(candles,14);
+    const i = candles.length-1, prev=i-1;
+    const values=[ema20[i],ema50[i],ema200[i],rsi[i],macd.histogram[i],macd.histogram[prev],adx[i],atr[i]];
+    if(values.some(v=>v==null || !Number.isFinite(v)) || atr[i]<=0) return {signal:'WAIT',reason:'Indicator history is not yet sufficient.'};
+    const bull = ema20[i]>ema50[i] && closes[i]>ema200[i] && rsi[i]>=52 && rsi[i]<70 && macd.histogram[i]>0 && macd.histogram[i]>=macd.histogram[prev] && adx[i]>=20;
+    const bear = ema20[i]<ema50[i] && closes[i]<ema200[i] && rsi[i]<=48 && rsi[i]>30 && macd.histogram[i]<0 && macd.histogram[i]<=macd.histogram[prev] && adx[i]>=20;
+    const signal = bull?'BUY':bear?'SELL':'WAIT';
+    const reason = signal==='BUY'?'EMA alignment, RSI momentum, positive MACD and ADX confirmation.':signal==='SELL'?'Bearish EMA alignment, RSI momentum, negative MACD and ADX confirmation.':'The complete entry checklist is not aligned.';
+    return {signal,reason,price:closes[i],atr:atr[i],rsi:rsi[i],adx:adx[i],candleTime:String(candles[i].time ?? i)};
+  },[candles]);
+
+  useEffect(()=>{
+    if(status!=='RUNNING' || !analysis.candleTime || analysis.candleTime===lastProcessed) return;
+    setLastProcessed(analysis.candleTime);
+    setLastSignal(analysis);
+    const now=new Date();
+    const day=now.toLocaleDateString();
+    setTrades(old=>{
+      const todays=old.filter(t=>t.day===day);
+      const open=todays.find(t=>t.status==='OPEN');
+      if(open){
+        const candle=candles[candles.length-1];
+        const hitStop=open.direction==='BUY'?Number(candle.low)<=open.stop:Number(candle.high)>=open.stop;
+        const hitTarget=open.direction==='BUY'?Number(candle.high)>=open.target:Number(candle.low)<=open.target;
+        if(hitStop || hitTarget){
+          const exit=hitStop?open.stop:open.target;
+          const pnl=(open.direction==='BUY'?exit-open.entry:open.entry-exit);
+          const closed={...open,status:hitStop?'STOPPED OUT':'TARGET HIT',exit,pnl,closedAt:now.toLocaleTimeString()};
+          setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:`${open.symbol} ${open.direction} ${closed.status} at ${exit}. Simulated price P/L: ${pnl.toPrecision(5)}.`},...logs].slice(0,30));
+          return old.map(t=>t.id===open.id?closed:t);
+        }
+        return old;
+      }
+      const max= Math.max(1,Math.min(20,Number(maxTrades)||1));
+      if(todays.length>=max){
+        setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:'Entry blocked by daily trade or loss-limit control.'},...logs].slice(0,30));
+        return old;
+      }
+      if(analysis.signal==='WAIT' || !analysis.price || !analysis.atr) return old;
+      const direction=analysis.signal, distance=analysis.atr*1.5;
+      const entry=analysis.price, stop=direction==='BUY'?entry-distance:entry+distance, target=direction==='BUY'?entry+distance*2:entry-distance*2;
+      const trade={id:Date.now(),day,symbol,direction,entry,stop,target,volumeRiskPct:Number(risk)||0.5,status:'OPEN',time:now.toLocaleTimeString(),timeframe,pnl:0};
+      setLog(logs=>[{id:trade.id,time:trade.time,text:`Paper ${direction} opened on ${symbol}. Entry ${entry}; SL ${stop}; TP ${target}.`},...logs].slice(0,30));
+      return [trade,...old].slice(0,100);
+    });
+  },[status,analysis,candles,symbol,timeframe,risk,maxTrades,dailyLimit,lastProcessed]);
+
+  function changeStatus(next){setStatus(next);setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:`Paper automation ${next.toLowerCase()}.`},...old].slice(0,30));}
+  const openTrades=trades.filter(t=>t.status==='OPEN');
+  const closedTrades=trades.filter(t=>t.status!=='OPEN');
+  const realised=closedTrades.reduce((sum,t)=>sum+(Number(t.pnl)||0),0);
   return <>
-    <div className="welcome"><div><h1>Automation Centre</h1><div className="muted">Configure a paper-trading rule set and control its simulated state.</div></div><div className="demo-badge">● NO LIVE EXECUTION</div></div>
+    <div className="welcome"><div><h1>Intelligent Automation Centre</h1><div className="muted">Rule-based candle evaluation and simulated trade management · {symbol} · {timeframe}</div></div><div className="demo-badge">● PAPER MODE ONLY</div></div>
     <div className="card"><div className="card-heading"><h3>Automation configuration</h3><span className="tag">{status}</span></div><div className="order-grid">
-      <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option>EMA crossover</option><option>RSI reversal</option><option>MACD momentum</option></select></div>
-      <div className="field"><label>Timeframe</label><select value={timeframe} onChange={e=>setTimeframe(e.target.value)}><option value="1min">1 minute</option><option value="5min">5 minutes</option><option value="15min">15 minutes</option><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option></select></div>
+      <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option>Confluence</option></select></div>
       <div className="field"><label>Risk setting (%)</label><input type="number" min="0.1" max="3" step="0.1" value={risk} onChange={e=>setRisk(e.target.value)}/></div>
       <div className="field"><label>Maximum trades / day</label><input type="number" min="1" max="20" value={maxTrades} onChange={e=>setMaxTrades(e.target.value)}/></div>
       <div className="field"><label>Daily loss limit (%)</label><input type="number" min="0.1" max="10" step="0.1" value={dailyLimit} onChange={e=>setDailyLimit(e.target.value)}/></div>
-    </div><div className="trade-buttons"><button className="execute-btn" onClick={()=>changeStatus('RUNNING')}>Start paper mode</button><button className="period-btn" onClick={()=>changeStatus('PAUSED')}>Pause</button><button className="period-btn" onClick={()=>changeStatus('STOPPED')}>Stop</button></div>
-    <p className="muted" style={{lineHeight:1.6}}>Important: these controls only change the displayed paper-mode state and record a local activity log. No background bot is running, no orders are generated automatically, and no broker account is connected.</p></div>
-    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Activity log</h3><span className="muted">{log.length} events this session</span></div>{log.length===0?<div className="empty">No automation events yet.</div>:log.map(item=><div className="signal" key={item.id}><span>{item.time}</span><span>{item.text}</span></div>)}</div>
+    </div><div className="trade-buttons"><button className="execute-btn" onClick={()=>changeStatus('RUNNING')} disabled={status==='RUNNING'}>Start paper mode</button><button className="period-btn" onClick={()=>changeStatus('PAUSED')} disabled={status!=='RUNNING'}>Pause</button><button className="period-btn" onClick={()=>changeStatus('STOPPED')}>Emergency stop</button></div>
+    <div className="signal"><span>Latest signal</span><strong className={analysis.signal==='BUY'?'positive':analysis.signal==='SELL'?'negative':''}>{analysis.signal}</strong></div>
+    <div className="signal"><span>Signal explanation</span><span>{analysis.reason}</span></div>
+    {analysis.price!=null&&<div className="signal"><span>Reference price · RSI · ADX</span><span>{fmt(analysis.price,symbol)} · {analysis.rsi?.toFixed(1)} · {analysis.adx?.toFixed(1)}</span></div>}
+    <p className="muted" style={{lineHeight:1.6}}>The engine checks the latest candle whenever the app receives updated market candles. It does not run in the background when this page is closed. Entries use a 1.5× ATR stop and a 3× ATR target. The daily loss percentage is a user-defined advisory threshold only: exact cash loss enforcement and broker-accurate position sizing require instrument contract specifications and account-currency conversion.</p></div>
+    <div className="dashboard-grid" style={{marginTop:18}}><div className="card"><div className="card-heading"><h3>Open paper positions</h3><span className="tag">{openTrades.length}</span></div>{openTrades.length===0?<div className="empty">No open simulated positions.</div>:openTrades.map(t=><div className="signal" key={t.id}><span>{t.symbol} {t.direction}<small className="muted" style={{display:'block'}}>Entry {fmt(t.entry,t.symbol)} · SL {fmt(t.stop,t.symbol)} · TP {fmt(t.target,t.symbol)}</small></span><span className="tag">OPEN</span></div>)}</div>
+    <div className="card"><div className="card-heading"><h3>Paper performance</h3></div><div className="signal"><span>Closed positions</span><strong>{closedTrades.length}</strong></div><div className="signal"><span>Realised price movement</span><strong className={realised>=0?'positive':'negative'}>{realised.toPrecision(5)}</strong></div><div className="signal"><span>Current candle history</span><strong>{candles.length}</strong></div></div></div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper trade history</h3><span className="muted">{trades.length} positions</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Status</th><th>Price P/L</th></tr></thead><tbody>{trades.length===0?<tr><td colSpan="7" className="empty">No automated paper trades yet. Start paper mode and wait for a confirmed setup.</td></tr>:trades.map(t=><tr key={t.id}><td>{t.symbol}</td><td>{t.direction}</td><td>{fmt(t.entry,t.symbol)}</td><td>{fmt(t.stop,t.symbol)}</td><td>{fmt(t.target,t.symbol)}</td><td>{t.status}</td><td className={(t.pnl||0)>=0?'positive':'negative'}>{t.pnl==null?'—':Number(t.pnl).toPrecision(5)}</td></tr>)}</tbody></table></div></div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Automation activity</h3><span className="muted">{log.length} events</span></div>{log.length===0?<div className="empty">No automation events yet.</div>:log.map(item=><div className="signal" key={item.id}><span>{item.time}</span><span>{item.text}</span></div>)}</div>
   </>;
 }
 
@@ -1267,7 +1330,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
