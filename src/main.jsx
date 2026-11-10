@@ -875,6 +875,119 @@ function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTi
 }
 
 
+
+function TradingTerminalPage({ symbol, price, candles }) {
+  const [side, setSide] = useState('BUY');
+  const [type, setType] = useState('Market');
+  const [volume, setVolume] = useState('0.10');
+  const [entry, setEntry] = useState('');
+  const [sl, setSl] = useState('');
+  const [tp, setTp] = useState('');
+  const [message, setMessage] = useState('');
+  const [orders, setOrders] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('tradelab_demo_orders') || '[]'); }
+    catch { return []; }
+  });
+  const quote = Number(price);
+  const atrValues = calcATR(candles || [], 14);
+  const atr = atrValues.length ? Number(atrValues[atrValues.length - 1]) : NaN;
+  const decimals = symbol === 'USDJPY' ? 3 : symbol === 'BTCUSD' ? 1 : symbol === 'XAUUSD' ? 2 : 5;
+  const activeEntry = type === 'Market' ? quote : Number(entry);
+  const risk = Math.abs(activeEntry - Number(sl));
+  const reward = Math.abs(Number(tp) - activeEntry);
+  const rr = risk > 0 ? reward / risk : NaN;
+  const fmt = value => Number.isFinite(value) ? value.toFixed(decimals) : '';
+
+  function suggestLevels() {
+    if (!Number.isFinite(quote) || quote <= 0) { setMessage('Wait for a valid live market price before suggesting levels.'); return; }
+    if (!Number.isFinite(atr) || atr <= 0) { setMessage('Not enough candle history to calculate ATR.'); return; }
+    const stopDistance = atr * 1.5;
+    const targetDistance = atr * 3;
+    setEntry(fmt(quote));
+    setSl(fmt(side === 'BUY' ? quote - stopDistance : quote + stopDistance));
+    setTp(fmt(side === 'BUY' ? quote + targetDistance : quote - targetDistance));
+    setMessage('Illustrative ATR levels filled. Review them before creating a demo order.');
+  }
+
+  function submitOrder() {
+    const qty = Number(volume);
+    const open = type === 'Market' ? quote : Number(entry);
+    const stop = Number(sl), target = Number(tp);
+    if (!Number.isFinite(quote) || quote <= 0) return setMessage('A valid market quote is required.');
+    if (!Number.isFinite(qty) || qty <= 0) return setMessage('Enter a valid volume greater than zero.');
+    if (!Number.isFinite(open) || open <= 0) return setMessage('Enter a valid entry price.');
+    if (!Number.isFinite(stop) || !Number.isFinite(target) || stop <= 0 || target <= 0) return setMessage('Enter valid stop-loss and take-profit prices.');
+    if (side === 'BUY' && !(stop < open && target > open)) return setMessage('For a BUY, stop loss must be below entry and take profit above entry.');
+    if (side === 'SELL' && !(stop > open && target < open)) return setMessage('For a SELL, stop loss must be above entry and take profit below entry.');
+    const order = { id: Date.now(), symbol, side, type, volume: qty.toFixed(2), entry: fmt(open), sl: fmt(stop), tp: fmt(target), rr: (Math.abs(target-open)/Math.abs(open-stop)).toFixed(2), time: new Date().toLocaleString(), status: 'PAPER OPEN' };
+    const next = [order, ...orders].slice(0, 100);
+    setOrders(next);
+    try { localStorage.setItem('tradelab_demo_orders', JSON.stringify(next)); } catch {}
+    setMessage(`${side} paper order saved locally. No broker order was sent.`);
+  }
+
+  return <>
+    <div className="welcome"><div><h1>Trading Terminal</h1><div className="muted">Build and record simulated orders with explicit entry, stop-loss and take-profit levels.</div></div><div className="demo-badge">● PAPER TRADING ONLY</div></div>
+    <div className="card">
+      <div className="card-heading"><h3>Order ticket · {symbol}</h3><span className="tag">Live quote: {Number.isFinite(quote) ? fmt(quote) : 'Unavailable'}</span></div>
+      <div className="order-grid">
+        <div className="field"><label>Instrument</label><input value={symbol} readOnly /></div>
+        <div className="field"><label>Order type</label><select value={type} onChange={e=>{setType(e.target.value);setMessage('');}}><option>Market</option><option>Limit</option><option>Stop</option></select></div>
+        <div className="field"><label>Volume (lots)</label><input type="number" min="0.01" step="0.01" value={volume} onChange={e=>setVolume(e.target.value)}/></div>
+        <div className="field"><label>Entry price {type==='Market'?'(current quote)':''}</label><input type="number" step="any" value={type==='Market' ? fmt(quote) : entry} disabled={type==='Market'} onChange={e=>setEntry(e.target.value)} placeholder="Enter planned entry"/></div>
+        <div className="field"><label>Stop-loss price</label><input type="number" step="any" value={sl} onChange={e=>setSl(e.target.value)} placeholder="Price level"/></div>
+        <div className="field"><label>Take-profit price</label><input type="number" step="any" value={tp} onChange={e=>setTp(e.target.value)} placeholder="Price level"/></div>
+      </div>
+      <div className="trade-buttons"><button className="buy-btn" onClick={()=>{setSide('BUY');setMessage('BUY selected.');}}><ArrowUpRight size={15}/> BUY</button><button className="sell-btn" onClick={()=>{setSide('SELL');setMessage('SELL selected.');}}><ArrowDownRight size={15}/> SELL</button></div>
+      <div className="signal"><span>Selected side</span><strong>{side}</strong></div>
+      <div className="signal"><span>Reward / risk</span><strong>{Number.isFinite(rr) ? `1 : ${rr.toFixed(2)}` : 'Enter valid SL and TP'}</strong></div>
+      <div className="muted" style={{margin:'12px 0'}}>ATR(14): {Number.isFinite(atr) ? fmt(atr) : 'Insufficient candle history'}. Suggested levels use 1.5× ATR stop and 3× ATR target; they are not guaranteed signals.</div>
+      <div className="trade-buttons"><button className="period-btn" onClick={suggestLevels}>Suggest ATR levels</button><button className="execute-btn" onClick={submitOrder}>Save paper order</button></div>
+      {message && <p className="muted" role="status" style={{marginTop:12}}>{message}</p>}
+      <p className="muted" style={{lineHeight:1.6}}>This terminal stores simulated orders in this browser only. It does not connect to Deriv, MT5 or any broker. Lot value, pip value, margin and cash risk are not estimated because broker contract specifications are not configured.</p>
+    </div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper order history</h3><span className="muted">{orders.length} saved</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Entry</th><th>Stop loss</th><th>Take profit</th><th>R:R</th><th>Time</th></tr></thead><tbody>{orders.length===0?<tr><td colSpan="8" className="empty">No paper orders yet.</td></tr>:orders.map(o=><tr key={o.id}><td>{o.symbol}</td><td className={o.side==='BUY'?'positive':'negative'}>{o.side}</td><td>{o.volume}</td><td>{o.entry}</td><td>{o.sl}</td><td>{o.tp}</td><td>1:{o.rr}</td><td>{o.time}</td></tr>)}</tbody></table></div></div>
+  </>;
+}
+
+function AutomationCentrePage() {
+  const [strategy,setStrategy] = useState('EMA crossover');
+  const [timeframe,setTimeframe] = useState('5min');
+  const [risk,setRisk] = useState('0.5');
+  const [maxTrades,setMaxTrades] = useState('3');
+  const [dailyLimit,setDailyLimit] = useState('2');
+  const [status,setStatus] = useState('STOPPED');
+  const [log,setLog] = useState([]);
+  function changeStatus(next) { setStatus(next); setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:`Paper automation ${next.toLowerCase()}.`},...old].slice(0,20)); }
+  return <>
+    <div className="welcome"><div><h1>Automation Centre</h1><div className="muted">Configure a paper-trading rule set and control its simulated state.</div></div><div className="demo-badge">● NO LIVE EXECUTION</div></div>
+    <div className="card"><div className="card-heading"><h3>Automation configuration</h3><span className="tag">{status}</span></div><div className="order-grid">
+      <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option>EMA crossover</option><option>RSI reversal</option><option>MACD momentum</option></select></div>
+      <div className="field"><label>Timeframe</label><select value={timeframe} onChange={e=>setTimeframe(e.target.value)}><option value="1min">1 minute</option><option value="5min">5 minutes</option><option value="15min">15 minutes</option><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option></select></div>
+      <div className="field"><label>Risk setting (%)</label><input type="number" min="0.1" max="3" step="0.1" value={risk} onChange={e=>setRisk(e.target.value)}/></div>
+      <div className="field"><label>Maximum trades / day</label><input type="number" min="1" max="20" value={maxTrades} onChange={e=>setMaxTrades(e.target.value)}/></div>
+      <div className="field"><label>Daily loss limit (%)</label><input type="number" min="0.1" max="10" step="0.1" value={dailyLimit} onChange={e=>setDailyLimit(e.target.value)}/></div>
+    </div><div className="trade-buttons"><button className="execute-btn" onClick={()=>changeStatus('RUNNING')}>Start paper mode</button><button className="period-btn" onClick={()=>changeStatus('PAUSED')}>Pause</button><button className="period-btn" onClick={()=>changeStatus('STOPPED')}>Stop</button></div>
+    <p className="muted" style={{lineHeight:1.6}}>Important: these controls only change the displayed paper-mode state and record a local activity log. No background bot is running, no orders are generated automatically, and no broker account is connected.</p></div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Activity log</h3><span className="muted">{log.length} events this session</span></div>{log.length===0?<div className="empty">No automation events yet.</div>:log.map(item=><div className="signal" key={item.id}><span>{item.time}</span><span>{item.text}</span></div>)}</div>
+  </>;
+}
+
+function SettingsPage() {
+  const [settings,setSettings] = useState(()=>{try{return {...{timeframe:'5min',risk:'0.5',compact:false,notifications:true},...JSON.parse(localStorage.getItem('tradelab_user_settings')||'{}')};}catch{return {timeframe:'5min',risk:'0.5',compact:false,notifications:true};}});
+  const [saved,setSaved] = useState(false);
+  function update(key,value){setSettings(old=>({...old,[key]:value}));setSaved(false);}
+  function save(){try{localStorage.setItem('tradelab_user_settings',JSON.stringify(settings));setSaved(true);}catch{setSaved(false);}}
+  return <><div className="welcome"><div><h1>Settings</h1><div className="muted">Manage local TradeLab display and analysis preferences.</div></div><div className="demo-badge">● BROWSER SETTINGS</div></div>
+    <div className="card"><div className="card-heading"><h3>General preferences</h3></div><div className="order-grid">
+      <div className="field"><label>Default timeframe</label><select value={settings.timeframe} onChange={e=>update('timeframe',e.target.value)}><option value="1min">1 minute</option><option value="5min">5 minutes</option><option value="15min">15 minutes</option><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option></select></div>
+      <div className="field"><label>Default analysis risk (%)</label><input type="number" min="0.1" max="3" step="0.1" value={settings.risk} onChange={e=>update('risk',e.target.value)}/></div>
+      <div className="field"><label>Notifications</label><select value={settings.notifications?'on':'off'} onChange={e=>update('notifications',e.target.value==='on')}><option value="on">Enabled</option><option value="off">Disabled</option></select></div>
+      <div className="field"><label>Compact layout</label><select value={settings.compact?'on':'off'} onChange={e=>update('compact',e.target.value==='on')}><option value="off">Off</option><option value="on">On</option></select></div>
+    </div><button className="execute-btn" onClick={save}>Save preferences</button>{saved&&<p className="muted" role="status">Settings saved in this browser.</p>}<p className="muted" style={{lineHeight:1.6}}>These preferences are stored locally in this browser. They do not change broker settings, account balances, execution permissions or server configuration.</p></div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -1154,7 +1267,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
