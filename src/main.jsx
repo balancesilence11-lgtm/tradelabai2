@@ -618,16 +618,26 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
 
 function RiskCentre({ symbol, marketPrice }) {
   const [balance, setBalance] = useState(10000);
-  const [riskPct, setRiskPct] = useState(1);
-  const [dailyLimitPct, setDailyLimitPct] = useState(3);
-  const [drawdownLimitPct, setDrawdownLimitPct] = useState(10);
+ const [riskPct, setRiskPct] = useState(() => Number(localStorage.getItem('tradelab_risk_pct_v1') ?? 1));
+const [dailyLimitPct, setDailyLimitPct] = useState(() => Number(localStorage.getItem('tradelab_daily_limit_v1') ?? 3));
+const [drawdownLimitPct, setDrawdownLimitPct] = useState(() => Number(localStorage.getItem('tradelab_drawdown_limit_v1') ?? 10));
   const [entry, setEntry] = useState('');
   const [stop, setStop] = useState('');
   const [target, setTarget] = useState('');
   const [dailyLoss, setDailyLoss] = useState(0);
   const [peakBalance, setPeakBalance] = useState(10000);
   const [riskMode, setRiskMode] = useState('fixed');
+useEffect(() => {
+  localStorage.setItem('tradelab_risk_pct_v1', String(riskPct));
+}, [riskPct]);
 
+useEffect(() => {
+  localStorage.setItem('tradelab_daily_limit_v1', String(dailyLimitPct));
+}, [dailyLimitPct]);
+
+useEffect(() => {
+  localStorage.setItem('tradelab_drawdown_limit_v1', String(drawdownLimitPct));
+}, [drawdownLimitPct]);
   const price = Number(marketPrice);
   const entryValue = Number(entry) || (Number.isFinite(price) && price > 0 ? price : 0);
   const stopValue = Number(stop);
