@@ -31,6 +31,8 @@ const navigation = [
   { name: 'Risk Centre', icon: ShieldCheck },
   { name: 'Trade Journal', icon: Clock3 },
   { name: 'Automation Centre', icon: Radio },
+  { name: 'Account Overview', icon: Wallet },
+  { name: 'Security Centre', icon: LockKeyhole },
   { name: 'Settings', icon: Settings }
 ];
 
@@ -1036,6 +1038,67 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
   </>;
 }
 
+function AccountOverviewPage({ trades = [] }) {
+  const [accountName, setAccountName] = useState(() => localStorage.getItem('tradelab_account_label') || 'Trader Account');
+  const [saved, setSaved] = useState(false);
+  const demoBalance = 10000;
+  const openCount = trades.filter(t => /OPEN/i.test(t.status || '')).length;
+  const closedCount = trades.filter(t => /CLOSED/i.test(t.status || '')).length;
+  function saveLabel() { localStorage.setItem('tradelab_account_label', accountName.trim() || 'Trader Account'); setSaved(true); }
+  return <>
+    <div className="welcome"><div><h1>Account Overview</h1><div className="muted">A summary of this browser's TradeLab demo workspace.</div></div><div className="demo-badge">● PAPER / DEMO ACCOUNT</div></div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Starting demo balance</div><div className="stat-value">$10,000.00</div><div className="muted">Virtual funds only</div></div>
+      <div className="card"><div className="stat-label">Estimated account equity</div><div className="stat-value">$10,000.00</div><div className="muted">No broker balance connected</div></div>
+      <div className="card"><div className="stat-label">Open demo orders</div><div className="stat-value">{openCount}</div><div className="muted">Orders in this app session</div></div>
+      <div className="card"><div className="stat-label">Closed demo trades</div><div className="stat-value">{closedCount}</div><div className="muted">Recorded in current session</div></div>
+    </div>
+    <div className="dashboard-grid">
+      <div className="card"><div className="card-heading"><h3>Account profile</h3><span className="tag">LOCAL PROFILE</span></div>
+        <div className="field"><label>Account display name</label><input value={accountName} onChange={e=>{setAccountName(e.target.value);setSaved(false);}} maxLength="40"/></div>
+        <button className="execute-btn" onClick={saveLabel}>Save display name</button>{saved&&<p className="muted" role="status">Display name saved in this browser.</p>}
+      </div>
+      <div className="card"><div className="card-heading"><h3>Account connectivity</h3></div>
+        <div className="signal"><span>Account type</span><strong>Demo / paper</strong></div><div className="signal"><span>Broker connection</span><strong>Not connected</strong></div><div className="signal"><span>Live execution</span><strong className="negative">Disabled</strong></div><div className="signal"><span>Account currency</span><strong>USD (illustrative)</strong></div>
+      </div>
+    </div>
+    <div className="card"><div className="card-heading"><h3>Account activity</h3><span className="muted">{trades.length} session orders</span></div>
+      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Direction</th><th>Volume</th><th>Type</th><th>Time</th><th>Status</th></tr></thead><tbody>{trades.length===0?<tr><td colSpan="6" className="empty">No orders recorded in this session.</td></tr>:trades.map(t=><tr key={t.id}><td>{t.symbol}</td><td>{t.direction}</td><td>{t.lot}</td><td>{t.type}</td><td>{t.time}</td><td>{t.status}</td></tr>)}</tbody></table></div>
+    </div>
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{lineHeight:1.7,margin:0}}>This is an application-level demo overview, not a verified brokerage statement. Balance, margin, equity, deposits, withdrawals and realised P/L will only become authoritative after a secure broker/account backend is integrated.</p></div>
+  </>;
+}
+
+function SecurityCentrePage() {
+  const [lockEnabled, setLockEnabled] = useState(() => localStorage.getItem('tradelab_paper_lock') === 'true');
+  const [showKeys, setShowKeys] = useState(false);
+  function toggleLock(value) { setLockEnabled(value); localStorage.setItem('tradelab_paper_lock', String(value)); }
+  return <>
+    <div className="welcome"><div><h1>Security Centre</h1><div className="muted">Security status and safe-use controls for this browser workspace.</div></div><div className="demo-badge">● LOCAL SECURITY CHECK</div></div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Live trading</div><div className="stat-value positive">Disabled</div><div className="muted">No live broker execution</div></div>
+      <div className="card"><div className="stat-label">Broker credentials</div><div className="stat-value">Not stored</div><div className="muted">Do not paste secrets into the app</div></div>
+      <div className="card"><div className="stat-label">Two-factor authentication</div><div className="stat-value">Not configured</div><div className="muted">Requires account authentication backend</div></div>
+      <div className="card"><div className="stat-label">Security mode</div><div className="stat-value">Browser demo</div><div className="muted">No server-side identity verification</div></div>
+    </div>
+    <div className="card"><div className="card-heading"><h3>Paper trading lock</h3><span className={lockEnabled?'tag':'demo-badge'}>{lockEnabled?'LOCK ENABLED':'LOCK DISABLED'}</span></div>
+      <p className="muted" style={{lineHeight:1.7}}>This local safety switch records your preference in this browser. It is not an authentication system and does not currently block backend or broker actions. Live execution remains disabled independently.</p>
+      <button className="execute-btn" style={{background:lockEnabled?'#087d69':'#9b354d'}} onClick={()=>toggleLock(!lockEnabled)}>{lockEnabled?'Turn off local paper lock':'Enable local paper lock'}</button>
+    </div>
+    <div className="dashboard-grid" style={{marginTop:18}}>
+      <div className="card"><div className="card-heading"><h3>Security checklist</h3><ShieldCheck size={19} color="#20d6a1"/></div>
+        {['Use a unique password for every broker account','Enable two-factor authentication with your broker','Never share API secrets, passwords or recovery codes','Use read-only API permissions for market analysis','Review broker sessions and revoke unknown devices','Keep your browser and operating system updated'].map((item,i)=><div className="signal" key={i}><span>{item}</span><span className="muted">Recommended</span></div>)}
+      </div>
+      <div className="card"><div className="card-heading"><h3>API key safety</h3><LockKeyhole size={19} color="#20d6a1"/></div>
+        <p className="muted" style={{lineHeight:1.7}}>API credentials must never be embedded in React source code or committed to GitHub. When broker connectivity is added, secrets should be stored as encrypted server-side environment secrets and scoped to the minimum required permissions.</p>
+        <button className="period-btn" onClick={()=>setShowKeys(v=>!v)}>{showKeys?'Hide guidance':'Show key-handling guidance'}</button>
+        {showKeys&&<div className="signal" style={{marginTop:12}}><span>Required approach</span><strong>Server-side secrets only</strong></div>}
+      </div>
+    </div>
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{lineHeight:1.7,margin:0}}>Important limitation: these are advisory UI controls, not a substitute for real authentication, encrypted storage, server-side authorization, audit logging, rate limiting or penetration testing. Do not enter real broker credentials until those backend protections are implemented and independently tested.</p></div>
+  </>;
+}
+
 function SettingsPage() {
   const [settings,setSettings] = useState(()=>{try{return {...{timeframe:'5min',risk:'0.5',compact:false,notifications:true},...JSON.parse(localStorage.getItem('tradelab_user_settings')||'{}')};}catch{return {timeframe:'5min',risk:'0.5',compact:false,notifications:true};}});
   const [saved,setSaved] = useState(false);
@@ -1208,8 +1271,8 @@ function App() {
         })}
         <div className="sidebar-bottom">
           <div className="nav-label">Account</div>
-          <button className="nav-item"><Wallet size={17} />Account overview</button>
-          <button className="nav-item"><LockKeyhole size={17} />Security</button>
+          <button className={`nav-item ${activePage === 'Account Overview' ? 'active' : ''}`} onClick={() => {setActivePage('Account Overview');setSidebarOpen(false);}}><Wallet size={17} />Account overview</button>
+          <button className={`nav-item ${activePage === 'Security Centre' ? 'active' : ''}`} onClick={() => {setActivePage('Security Centre');setSidebarOpen(false);}}><LockKeyhole size={17} />Security</button>
           <button className="nav-item"><LogOut size={17} />Sign out</button>
         </div>
       </aside>
@@ -1330,7 +1393,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
