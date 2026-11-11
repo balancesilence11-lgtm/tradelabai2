@@ -4,7 +4,7 @@ import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
   Moon, Radio, Settings, ShieldCheck, SlidersHorizontal, Sparkles,
-  TrendingUp, Wallet, Plus, Star, Trash2, CheckCircle2, X
+  TrendingUp, Wallet, Plus, Star, Trash2, CheckCircle2, X, CalendarDays
 } from 'lucide-react';
 import './style.css';
 
@@ -23,6 +23,7 @@ const navigation = [
   { name: 'Dashboard', icon: LayoutDashboard },
   { name: 'Market Analysis', icon: BarChart3 },
   { name: 'Market Watch & Alerts', icon: Bell },
+  { name: 'Economic Calendar', icon: CalendarDays },
   { name: 'Technical Indicators', icon: SlidersHorizontal },
   { name: 'AI Analysis', icon: Sparkles },
   { name: 'AI Assistant', icon: Bot },
@@ -2017,6 +2018,77 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
   </>;
 }
 
+
+function EconomicCalendarPage({ selectedMarket }) {
+  const [events,setEvents]=useState(()=>{
+    try { const saved=JSON.parse(localStorage.getItem('tradelab_economic_events_v1')||'[]'); return Array.isArray(saved)?saved:[]; }
+    catch { return []; }
+  });
+  const [title,setTitle]=useState('');
+  const [currency,setCurrency]=useState('USD');
+  const [impact,setImpact]=useState('High');
+  const [eventTime,setEventTime]=useState('');
+  const [forecast,setForecast]=useState('');
+  const [previous,setPrevious]=useState('');
+  const [actual,setActual]=useState('');
+  const [filterImpact,setFilterImpact]=useState('All');
+  const [filterCurrency,setFilterCurrency]=useState('All');
+  const [showPast,setShowPast]=useState(false);
+  const [notice,setNotice]=useState('');
+  const [now,setNow]=useState(Date.now());
+  useEffect(()=>{try{localStorage.setItem('tradelab_economic_events_v1',JSON.stringify(events));}catch{}},[events]);
+  useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),30000);return()=>clearInterval(timer);},[]);
+  const exposureMap={EUR:['EURUSD'],GBP:['GBPUSD'],JPY:['USDJPY'],USD:['EURUSD','GBPUSD','USDJPY','XAUUSD','US30','BTCUSD'],AUD:['AUDUSD'],NZD:['NZDUSD'],CAD:['USDCAD'],CHF:['USDCHF'],CNY:['XAUUSD','BTCUSD']};
+  const exposureFor=ccy=>[...new Set([...(exposureMap[ccy]||[]),...(ccy==='USD'?[]:exposureMap.USD.filter(x=>x==='XAUUSD'||x==='US30'||x==='BTCUSD'))])];
+  const addEvent=()=>{
+    if(!title.trim()||!eventTime){setNotice('Enter an event name and scheduled date/time.');return;}
+    const ts=new Date(eventTime).getTime();
+    if(!Number.isFinite(ts)){setNotice('The event date/time is invalid.');return;}
+    setEvents(old=>[{id:`${Date.now()}-${Math.random().toString(16).slice(2)}`,title:title.trim(),currency,impact,eventTime:new Date(ts).toISOString(),forecast:forecast.trim(),previous:previous.trim(),actual:actual.trim(),createdAt:new Date().toISOString()},...old].slice(0,250));
+    setTitle('');setForecast('');setPrevious('');setActual('');setNotice('Event saved on this browser.');
+  };
+  const updateActual=(id,value)=>setEvents(old=>old.map(e=>e.id===id?{...e,actual:value}:e));
+  const fmtDate=iso=>new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
+  const countdown=iso=>{const diff=new Date(iso).getTime()-now;if(diff<0)return `Released ${Math.floor(-diff/60000)} min ago`;const days=Math.floor(diff/86400000),hours=Math.floor(diff%86400000/3600000),mins=Math.floor(diff%3600000/60000);return days?`${days}d ${hours}h`:hours?`${hours}h ${mins}m`:`${mins}m`};
+  const sorted=[...events].sort((a,b)=>new Date(a.eventTime)-new Date(b.eventTime));
+  const filtered=sorted.filter(e=>(filterImpact==='All'||e.impact===filterImpact)&&(filterCurrency==='All'||e.currency===filterCurrency)&&(showPast||new Date(e.eventTime).getTime()>=now-86400000));
+  const upcoming=events.filter(e=>new Date(e.eventTime).getTime()>=now).length;
+  const highUpcoming=events.filter(e=>e.impact==='High'&&new Date(e.eventTime).getTime()>=now).length;
+  const activeRisk=events.filter(e=>{const t=new Date(e.eventTime).getTime();return e.impact==='High'&&now>=t-3600000&&now<=t+1800000;});
+  const impactColor=v=>v==='High'?'#fb7185':v==='Medium'?'#fbbf24':'#21d6a0';
+  const marketExposure=exposureFor(currency);
+  return <>
+    <div className="welcome"><div><h1>Economic Calendar & Event Risk</h1><div className="muted">Schedule macroeconomic releases, monitor countdowns and review currency exposure before trading.</div></div><div className="demo-badge">● EVENT RISK MONITOR</div></div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Upcoming events</div><div className="stat-value">{upcoming}</div><div className="muted">Your saved schedule</div></div>
+      <div className="card"><div className="stat-label">Upcoming high-impact</div><div className="stat-value" style={{color:'#fb7185'}}>{highUpcoming}</div><div className="muted">Events marked high impact</div></div>
+      <div className="card"><div className="stat-label">Active high-impact windows</div><div className="stat-value" style={{color:activeRisk.length?'#fb7185':'#21d6a0'}}>{activeRisk.length}</div><div className="muted">1 hour before to 30 min after release</div></div>
+      <div className="card"><div className="stat-label">Selected instrument</div><div className="stat-value" style={{fontSize:19}}>{selectedMarket}</div><div className="muted">Event exposure is indicative</div></div>
+    </div>
+    {activeRisk.length>0&&<div className="card" role="alert" style={{marginTop:16,borderColor:'#fb7185'}}><h3 className="negative">High-impact event risk window</h3>{activeRisk.map(e=><p key={e.id} style={{margin:'7px 0'}}><strong>{e.currency} · {e.title}</strong> — {fmtDate(e.eventTime)}. Consider wider spreads, slippage and volatility; review exposure before placing trades.</p>)}</div>}
+    <div className="bottom-grid" style={{marginTop:16}}>
+      <div className="card"><div className="card-heading"><div><h3><CalendarDays size={16} style={{verticalAlign:'middle'}}/> Add economic event</h3><div className="muted">Enter a verified release from your preferred economic-calendar source.</div></div></div>
+        <div className="field"><label>Event name</label><input value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. US CPI year-over-year" maxLength={100}/></div>
+        <div className="order-grid"><div className="field"><label>Currency / economy</label><select value={currency} onChange={e=>setCurrency(e.target.value)}>{['USD','EUR','GBP','JPY','AUD','NZD','CAD','CHF','CNY'].map(v=><option key={v}>{v}</option>)}</select></div><div className="field"><label>Impact level</label><select value={impact} onChange={e=>setImpact(e.target.value)}><option>High</option><option>Medium</option><option>Low</option></select></div></div>
+        <div className="field"><label>Scheduled release time (your device local time)</label><input type="datetime-local" value={eventTime} onChange={e=>setEventTime(e.target.value)}/></div>
+        <div className="order-grid"><div className="field"><label>Forecast (optional)</label><input value={forecast} onChange={e=>setForecast(e.target.value)} placeholder="Forecast"/></div><div className="field"><label>Previous (optional)</label><input value={previous} onChange={e=>setPrevious(e.target.value)} placeholder="Previous"/></div></div>
+        <button className="execute-btn" onClick={addEvent}>Save calendar event</button>{notice&&<p className="muted" role="status">{notice}</p>}
+      </div>
+      <div className="card"><div className="card-heading"><div><h3>Currency exposure guide</h3><div className="muted">Indicative instruments that may react to the selected economy's data.</div></div><span className="tag">REFERENCE</span></div>
+        <div className="signal"><span>Selected market</span><strong>{selectedMarket}</strong></div>
+        <div className="signal"><span>Event currency</span><strong>{currency}</strong></div>
+        <div style={{display:'flex',gap:7,flexWrap:'wrap',marginTop:12}}>{marketExposure.map(x=><span className="tag" key={x}>{x}</span>)}</div>
+        <p className="muted" style={{fontSize:11,lineHeight:1.7,marginTop:14}}>Exposure is a simplified currency mapping, not a measured correlation. USD releases can affect several markets; the direction and magnitude depend on expectations, positioning and broader conditions.</p>
+      </div>
+    </div>
+    <div className="card" style={{marginTop:16}}><div className="card-heading"><div><h3>Event schedule</h3><div className="muted">Countdowns update every 30 seconds. Times are displayed in your browser's local timezone.</div></div><span className="tag">{filtered.length} EVENTS</span></div>
+      <div className="order-grid" style={{alignItems:'end'}}><div className="field"><label>Impact filter</label><select value={filterImpact} onChange={e=>setFilterImpact(e.target.value)}>{['All','High','Medium','Low'].map(v=><option key={v}>{v}</option>)}</select></div><div className="field"><label>Currency filter</label><select value={filterCurrency} onChange={e=>setFilterCurrency(e.target.value)}>{['All','USD','EUR','GBP','JPY','AUD','NZD','CAD','CHF','CNY'].map(v=><option key={v}>{v}</option>)}</select></div><label style={{display:'flex',gap:8,alignItems:'center',marginBottom:14}}><input type="checkbox" checked={showPast} onChange={e=>setShowPast(e.target.checked)}/> Include events from the last 24 hours</label></div>
+      <div className="table-wrap"><table><thead><tr><th>Release</th><th>Currency</th><th>Impact</th><th>Scheduled time</th><th>Countdown</th><th>Forecast</th><th>Previous</th><th>Actual</th><th>Exposure</th><th>Action</th></tr></thead><tbody>{filtered.length===0?<tr><td colSpan="10" className="empty">No matching events. Add verified events above; no live economic-calendar feed is connected yet.</td></tr>:filtered.map(e=>{const t=new Date(e.eventTime).getTime(),windowRisk=e.impact==='High'&&now>=t-3600000&&now<=t+1800000;return <tr key={e.id}><td><strong>{e.title}</strong></td><td>{e.currency}</td><td><span className="tag" style={{color:impactColor(e.impact)}}>{e.impact.toUpperCase()}</span></td><td>{fmtDate(e.eventTime)}</td><td style={{color:windowRisk?'#fb7185':'inherit'}}>{countdown(e.eventTime)}</td><td>{e.forecast||'—'}</td><td>{e.previous||'—'}</td><td><input aria-label={`Actual result for ${e.title}`} value={e.actual||''} onChange={ev=>updateActual(e.id,ev.target.value)} placeholder="Enter actual" style={{minWidth:90,width:110}}/></td><td>{exposureFor(e.currency).join(', ')||'—'}</td><td><button className="period-btn" onClick={()=>setEvents(old=>old.filter(x=>x.id!==e.id))}><Trash2 size={14}/></button></td></tr>;})}</tbody></table></div>
+      <p className="muted" style={{fontSize:11,lineHeight:1.7,marginTop:12}}>Data-source status: manual schedule only. This module does not fetch or verify release dates, consensus forecasts or actual results from a provider. Confirm every event and timezone against a trusted economic calendar before use. Events are stored locally on this device. High-impact warnings are advisory and do not block trades or place orders.</p>
+    </div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -2315,7 +2387,7 @@ function App() {
                 </tbody>
               </table></div>
             </div>
-          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Market Analysis' ? <>
+          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
