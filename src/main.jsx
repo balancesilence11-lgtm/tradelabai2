@@ -427,7 +427,12 @@ function runStrategyBacktest(candles, config) {
   const macd = calcMACD(closes, config.macdFast, config.macdSlow, config.macdSignal);
   const bands = calcBollinger(closes, config.bbPeriod, config.bbDeviation);
   const lookback = Math.max(5, config.lookback);
-  const fee = Math.max(0, config.costBps) / 10000;
+  const spreadBps = Math.max(0, Number(config.spreadBps ?? 1));
+  const commissionBps = Math.max(0, Number(config.commissionBps ?? 0.2));
+  const slippageBps = Math.max(0, Number(config.slippageBps ?? (config.costBps ?? 0.3)));
+  // Half the quoted spread is paid on each side; commission and slippage are per side.
+  const costPerSideBps = spreadBps / 2 + commissionBps + slippageBps;
+  const fee = costPerSideBps / 10000;
   const initial = Math.max(100, config.capital);
   let equity = initial, position = 0, activeTrade = null;
   const curve = [{ index: 0, time: clean[0].time, equity }];
@@ -514,7 +519,8 @@ function runStrategyBacktest(candles, config) {
     buyHold, winRate: trades.length ? wins.length / trades.length * 100 : 0,
     profitFactor: grossLoss === 0 ? (grossProfit > 0 ? Infinity : 0) : grossProfit / grossLoss,
     maxDrawdown, tradeCount: trades.length, wins: wins.length, losses: losses.length,
-    costBps: config.costBps, candlesUsed: clean.length
+    spreadBps, commissionBps, slippageBps, costPerSideBps,
+    estimatedRoundTripCostBps: costPerSideBps * 2, candlesUsed: clean.length
   };
 }
 
@@ -576,7 +582,9 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [bbPeriod, setBbPeriod] = useState(20);
   const [bbDeviation, setBbDeviation] = useState(2);
   const [capital, setCapital] = useState(10000);
-  const [costBps, setCostBps] = useState(1.5);
+  const [spreadBps, setSpreadBps] = useState(1);
+  const [commissionBps, setCommissionBps] = useState(0.2);
+  const [slippageBps, setSlippageBps] = useState(0.3);
   const [runKey, setRunKey] = useState(0);
   const [optimization, setOptimization] = useState([]);
   const [optimizing, setOptimizing] = useState(false);
@@ -593,7 +601,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     try { localStorage.setItem('tradelab_strategy_library_v1', JSON.stringify(savedStrategies)); }
     catch (e) { console.warn('Strategy library could not be saved in this browser.', e); setLibraryMessage('Storage is unavailable or full. Export or remove saved strategies.'); }
   }, [savedStrategies]);
-  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, costBps };
+  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps };
   const applyStrategyConfig = saved => {
     if (!saved?.config) return;
     const c = saved.config;
@@ -604,7 +612,9 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     setMacdFast(Number(c.macdFast) || 12); setMacdSlow(Number(c.macdSlow) || 26);
     setMacdSignal(Number(c.macdSignal) || 9); setBbPeriod(Number(c.bbPeriod) || 20);
     setBbDeviation(Number(c.bbDeviation) || 2); setCapital(Math.max(100, Number(c.capital) || 10000));
-    setCostBps(Math.max(0, Math.min(100, Number(c.costBps) || 0)));
+    setSpreadBps(Math.max(0, Math.min(100, Number(c.spreadBps ?? 0) || 0)));
+    setCommissionBps(Math.max(0, Math.min(100, Number(c.commissionBps ?? 0) || 0)));
+    setSlippageBps(Math.max(0, Math.min(100, Number(c.slippageBps ?? c.costBps ?? 0) || 0)));
     setStrategyName(saved.name || 'My strategy'); setSelectedSavedId(saved.id);
     setOptimization([]); setRunKey(k => k + 1); setLibraryMessage(`Loaded “${saved.name}”.`);
   };
@@ -637,7 +647,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       const incoming = Array.isArray(parsed) ? parsed : parsed?.strategies;
       if (!Array.isArray(incoming) || !incoming.length || incoming.length > 200) throw new Error('Expected 1–200 strategies in a TradeLab JSON export.');
       const allowed = ['ema','rsi','breakout','macd','bollinger'];
-      const numericRanges = { fast:[2,200], slow:[3,500], rsiPeriod:[2,100], oversold:[1,49], overbought:[51,99], lookback:[2,500], macdFast:[2,100], macdSlow:[3,200], macdSignal:[2,50], bbPeriod:[5,200], bbDeviation:[0.5,4], capital:[100,1000000000], costBps:[0,100] };
+      const numericRanges = { fast:[2,200], slow:[3,500], rsiPeriod:[2,100], oversold:[1,49], overbought:[51,99], lookback:[2,500], macdFast:[2,100], macdSlow:[3,200], macdSignal:[2,50], bbPeriod:[5,200], bbDeviation:[0.5,4], capital:[100,1000000000], costBps:[0,100], spreadBps:[0,100], commissionBps:[0,100], slippageBps:[0,100] };
       const valid = incoming.map((item,index) => {
         if (!item || typeof item !== 'object' || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 60 || !item.config || typeof item.config !== 'object') throw new Error(`Strategy ${index+1} has an invalid name or configuration.`);
         const c = item.config;
@@ -676,7 +686,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     if (selectedSavedId === id) setSelectedSavedId('');
     setLibraryMessage(`Deleted “${item.name}”.`);
   };
-  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, costBps, runKey]);
+  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, runKey]);
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
   const chart = result?.curve || [];
@@ -696,7 +706,9 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       <div className="order-grid" style={{marginTop:12}}>
         <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="ema">EMA crossover</option><option value="rsi">RSI mean-reversion</option><option value="breakout">Price breakout</option><option value="macd">MACD crossover</option><option value="bollinger">Bollinger Bands mean-reversion</option></select></div>
         <div className="field"><label>Starting capital (USD)</label><input type="number" min="100" step="100" value={capital} onChange={e=>setCapital(Math.max(100,Number(e.target.value)||100))}/></div>
-        <div className="field"><label>Trading cost per side (bps)</label><input type="number" min="0" max="100" step="0.1" value={costBps} onChange={e=>setCostBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
+        <div className="field"><label>Spread (bps, full spread)</label><input type="number" min="0" max="100" step="0.1" value={spreadBps} onChange={e=>setSpreadBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
+        <div className="field"><label>Commission (bps per side)</label><input type="number" min="0" max="100" step="0.1" value={commissionBps} onChange={e=>setCommissionBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
+        <div className="field"><label>Slippage (bps per side)</label><input type="number" min="0" max="100" step="0.1" value={slippageBps} onChange={e=>setSlippageBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
         {strategy==='ema' && <><div className="field"><label>Fast EMA</label><input type="number" min="2" max="150" value={fastPeriod} onChange={e=>setFastPeriod(Math.max(2,Math.min(150,Number(e.target.value)||2)))}/></div><div className="field"><label>Slow EMA</label><input type="number" min="3" max="250" value={slowPeriod} onChange={e=>setSlowPeriod(Math.max(3,Math.min(250,Number(e.target.value)||3)))}/></div></>}
         {strategy==='rsi' && <><div className="field"><label>RSI period</label><input type="number" min="2" max="50" value={rsiPeriod} onChange={e=>setRsiPeriod(Math.max(2,Math.min(50,Number(e.target.value)||2)))}/></div><div className="field"><label>Oversold threshold</label><input type="number" min="5" max="45" value={oversold} onChange={e=>setOversold(Math.max(5,Math.min(45,Number(e.target.value)||5)))}/></div><div className="field"><label>Overbought threshold</label><input type="number" min="55" max="95" value={overbought} onChange={e=>setOverbought(Math.max(55,Math.min(95,Number(e.target.value)||55)))}/></div></>}
         {strategy==='breakout' && <div className="field"><label>Breakout lookback candles</label><input type="number" min="5" max="100" value={lookback} onChange={e=>setLookback(Math.max(5,Math.min(100,Number(e.target.value)||5)))}/></div>}
@@ -711,7 +723,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
           <div className="field"><label>Standard deviation multiplier</label><input type="number" min="0.5" max="4" step="0.1" value={bbDeviation} onChange={e=>setBbDeviation(Math.max(0.5,Math.min(4,Number(e.target.value)||0.5)))}/></div>
         </>}
       </div>
-      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Estimated round-trip cost: <strong>{(spreadBps + commissionBps * 2 + slippageBps * 2).toFixed(2)} bps</strong> ({((spreadBps + commissionBps * 2 + slippageBps * 2) / 100).toFixed(4)}%). Spread, commission and slippage are applied on entry and exit.</span></div>
     </div>
     <div className="card" style={{marginTop:18}}>
       <div className="card-heading"><div><h3>Strategy Library</h3><div className="muted">Save, load, duplicate, import and export strategy configurations on this device.</div></div><span className="tag">{savedStrategies.length} SAVED</span></div>
