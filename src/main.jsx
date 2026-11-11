@@ -706,7 +706,11 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [selectedSavedId, setSelectedSavedId] = useState('');
   const [libraryMessage, setLibraryMessage] = useState('');
   const [portfolioAllocations, setPortfolioAllocations] = useState(() => { try { return JSON.parse(localStorage.getItem('tradelab_portfolio_allocations_v1') || '{}'); } catch { return {}; } });
+  const [portfolioRiskLimit, setPortfolioRiskLimit] = useState(() => { try { const n=Number(localStorage.getItem('tradelab_portfolio_risk_limit_v1')); return Number.isFinite(n)&&n>0?n:5; } catch { return 5; } });
+  const [portfolioStress, setPortfolioStress] = useState('severe');
+  const [portfolioRiskNotice, setPortfolioRiskNotice] = useState('');
   useEffect(() => { try { localStorage.setItem('tradelab_portfolio_allocations_v1', JSON.stringify(portfolioAllocations)); } catch { /* allocation preferences remain usable for this session */ } }, [portfolioAllocations]);
+  useEffect(() => { try { localStorage.setItem('tradelab_portfolio_risk_limit_v1', String(portfolioRiskLimit)); } catch { /* keep setting for this session */ } }, [portfolioRiskLimit]);
   useEffect(() => {
     try { localStorage.setItem('tradelab_strategy_library_v1', JSON.stringify(savedStrategies)); }
     catch (e) { console.warn('Strategy library could not be saved in this browser.', e); setLibraryMessage('Storage is unavailable or full. Export or remove saved strategies.'); }
@@ -829,8 +833,16 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     const returns=members.map(x=>({ ...x, series:x.result.curve.slice(1,length).map((point,i)=>point.equity / x.result.curve[i].equity - 1) }));
     const correlation=(a,b)=>{ const n=Math.min(a.length,b.length); if(n<2)return null; const aa=a.slice(0,n),bb=b.slice(0,n),ma=aa.reduce((v,x)=>v+x,0)/n,mb=bb.reduce((v,x)=>v+x,0)/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){const da=aa[i]-ma,db=bb[i]-mb;cov+=da*db;va+=da*da;vb+=db*db;} return va>0&&vb>0?cov/Math.sqrt(va*vb):null; };
     const correlations=returns.map(a=>returns.map(b=>correlation(a.series,b.series)));
-    return { members, allocationTotal, curve, finalEquity, netReturn:(finalEquity/10000-1)*100, maxDrawdown, correlations };
-  }, [savedStrategies, candles, portfolioAllocations]);
+    const riskMembers=members.map(x=>({ ...x, normalizedAllocation:x.allocation/allocationTotal*100, riskScore:Math.max(0.25,Number(x.result.maxDrawdown)||0.25) }));
+    const riskWeightTotal=riskMembers.reduce((sum,x)=>sum+x.normalizedAllocation*x.riskScore,0)||1;
+    const riskContributions=riskMembers.map(x=>({ ...x, contributionPct:x.normalizedAllocation*x.riskScore/riskWeightTotal*100, estimatedRiskPct:x.normalizedAllocation*x.riskScore/100 }));
+    const stressMultipliers={mild:0.5,moderate:1,severe:1.75,extreme:2.5};
+    const stressMultiplier=stressMultipliers[portfolioStress]||1.75;
+    const stressLossPct=riskMembers.reduce((sum,x)=>sum+(x.normalizedAllocation/100)*Math.min(100,x.riskScore*stressMultiplier),0);
+    const highCorrelationPairs=[];
+    for(let i=0;i<correlations.length;i++) for(let j=i+1;j<correlations.length;j++) if(correlations[i][j]!=null&&correlations[i][j]>=0.75) highCorrelationPairs.push({a:members[i].item.name,b:members[j].item.name,value:correlations[i][j]});
+    return { members, allocationTotal, curve, finalEquity, netReturn:(finalEquity/10000-1)*100, maxDrawdown, correlations, riskContributions, stressLossPct, stressMultiplier, highCorrelationPairs };
+  }, [savedStrategies, candles, portfolioAllocations, portfolioStress]);
   const runOptimization = () => { setOptimizing(true); setOptimization([]); setTimeout(() => { setOptimization(optimizeStrategy(candles, config)); setOptimizing(false); }, 30); };
   return <>
     <div className="welcome"><div><h1>Strategy Lab & Backtesting</h1><div className="muted">Test rule-based strategies against the currently loaded historical candles.</div></div><div className="demo-badge">● HISTORICAL SIMULATION</div></div>
@@ -889,6 +901,25 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         <div className="table-wrap" style={{marginTop:14}}><table><thead><tr><th>Saved strategy</th><th>Type</th><th>Allocation (%)</th><th>Individual return</th><th>Individual drawdown</th></tr></thead><tbody>{portfolio.members.map(({item,allocation,result:memberResult})=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{String(item.config.strategy||'').toUpperCase()}</td><td><input aria-label={`Allocation for ${item.name}`} type="number" min="0" max="100" step="1" value={portfolioAllocations[item.id] ?? (100 / savedStrategies.length).toFixed(1)} onChange={e=>setPortfolioAllocations(old=>({...old,[item.id]:Math.max(0,Math.min(100,Number(e.target.value)||0))}))} style={{width:90}} /></td><td className={memberResult.netReturn>=0?'positive':'negative'}>{pct(memberResult.netReturn)}</td><td>{memberResult.maxDrawdown.toFixed(2)}%</td></tr>)}</tbody></table></div>
         <div className="card-heading" style={{marginTop:18}}><div><h3>Strategy return correlation</h3><div className="muted">Pearson correlation of candle-by-candle equity returns; values near +1 move similarly, near 0 show weak linear relation, and near −1 move oppositely.</div></div></div>
         <div className="table-wrap"><table><thead><tr><th>Strategy</th>{portfolio.members.map(x=><th key={x.item.id}>{x.item.name}</th>)}</tr></thead><tbody>{portfolio.members.map((row,i)=><tr key={row.item.id}><td><strong>{row.item.name}</strong></td>{portfolio.members.map((col,j)=>{const value=portfolio.correlations[i][j];return <td key={col.item.id}>{value==null?'—':value.toFixed(2)}</td>;})}</tr>)}</tbody></table></div>
+        <div className="card" style={{marginTop:16,borderColor:'#31516b'}}>
+          <div className="card-heading"><div><h3>Portfolio Risk Intelligence</h3><div className="muted">Risk contribution, allocation guidance, exposure limits and scenario analysis.</div></div><span className="tag">RESEARCH MODE</span></div>
+          <div className="stats-grid" style={{marginTop:12}}>
+            <div><div className="stat-label">Estimated portfolio risk proxy</div><div className="stat-value">{portfolio.riskContributions.reduce((v,x)=>v+x.estimatedRiskPct,0).toFixed(2)}%</div><div className="muted">Allocation-weighted historical drawdown proxy</div></div>
+            <div><div className="stat-label">Risk limit</div><div className="stat-value">{portfolioRiskLimit.toFixed(1)}%</div><div className="muted">User-configured advisory threshold</div></div>
+            <div><div className="stat-label">Stress loss estimate</div><div className="stat-value negative">-{portfolio.stressLossPct.toFixed(2)}%</div><div className="muted">Historical drawdown proxy × scenario factor</div></div>
+            <div><div className="stat-label">High-correlation pairs</div><div className="stat-value">{portfolio.highCorrelationPairs.length}</div><div className="muted">Pairs with correlation ≥ 0.75</div></div>
+          </div>
+          <div className="order-grid" style={{marginTop:12,alignItems:'end'}}>
+            <div className="field"><label>Maximum portfolio risk proxy (%)</label><input type="number" min="0.5" max="50" step="0.5" value={portfolioRiskLimit} onChange={e=>setPortfolioRiskLimit(Math.max(0.5,Math.min(50,Number(e.target.value)||0.5)))}/></div>
+            <div className="field"><label>Stress scenario</label><select value={portfolioStress} onChange={e=>setPortfolioStress(e.target.value)}><option value="mild">Mild correction (0.5×)</option><option value="moderate">Moderate shock (1.0×)</option><option value="severe">Severe shock (1.75×)</option><option value="extreme">Extreme shock (2.5×)</option></select></div>
+            <button className="execute-btn" onClick={()=>{const scores=portfolio.riskContributions.map(x=>1/Math.max(0.25,x.riskScore));const total=scores.reduce((a,b)=>a+b,0)||1;const next={};portfolio.riskContributions.forEach((x,i)=>{next[x.item.id]=Number((scores[i]/total*100).toFixed(1));});setPortfolioAllocations(next);setPortfolioRiskNotice('Risk-adjusted allocations applied. Review the weights and backtest again before relying on them.');}}>Apply risk-balanced allocation</button>
+          </div>
+          {portfolioRiskNotice && <p className="muted" role="status">{portfolioRiskNotice}</p>}
+          <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>Strategy</th><th>Allocation</th><th>Risk score (DD %)</th><th>Share of portfolio risk</th><th>Risk proxy contribution</th></tr></thead><tbody>{portfolio.riskContributions.map(x=><tr key={x.item.id}><td>{x.item.name}</td><td>{x.normalizedAllocation.toFixed(1)}%</td><td>{x.riskScore.toFixed(2)}%</td><td>{x.contributionPct.toFixed(1)}%</td><td>{x.estimatedRiskPct.toFixed(2)}%</td></tr>)}</tbody></table></div>
+          {portfolio.riskContributions.reduce((v,x)=>v+x.estimatedRiskPct,0)>portfolioRiskLimit && <p className="negative" role="alert" style={{fontSize:12}}>Advisory exposure limit exceeded. Consider reducing allocations or excluding high-risk strategies. This warning does not block orders.</p>}
+          {portfolio.highCorrelationPairs.length>0 ? <div style={{marginTop:12}}><strong style={{color:'#fbbf24'}}>Correlation warnings</strong>{portfolio.highCorrelationPairs.map((x,i)=><p className="muted" key={`${x.a}-${x.b}-${i}`} style={{margin:'6px 0'}}>{x.a} ↔ {x.b}: {x.value.toFixed(2)} — these strategies have historically moved similarly.</p>)}</div> : <p className="muted" style={{marginTop:12}}>No high-correlation strategy pairs detected in the available historical sample.</p>}
+          <p className="muted" style={{fontSize:11,marginTop:12}}>Stress testing applies a transparent multiplier to each strategy's historical maximum drawdown, weighted by its portfolio allocation. It is a scenario estimate, not a forecast or VaR model.</p>
+        </div>
         <p className="muted" style={{fontSize:11,lineHeight:1.6}}>Simulation starts with a notional $10,000 portfolio and combines each saved strategy's normalized historical equity curve using the entered allocation weights. Weights are normalized if their total is not 100%. This is a research simulation, not an account-level allocation engine; it does not model overlapping positions, shared margin, currency conversion, portfolio-level order netting or live execution.</p>
       </>}
     </div>
