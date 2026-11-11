@@ -580,7 +580,56 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [runKey, setRunKey] = useState(0);
   const [optimization, setOptimization] = useState([]);
   const [optimizing, setOptimizing] = useState(false);
+  const [strategyName, setStrategyName] = useState('My strategy');
+  const [savedStrategies, setSavedStrategies] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('tradelab_strategy_library_v1') || '[]');
+      return Array.isArray(stored) ? stored.filter(item => item && item.id && item.config) : [];
+    } catch { return []; }
+  });
+  const [selectedSavedId, setSelectedSavedId] = useState('');
+  const [libraryMessage, setLibraryMessage] = useState('');
+  useEffect(() => {
+    try { localStorage.setItem('tradelab_strategy_library_v1', JSON.stringify(savedStrategies)); }
+    catch (e) { console.warn('Strategy library could not be saved in this browser.', e); setLibraryMessage('Storage is unavailable or full. Export or remove saved strategies.'); }
+  }, [savedStrategies]);
   const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, costBps };
+  const applyStrategyConfig = saved => {
+    if (!saved?.config) return;
+    const c = saved.config;
+    setStrategy(c.strategy || 'ema');
+    setFastPeriod(Number(c.fast) || 20); setSlowPeriod(Number(c.slow) || 50);
+    setRsiPeriod(Number(c.rsiPeriod) || 14); setOversold(Number(c.oversold) || 30);
+    setOverbought(Number(c.overbought) || 70); setLookback(Number(c.lookback) || 20);
+    setMacdFast(Number(c.macdFast) || 12); setMacdSlow(Number(c.macdSlow) || 26);
+    setMacdSignal(Number(c.macdSignal) || 9); setBbPeriod(Number(c.bbPeriod) || 20);
+    setBbDeviation(Number(c.bbDeviation) || 2); setCapital(Math.max(100, Number(c.capital) || 10000));
+    setCostBps(Math.max(0, Math.min(100, Number(c.costBps) || 0)));
+    setStrategyName(saved.name || 'My strategy'); setSelectedSavedId(saved.id);
+    setOptimization([]); setRunKey(k => k + 1); setLibraryMessage(`Loaded “${saved.name}”.`);
+  };
+  const saveCurrentStrategy = () => {
+    const name = strategyName.trim();
+    if (!name) { setLibraryMessage('Enter a name before saving.'); return; }
+    const existing = savedStrategies.find(item => item.id === selectedSavedId);
+    const item = { id: existing?.id || `strategy-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, name, config: { ...config }, updatedAt: new Date().toISOString(), createdAt: existing?.createdAt || new Date().toISOString() };
+    setSavedStrategies(old => existing ? old.map(x => x.id === existing.id ? item : x) : [item, ...old]);
+    setSelectedSavedId(item.id); setLibraryMessage(`“${name}” saved on this device.`);
+  };
+  const duplicateSavedStrategy = id => {
+    const source = savedStrategies.find(item => item.id === id);
+    if (!source) return;
+    const copy = { ...source, id: `strategy-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, name: `${source.name} (Copy)`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), config: { ...source.config } };
+    setSavedStrategies(old => [copy, ...old]); setSelectedSavedId(copy.id); setStrategyName(copy.name);
+    setLibraryMessage(`Created “${copy.name}”.`);
+  };
+  const deleteSavedStrategy = id => {
+    const item = savedStrategies.find(x => x.id === id);
+    if (!item || !window.confirm(`Delete saved strategy “${item.name}”?`)) return;
+    setSavedStrategies(old => old.filter(x => x.id !== id));
+    if (selectedSavedId === id) setSelectedSavedId('');
+    setLibraryMessage(`Deleted “${item.name}”.`);
+  };
   const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, costBps, runKey]);
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
@@ -617,6 +666,20 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         </>}
       </div>
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
+    </div>
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading"><div><h3>Strategy Library</h3><div className="muted">Save, reload, duplicate and manage your strategy configurations on this device.</div></div><span className="tag">{savedStrategies.length} SAVED</span></div>
+      <div className="order-grid" style={{marginTop:12,alignItems:'end'}}>
+        <div className="field"><label>Strategy name</label><input value={strategyName} onChange={e=>setStrategyName(e.target.value)} maxLength={60} placeholder="e.g. XAUUSD MACD setup"/></div>
+        <div className="field"><label>Saved strategies</label><select value={selectedSavedId} onChange={e=>setSelectedSavedId(e.target.value)}><option value="">Select a saved strategy…</option>{savedStrategies.map(item=><option key={item.id} value={item.id}>{item.name} · {String(item.config.strategy || '').toUpperCase()}</option>)}</select></div>
+        <button className="execute-btn" onClick={saveCurrentStrategy}>Save / Update</button>
+        <button className="execute-btn" style={{background:'#26364e'}} disabled={!selectedSavedId} onClick={()=>applyStrategyConfig(savedStrategies.find(x=>x.id===selectedSavedId))}>Load</button>
+        <button className="execute-btn" style={{background:'#26364e'}} disabled={!selectedSavedId} onClick={()=>duplicateSavedStrategy(selectedSavedId)}>Duplicate</button>
+        <button className="execute-btn" style={{background:'#713b48'}} disabled={!selectedSavedId} onClick={()=>deleteSavedStrategy(selectedSavedId)}>Delete</button>
+      </div>
+      {libraryMessage && <p className="muted" role="status" style={{fontSize:11,marginBottom:0}}>{libraryMessage}</p>}
+      {savedStrategies.length > 0 && <div className="table-wrap" style={{marginTop:14}}><table><thead><tr><th>Name</th><th>Strategy</th><th>Last updated</th><th>Actions</th></tr></thead><tbody>{savedStrategies.map(item=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{({ema:'EMA crossover',rsi:'RSI mean-reversion',breakout:'Price breakout',macd:'MACD crossover',bollinger:'Bollinger Bands'})[item.config.strategy] || item.config.strategy}</td><td>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : '—'}</td><td><div style={{display:'flex',gap:6,flexWrap:'wrap'}}><button className="execute-btn" style={{padding:'7px 10px'}} onClick={()=>applyStrategyConfig(item)}>Load</button><button className="execute-btn" style={{padding:'7px 10px',background:'#26364e'}} onClick={()=>duplicateSavedStrategy(item.id)}>Copy</button><button className="execute-btn" style={{padding:'7px 10px',background:'#713b48'}} onClick={()=>deleteSavedStrategy(item.id)}>Delete</button></div></td></tr>)}</tbody></table></div>}
+      <p className="muted" style={{fontSize:10,lineHeight:1.5,marginBottom:0}}>Saved strategies remain in this browser's local storage. They are not synced across devices or accounts and are not sent to a broker.</p>
     </div>
     {result?.error ? <div className="card" style={{marginTop:18}}><div className="empty">{result.error}</div></div> : <>
       <div className="stats-grid" style={{marginTop:18}}>
