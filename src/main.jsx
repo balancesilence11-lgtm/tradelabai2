@@ -550,7 +550,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [lookback, setLookback] = useState(20);
   const [capital, setCapital] = useState(10000);
   const [costBps, setCostBps] = useState(1.5);
-  const [runKey, setRunKey] = useState(0);
+  const [runMessage, setRunMessage] = useState('');const [runKey, setRunKey] = useState(0);
   const [optimization, setOptimization] = useState([]);
   const [optimizing, setOptimizing] = useState(false);
   const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps };
