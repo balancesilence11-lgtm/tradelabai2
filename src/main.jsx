@@ -1333,10 +1333,28 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
   const [maxTrades,setMaxTrades] = useState('3');
   const [dailyLimit,setDailyLimit] = useState('2');
   const [status,setStatus] = useState('STOPPED');
-  const [trades,setTrades] = useState([]);
-  const [log,setLog] = useState([]);
-  const [lastProcessed,setLastProcessed] = useState('');
+  const [trades,setTrades] = useState(() => { try { return JSON.parse(localStorage.getItem('tradelab_auto_trades_v1') || '[]'); } catch { return []; } });
+  const [log,setLog] = useState(() => { try { return JSON.parse(localStorage.getItem('tradelab_auto_log_v1') || '[]'); } catch { return []; } });
+  const [lastProcessed,setLastProcessed] = useState(() => localStorage.getItem('tradelab_auto_last_candle_v1') || '');
   const [lastSignal,setLastSignal] = useState(null);
+  const [alertsEnabled,setAlertsEnabled] = useState(() => localStorage.getItem('tradelab_auto_alerts_v1') !== 'false');
+  const [summaryPeriod,setSummaryPeriod] = useState('today');
+
+  useEffect(() => { try { localStorage.setItem('tradelab_auto_trades_v1', JSON.stringify(trades)); } catch {} }, [trades]);
+  useEffect(() => { try { localStorage.setItem('tradelab_auto_log_v1', JSON.stringify(log.slice(0,100))); } catch {} }, [log]);
+  useEffect(() => { try { localStorage.setItem('tradelab_auto_last_candle_v1', lastProcessed); } catch {} }, [lastProcessed]);
+  useEffect(() => { try { localStorage.setItem('tradelab_auto_alerts_v1', String(alertsEnabled)); } catch {} }, [alertsEnabled]);
+
+  function notify(title, body) {
+    if (!alertsEnabled || typeof window === 'undefined' || !('Notification' in window) || Notification.permission !== 'granted') return;
+    try { new Notification(title, { body }); } catch {}
+  }
+  async function enableAlerts() {
+    if (!('Notification' in window)) { setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:'Browser notifications are not supported in this browser.'},...old].slice(0,100)); return; }
+    const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+    setAlertsEnabled(permission === 'granted');
+    setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:permission === 'granted' ? 'Browser signal and execution alerts enabled.' : 'Browser notifications were not permitted; in-app activity logging remains available.'},...old].slice(0,100));
+  }
   const fmt = (value, market=symbol) => value==null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(market==='USDJPY'?3:market==='BTCUSD'?1:market==='XAUUSD'?2:5);
 
   const analysis = useMemo(() => {
@@ -1355,14 +1373,16 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
   },[candles]);
 
   useEffect(()=>{
-    if(status!=='RUNNING' || !analysis.candleTime || analysis.candleTime===lastProcessed) return;
-    setLastProcessed(analysis.candleTime);
+    const processingKey = `${symbol}|${timeframe}|${analysis.candleTime || ''}`;
+    if(status!=='RUNNING' || !analysis.candleTime || processingKey===lastProcessed) return;
+    setLastProcessed(processingKey);
     setLastSignal(analysis);
     const now=new Date();
+    if (analysis.signal === 'BUY' || analysis.signal === 'SELL') notify(`${symbol} ${analysis.signal} setup`, `${timeframe}: ${analysis.reason} Reference price ${analysis.price}.`);
     const day=now.toLocaleDateString();
     setTrades(old=>{
       const todays=old.filter(t=>t.day===day);
-      const open=todays.find(t=>t.status==='OPEN');
+      const open=old.find(t=>t.status==='OPEN' && t.symbol===symbol);
       if(open){
         const candle=candles[candles.length-1];
         const hitStop=open.direction==='BUY'?Number(candle.low)<=open.stop:Number(candle.high)>=open.stop;
@@ -1370,30 +1390,53 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
         if(hitStop || hitTarget){
           const exit=hitStop?open.stop:open.target;
           const pnl=(open.direction==='BUY'?exit-open.entry:open.entry-exit);
-          const closed={...open,status:hitStop?'STOPPED OUT':'TARGET HIT',exit,pnl,closedAt:now.toLocaleTimeString()};
-          setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:`${open.symbol} ${open.direction} ${closed.status} at ${exit}. Simulated price P/L: ${pnl.toPrecision(5)}.`},...logs].slice(0,30));
+          const riskDistance=Math.abs(open.entry-open.stop) || 0;
+          const pnlR=riskDistance ? pnl/riskDistance : 0;
+          const lossPct=Math.max(0,-pnlR*(Number(open.volumeRiskPct)||0));
+          const closed={...open,status:hitStop?'STOPPED OUT':'TARGET HIT',exit,pnl,pnlR,lossPct,closedAt:now.toLocaleTimeString()};
+          setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:`${open.symbol} ${open.direction} ${closed.status} at ${exit}. Simulated P/L: ${pnl.toPrecision(5)} (${pnlR.toFixed(2)}R).`},...logs].slice(0,100));
+          notify(`${open.symbol} ${closed.status}`, `Simulated result: ${pnlR.toFixed(2)}R. No broker order was sent.`);
           return old.map(t=>t.id===open.id?closed:t);
         }
         return old;
       }
       const max= Math.max(1,Math.min(20,Number(maxTrades)||1));
+      const dailyLossUsed=todays.filter(t=>t.status!=='OPEN').reduce((sum,t)=>sum+(Number(t.lossPct)||0),0);
+      const lossCap=Math.max(0.1,Math.min(10,Number(dailyLimit)||2));
       if(todays.length>=max){
-        setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:'Entry blocked by daily trade or loss-limit control.'},...logs].slice(0,30));
+        setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:`Entry blocked: maximum ${max} trades for today reached.`},...logs].slice(0,100));
+        return old;
+      }
+      if(dailyLossUsed>=lossCap){
+        setLog(logs=>[{id:Date.now(),time:now.toLocaleTimeString(),text:`Entry blocked: daily simulated loss limit reached (${dailyLossUsed.toFixed(2)}% of risk budget vs ${lossCap.toFixed(2)}% limit).`},...logs].slice(0,100));
         return old;
       }
       if(analysis.signal==='WAIT' || !analysis.price || !analysis.atr) return old;
       const direction=analysis.signal, distance=analysis.atr*1.5;
       const entry=analysis.price, stop=direction==='BUY'?entry-distance:entry+distance, target=direction==='BUY'?entry+distance*2:entry-distance*2;
-      const trade={id:Date.now(),day,symbol,direction,entry,stop,target,volumeRiskPct:Number(risk)||0.5,status:'OPEN',time:now.toLocaleTimeString(),timeframe,pnl:0};
-      setLog(logs=>[{id:trade.id,time:trade.time,text:`Paper ${direction} opened on ${symbol}. Entry ${entry}; SL ${stop}; TP ${target}.`},...logs].slice(0,30));
+      const trade={id:`${symbol}-${timeframe}-${analysis.candleTime}`,day,createdAt:now.toISOString(),symbol,direction,entry,stop,target,volumeRiskPct:Math.max(0.1,Math.min(3,Number(risk)||0.5)),status:'OPEN',time:now.toLocaleTimeString(),timeframe,candleTime:analysis.candleTime,pnl:0};
+      if (old.some(t=>t.id===trade.id)) return old;
+      setLog(logs=>[{id:trade.id,time:trade.time,text:`Paper ${direction} opened on ${symbol}. Entry ${entry}; SL ${stop}; TP ${target}.`},...logs].slice(0,100));
+      notify(`${symbol} paper ${direction} opened`, `Entry ${entry}; stop ${stop}; target ${target}. Simulated only.`);
       return [trade,...old].slice(0,100);
     });
-  },[status,analysis,candles,symbol,timeframe,risk,maxTrades,dailyLimit,lastProcessed]);
+  },[status,analysis,candles,symbol,timeframe,risk,maxTrades,dailyLimit,lastProcessed,alertsEnabled]);
 
-  function changeStatus(next){setStatus(next);setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:`Paper automation ${next.toLowerCase()}.`},...old].slice(0,30));}
+  function changeStatus(next){setStatus(next);setLog(old=>[{id:Date.now(),time:new Date().toLocaleTimeString(),text:`Paper automation ${next.toLowerCase()}.`},...old].slice(0,100));}
   const openTrades=trades.filter(t=>t.status==='OPEN');
   const closedTrades=trades.filter(t=>t.status!=='OPEN');
   const realised=closedTrades.reduce((sum,t)=>sum+(Number(t.pnl)||0),0);
+  const todayKey=new Date().toLocaleDateString();
+  const todayTrades=trades.filter(t=>t.day===todayKey);
+  const todayLossPct=todayTrades.filter(t=>t.status!=='OPEN').reduce((sum,t)=>sum+(Number(t.lossPct)||0),0);
+  const dailyLossCap=Math.max(0.1,Math.min(10,Number(dailyLimit)||2));
+  const weekStart=new Date();
+  weekStart.setHours(0,0,0,0);
+  weekStart.setDate(weekStart.getDate()-((weekStart.getDay()+6)%7));
+  const summaryTrades=closedTrades.filter(t=>summaryPeriod==='today'?t.day===todayKey:summaryPeriod==='week'?new Date(t.createdAt || t.day).getTime()>=weekStart.getTime():true);
+  const summaryWins=summaryTrades.filter(t=>(Number(t.pnlR)||0)>0).length;
+  const summaryLosses=summaryTrades.filter(t=>(Number(t.pnlR)||0)<0).length;
+  const summaryNetR=summaryTrades.reduce((sum,t)=>sum+(Number(t.pnlR)||0),0);
   return <>
     <div className="welcome"><div><h1>Intelligent Automation Centre</h1><div className="muted">Rule-based candle evaluation and simulated trade management · {symbol} · {timeframe}</div></div><div className="demo-badge">● PAPER MODE ONLY</div></div>
     <div className="card"><div className="card-heading"><h3>Automation configuration</h3><span className="tag">{status}</span></div><div className="order-grid">
@@ -1401,15 +1444,18 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
       <div className="field"><label>Risk setting (%)</label><input type="number" min="0.1" max="3" step="0.1" value={risk} onChange={e=>setRisk(e.target.value)}/></div>
       <div className="field"><label>Maximum trades / day</label><input type="number" min="1" max="20" value={maxTrades} onChange={e=>setMaxTrades(e.target.value)}/></div>
       <div className="field"><label>Daily loss limit (%)</label><input type="number" min="0.1" max="10" step="0.1" value={dailyLimit} onChange={e=>setDailyLimit(e.target.value)}/></div>
-    </div><div className="trade-buttons"><button className="execute-btn" onClick={()=>changeStatus('RUNNING')} disabled={status==='RUNNING'}>Start paper mode</button><button className="period-btn" onClick={()=>changeStatus('PAUSED')} disabled={status!=='RUNNING'}>Pause</button><button className="period-btn" onClick={()=>changeStatus('STOPPED')}>Emergency stop</button></div>
+    </div><div className="trade-buttons"><button className="execute-btn" onClick={()=>changeStatus('RUNNING')} disabled={status==='RUNNING'}>Start paper mode</button><button className="period-btn" onClick={()=>changeStatus('PAUSED')} disabled={status!=='RUNNING'}>Pause</button><button className="period-btn" onClick={()=>changeStatus('STOPPED')}>Emergency stop</button><button className="period-btn" onClick={enableAlerts}>{alertsEnabled?'Enable / check alerts':'Enable browser alerts'}</button></div>
+    <div className="signal"><span>Browser alerts</span><strong>{alertsEnabled && 'Notification' in window && Notification.permission==='granted'?'ENABLED':alertsEnabled?'PERMISSION NEEDED':'OFF'}</strong></div>
+    <div className="signal"><span>Daily loss guard · used / limit</span><strong className={todayLossPct>=dailyLossCap?'negative':'positive'}>{todayLossPct.toFixed(2)}% / {dailyLossCap.toFixed(2)}%</strong></div>
     <div className="signal"><span>Latest signal</span><strong className={analysis.signal==='BUY'?'positive':analysis.signal==='SELL'?'negative':''}>{analysis.signal}</strong></div>
     <div className="signal"><span>Signal explanation</span><span>{analysis.reason}</span></div>
     {analysis.price!=null&&<div className="signal"><span>Reference price · RSI · ADX</span><span>{fmt(analysis.price,symbol)} · {analysis.rsi?.toFixed(1)} · {analysis.adx?.toFixed(1)}</span></div>}
     <p className="muted" style={{lineHeight:1.6}}>The engine checks the latest candle whenever the app receives updated market candles. It does not run in the background when this page is closed. Entries use a 1.5× ATR stop and a 3× ATR target. The daily loss percentage is a user-defined advisory threshold only: exact cash loss enforcement and broker-accurate position sizing require instrument contract specifications and account-currency conversion.</p></div>
     <div className="dashboard-grid" style={{marginTop:18}}><div className="card"><div className="card-heading"><h3>Open paper positions</h3><span className="tag">{openTrades.length}</span></div>{openTrades.length===0?<div className="empty">No open simulated positions.</div>:openTrades.map(t=><div className="signal" key={t.id}><span>{t.symbol} {t.direction}<small className="muted" style={{display:'block'}}>Entry {fmt(t.entry,t.symbol)} · SL {fmt(t.stop,t.symbol)} · TP {fmt(t.target,t.symbol)}</small></span><span className="tag">OPEN</span></div>)}</div>
     <div className="card"><div className="card-heading"><h3>Paper performance</h3></div><div className="signal"><span>Closed positions</span><strong>{closedTrades.length}</strong></div><div className="signal"><span>Realised price movement</span><strong className={realised>=0?'positive':'negative'}>{realised.toPrecision(5)}</strong></div><div className="signal"><span>Current candle history</span><strong>{candles.length}</strong></div></div></div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Performance summary</h3><select value={summaryPeriod} onChange={e=>setSummaryPeriod(e.target.value)}><option value="today">Today</option><option value="week">This week</option><option value="all">All saved history</option></select></div><div className="order-grid"><div className="signal"><span>Closed trades</span><strong>{summaryTrades.length}</strong></div><div className="signal"><span>Wins / losses</span><strong>{summaryWins} / {summaryLosses}</strong></div><div className="signal"><span>Net result</span><strong className={summaryNetR>=0?'positive':'negative'}>{summaryNetR.toFixed(2)}R</strong></div><div className="signal"><span>Win rate</span><strong>{summaryTrades.length?`${(summaryWins/summaryTrades.length*100).toFixed(1)}%`:'—'}</strong></div></div><p className="muted" style={{fontSize:11,lineHeight:1.6}}>Summary is calculated from locally stored paper trades. R-multiples use the simulated entry-to-stop distance and exclude fees, spread and slippage.</p></div>
     <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper trade history</h3><span className="muted">{trades.length} positions</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Status</th><th>Price P/L</th></tr></thead><tbody>{trades.length===0?<tr><td colSpan="7" className="empty">No automated paper trades yet. Start paper mode and wait for a confirmed setup.</td></tr>:trades.map(t=><tr key={t.id}><td>{t.symbol}</td><td>{t.direction}</td><td>{fmt(t.entry,t.symbol)}</td><td>{fmt(t.stop,t.symbol)}</td><td>{fmt(t.target,t.symbol)}</td><td>{t.status}</td><td className={(t.pnl||0)>=0?'positive':'negative'}>{t.pnl==null?'—':Number(t.pnl).toPrecision(5)}</td></tr>)}</tbody></table></div></div>
-    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Automation activity</h3><span className="muted">{log.length} events</span></div>{log.length===0?<div className="empty">No automation events yet.</div>:log.map(item=><div className="signal" key={item.id}><span>{item.time}</span><span>{item.text}</span></div>)}</div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Automation activity</h3><span className="muted">{log.length} events · saved in this browser</span></div>{log.length===0?<div className="empty">No automation events yet.</div>:log.map(item=><div className="signal" key={item.id}><span>{item.time}</span><span>{item.text}</span></div>)}</div>
   </>;
 }
 
