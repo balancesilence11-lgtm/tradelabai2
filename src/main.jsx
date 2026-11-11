@@ -550,10 +550,30 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [capital, setCapital] = useState(10000);
   const [costBps, setCostBps] = useState(1.5);
   const [runKey, setRunKey] = useState(0);
+  const [runMessage, setRunMessage] = useState('');
   const [optimization, setOptimization] = useState([]);
   const [optimizing, setOptimizing] = useState(false);
   const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps };
   const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps, runKey]);
+
+  const handleRunBacktest = () => {
+    if (loading) return;
+
+    try {
+      const check = runStrategyBacktest(candles, config);
+
+      if (check?.error) {
+        setRunMessage(`Backtest could not run: ${check.error}`);
+        return;
+      }
+
+      setRunKey(key => key + 1);
+      setRunMessage(`Backtest completed — ${check.tradeCount} closed trades from ${check.candlesUsed} candles.`);
+    } catch (err) {
+      setRunMessage(`Backtest failed: ${err?.message || 'Unexpected calculation error.'}`);
+    }
+  };
+
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
   const chart = result?.curve || [];
@@ -578,7 +598,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         {strategy==='rsi' && <><div className="field"><label>RSI period</label><input type="number" min="2" max="50" value={rsiPeriod} onChange={e=>setRsiPeriod(Math.max(2,Math.min(50,Number(e.target.value)||2)))}/></div><div className="field"><label>Oversold threshold</label><input type="number" min="5" max="45" value={oversold} onChange={e=>setOversold(Math.max(5,Math.min(45,Number(e.target.value)||5)))}/></div><div className="field"><label>Overbought threshold</label><input type="number" min="55" max="95" value={overbought} onChange={e=>setOverbought(Math.max(55,Math.min(95,Number(e.target.value)||55)))}/></div></>}
         {strategy==='breakout' && <div className="field"><label>Breakout lookback candles</label><input type="number" min="5" max="100" value={lookback} onChange={e=>setLookback(Math.max(5,Math.min(100,Number(e.target.value)||5)))}/></div>}
       </div>
-      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button type="button" className="execute-btn" onClick={handleRunBacktest} disabled={loading}>{loading ? 'Loading candles…' : 'Run backtest'}</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
+      {runMessage && <div className="muted" role="status" aria-live="polite" style={{marginTop:10,fontSize:12}}>{runMessage}</div>}
     </div>
     {result?.error ? <div className="card" style={{marginTop:18}}><div className="empty">{result.error}</div></div> : <>
       <div className="stats-grid" style={{marginTop:18}}>
