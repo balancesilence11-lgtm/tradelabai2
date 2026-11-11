@@ -615,6 +615,65 @@ function optimizeStrategy(candles, base) {
     .sort((a,b)=> (b.result.netReturn - .5*b.result.maxDrawdown) - (a.result.netReturn - .5*a.result.maxDrawdown)).slice(0,5);
 }
 
+function calculateWindowStability(candles, config) {
+  if (!Array.isArray(candles) || candles.length < 240) return { error: 'At least 240 candles are required to compare four historical windows.' };
+  const size = Math.floor(candles.length / 4);
+  const windows = Array.from({length:4}, (_, index) => {
+    const start = index * size;
+    const end = index === 3 ? candles.length : start + size;
+    const sample = candles.slice(start, end);
+    const result = runStrategyBacktest(sample, config);
+    return { label: `Window ${index + 1}`, from: sample[0]?.time, to: sample.at(-1)?.time, candles: sample.length, result };
+  }).filter(w => !w.result.error);
+  if (!windows.length) return { error: 'The available candles could not produce valid window results.' };
+  const returns = windows.map(w => w.result.netReturn);
+  return {
+    windows,
+    positiveWindows: returns.filter(v => v > 0).length,
+    averageReturn: returns.reduce((a,b) => a+b, 0) / returns.length,
+    worstReturn: Math.min(...returns),
+    bestReturn: Math.max(...returns),
+    returnSpread: Math.max(...returns) - Math.min(...returns)
+  };
+}
+
+function buildParameterSensitivity(candles, config) {
+  const variants = [];
+  const add = (label, patch) => {
+    const candidate = { ...config, ...patch };
+    if (candidate.strategy === 'ema' && candidate.fast >= candidate.slow) return;
+    if (candidate.strategy === 'macd' && candidate.macdFast >= candidate.macdSlow) return;
+    if (candidate.strategy === 'rsi' && candidate.oversold >= candidate.overbought) return;
+    const result = runStrategyBacktest(candles, candidate);
+    if (!result.error) variants.push({ label, result });
+  };
+  if (config.strategy === 'ema') {
+    add(`Fast EMA ${Math.max(2, Math.round(config.fast * .8))}`, { fast: Math.max(2, Math.round(config.fast * .8)) });
+    add(`Fast EMA ${Math.round(config.fast * 1.2)}`, { fast: Math.round(config.fast * 1.2) });
+    add(`Slow EMA ${Math.max(3, Math.round(config.slow * .8))}`, { slow: Math.max(3, Math.round(config.slow * .8)) });
+    add(`Slow EMA ${Math.round(config.slow * 1.2)}`, { slow: Math.round(config.slow * 1.2) });
+  } else if (config.strategy === 'rsi') {
+    add(`RSI period ${Math.max(2, Math.round(config.rsiPeriod * .8))}`, { rsiPeriod: Math.max(2, Math.round(config.rsiPeriod * .8)) });
+    add(`RSI period ${Math.round(config.rsiPeriod * 1.2)}`, { rsiPeriod: Math.round(config.rsiPeriod * 1.2) });
+    add(`Thresholds ${Math.max(5, config.oversold - 5)}/${Math.min(95, config.overbought + 5)}`, { oversold: Math.max(5, config.oversold - 5), overbought: Math.min(95, config.overbought + 5) });
+    add(`Thresholds ${Math.min(45, config.oversold + 5)}/${Math.max(55, config.overbought - 5)}`, { oversold: Math.min(45, config.oversold + 5), overbought: Math.max(55, config.overbought - 5) });
+  } else if (config.strategy === 'macd') {
+    add(`MACD fast ${Math.max(2, config.macdFast - 2)}`, { macdFast: Math.max(2, config.macdFast - 2) });
+    add(`MACD fast ${config.macdFast + 2}`, { macdFast: config.macdFast + 2 });
+    add(`MACD slow ${Math.max(config.macdFast + 1, config.macdSlow - 4)}`, { macdSlow: Math.max(config.macdFast + 1, config.macdSlow - 4) });
+    add(`MACD slow ${config.macdSlow + 4}`, { macdSlow: config.macdSlow + 4 });
+  } else if (config.strategy === 'bollinger') {
+    add(`Band period ${Math.max(5, config.bbPeriod - 5)}`, { bbPeriod: Math.max(5, config.bbPeriod - 5) });
+    add(`Band period ${config.bbPeriod + 5}`, { bbPeriod: config.bbPeriod + 5 });
+    add(`Deviation ${(Math.max(.5, config.bbDeviation - .25)).toFixed(2)}σ`, { bbDeviation: Math.max(.5, config.bbDeviation - .25) });
+    add(`Deviation ${(config.bbDeviation + .25).toFixed(2)}σ`, { bbDeviation: config.bbDeviation + .25 });
+  } else {
+    add(`Lookback ${Math.max(5, config.lookback - 5)}`, { lookback: Math.max(5, config.lookback - 5) });
+    add(`Lookback ${config.lookback + 5}`, { lookback: config.lookback + 5 });
+  }
+  return variants;
+}
+
 function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [strategy, setStrategy] = useState('ema');
   const [fastPeriod, setFastPeriod] = useState(20);
@@ -748,6 +807,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const advanced = advancedPerformance(result);
   const splitIndex = Math.floor(candles.length * 0.7);
   const outOfSample = candles.length >= 100 ? runStrategyBacktest(candles.slice(splitIndex), config) : null;
+  const windowStability = useMemo(() => calculateWindowStability(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct]);
+  const sensitivity = useMemo(() => candles.length >= 60 ? buildParameterSensitivity(candles, config) : [], [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct]);
   const runOptimization = () => { setOptimizing(true); setOptimization([]); setTimeout(() => { setOptimization(optimizeStrategy(candles, config)); setOptimizing(false); }, 30); };
   return <>
     <div className="welcome"><div><h1>Strategy Lab & Backtesting</h1><div className="muted">Test rule-based strategies against the currently loaded historical candles.</div></div><div className="demo-badge">● HISTORICAL SIMULATION</div></div>
@@ -829,6 +890,19 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         <div className="card-heading"><div><h3>Monte Carlo trade-sequence simulation</h3><div className="muted">500 bootstrap paths, resampling the observed closed-trade returns</div></div><span className="tag">SCENARIO ANALYSIS</span></div>
         {advanced && advanced.simulations ? <div className="stats-grid"><div><div className="stat-label">5th percentile</div><div className="stat-value" style={{color:'#fb7185'}}>{pct(advanced.mc5)}</div></div><div><div className="stat-label">Median outcome</div><div className="stat-value">{pct(advanced.mc50)}</div></div><div><div className="stat-label">95th percentile</div><div className="stat-value" style={{color:'#21d6a0'}}>{pct(advanced.mc95)}</div></div></div> : <p className="muted">At least one closed trade is needed for simulation.</p>}
         <p className="muted" style={{fontSize:11,lineHeight:1.6}}>This resamples the strategy's historical trade outcomes; it does not predict future performance and cannot model market regimes absent from the sample.</p>
+      </div>
+      <div className="card" style={{marginTop:18}}>
+        <div className="card-heading"><div><h3>Historical window stability</h3><div className="muted">Applies the current settings independently to four chronological sections of the loaded candle sample.</div></div><span className="tag">CONSISTENCY CHECK</span></div>
+        {!windowStability.error ? <>
+          <div className="stats-grid"><div><div className="stat-label">Positive windows</div><div className="stat-value">{windowStability.positiveWindows}/{windowStability.windows.length}</div></div><div><div className="stat-label">Average window return</div><div className="stat-value" style={{color:windowStability.averageReturn>=0?'#21d6a0':'#fb7185'}}>{pct(windowStability.averageReturn)}</div></div><div><div className="stat-label">Worst window</div><div className="stat-value negative">{pct(windowStability.worstReturn)}</div></div><div><div className="stat-label">Return spread</div><div className="stat-value">{windowStability.returnSpread.toFixed(2)}%</div></div></div>
+          <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>Window</th><th>Candles</th><th>Closed trades</th><th>Net return</th><th>Max drawdown</th><th>Profit factor</th></tr></thead><tbody>{windowStability.windows.map(w=><tr key={w.label}><td>{w.label}</td><td>{w.candles}</td><td>{w.result.tradeCount}</td><td className={w.result.netReturn>=0?'positive':'negative'}>{pct(w.result.netReturn)}</td><td>{w.result.maxDrawdown.toFixed(2)}%</td><td>{Number.isFinite(w.result.profitFactor)?w.result.profitFactor.toFixed(2):'∞'}</td></tr>)}</tbody></table></div>
+        </> : <p className="muted">{windowStability.error}</p>}
+        <p className="muted" style={{fontSize:11,lineHeight:1.6}}>This is a chronological consistency diagnostic, not a walk-forward optimization. Each window uses the same settings; small samples and regime changes can materially affect the figures.</p>
+      </div>
+      <div className="card" style={{marginTop:18}}>
+        <div className="card-heading"><div><h3>Parameter sensitivity</h3><div className="muted">Shows how nearby parameter changes affect the same historical sample.</div></div><span className="tag">STABILITY CHECK</span></div>
+        {sensitivity.length ? <div className="table-wrap"><table><thead><tr><th>Parameter variation</th><th>Net return</th><th>Max drawdown</th><th>Trades</th><th>Profit factor</th></tr></thead><tbody>{sensitivity.map((v,i)=><tr key={`${v.label}-${i}`}><td>{v.label}</td><td className={v.result.netReturn>=0?'positive':'negative'}>{pct(v.result.netReturn)}</td><td>{v.result.maxDrawdown.toFixed(2)}%</td><td>{v.result.tradeCount}</td><td>{Number.isFinite(v.result.profitFactor)?v.result.profitFactor.toFixed(2):'∞'}</td></tr>)}</tbody></table></div> : <p className="muted">At least 60 valid candles are required for parameter sensitivity.</p>}
+        <p className="muted" style={{fontSize:11,lineHeight:1.6}}>Nearby settings are diagnostic alternatives, not optimized recommendations. Similar results across variants may indicate less parameter dependence; this does not establish future profitability.</p>
       </div>
       <div className="card" style={{marginTop:18}}>
         <div className="card-heading"><div><h3>Parameter optimizer</h3><div className="muted">Tests a bounded set of parameter combinations on the currently loaded candles.</div></div><button className="execute-btn" onClick={runOptimization} disabled={loading || optimizing || candles.length<60}>{optimizing?'Optimizing…':'Optimize strategy'}</button></div>
