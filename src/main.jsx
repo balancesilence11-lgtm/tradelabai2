@@ -1882,6 +1882,66 @@ function formatAge(ms) {
 }
 
 
+function MarketIntelligencePanel({ candles, symbol, timeframe }) {
+  const analysis = useMemo(() => {
+    if (!Array.isArray(candles) || candles.length < 60) return { error: 'At least 60 valid candles are required for market intelligence.' };
+    const aggregate = (factor) => {
+      const groups=[];
+      for(let i=0;i<candles.length;i+=factor){
+        const chunk=candles.slice(i,i+factor);
+        if(!chunk.length) continue;
+        groups.push({time:chunk[0].time,open:Number(chunk[0].open),high:Math.max(...chunk.map(c=>Number(c.high))),low:Math.min(...chunk.map(c=>Number(c.low))),close:Number(chunk[chunk.length-1].close)});
+      }
+      return groups;
+    };
+    const horizons=[{label:`Base (${timeframe})`,factor:1},{label:`Higher (${timeframe} × 3)`,factor:3},{label:`Major (${timeframe} × 12)`,factor:12}];
+    const trendRows=horizons.map(h=>{
+      const data=aggregate(h.factor), closes=data.map(c=>c.close);
+      if(closes.length<30) return {...h,trend:'INSUFFICIENT',detail:`${closes.length} aggregated candles`};
+      const fast=calcEMA(closes,20), slow=calcEMA(closes,50);
+      const a=fast[fast.length-1], b=slow[slow.length-1], last=closes[closes.length-1];
+      const trend=a==null||b==null?'MIXED':last>a&&a>b?'BULLISH':last<a&&a<b?'BEARISH':'MIXED';
+      return {...h,trend,detail:`EMA 20 ${a?.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1: symbol==='XAUUSD'?2:5) ?? '—'} · EMA 50 ${b?.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1: symbol==='XAUUSD'?2:5) ?? '—'}`};
+    });
+    const closes=candles.map(c=>Number(c.close)), last=closes[closes.length-1];
+    const rsiSeries=calcRSI(closes,14), rsi=rsiSeries[rsiSeries.length-1];
+    const adxSeries=calcADX(candles,14), adx=adxSeries[adxSeries.length-1];
+    const atrSeries=calcATR(candles,14).filter(Number.isFinite), atr=atrSeries[atrSeries.length-1];
+    const atrBase=atrSeries.slice(-50), atrMedian=[...atrBase].sort((a,b)=>a-b)[Math.floor(atrBase.length/2)];
+    const volatility=atr&&atrMedian?(atr>atrMedian*1.35?'ELEVATED':atr<atrMedian*0.7?'LOW':'NORMAL'):'UNAVAILABLE';
+    const momentumRaw=closes.length>11?(last/closes[closes.length-11]-1)*100:0;
+    const momentumScore=Math.max(-100,Math.min(100,Math.round((rsi==null?0:(rsi-50)*1.5)+(momentumRaw*8))));
+    const momentum=momentumScore>=25?'BULLISH':momentumScore<=-25?'BEARISH':'NEUTRAL';
+    const trendAgreement=trendRows.filter(x=>x.trend!=='INSUFFICIENT');
+    const bull=trendAgreement.filter(x=>x.trend==='BULLISH').length, bear=trendAgreement.filter(x=>x.trend==='BEARISH').length;
+    const aligned=bull===trendAgreement.length?'BULLISH':bear===trendAgreement.length?'BEARISH':'MIXED';
+    const regime=adx==null?'UNAVAILABLE':adx>=25?'TRENDING':adx<18?'RANGING':'TRANSITIONAL';
+    const levels=detectSupportResistance(candles.slice(-180));
+    const nearestSupport=levels.filter(x=>x.type==='Support'&&x.price<last).sort((a,b)=>b.price-a.price)[0];
+    const nearestResistance=levels.filter(x=>x.type==='Resistance'&&x.price>last).sort((a,b)=>a.price-b.price)[0];
+    return {trendRows,aligned,bull,bear,momentum,momentumScore,rsi,adx,atr,volatility,regime,nearestSupport,nearestResistance,last};
+  },[candles,symbol,timeframe]);
+  if(analysis.error) return <div className="card" style={{marginTop:18}}><h3>Advanced Market Intelligence</h3><p className="muted">{analysis.error}</p></div>;
+  const color=v=>v==='BULLISH'?'#21d6a0':v==='BEARISH'?'#fb7185':'#fbbf24';
+  return <div className="card" style={{marginTop:18,borderColor:'#31516b'}}>
+    <div className="card-heading"><div><h3>Advanced Market Intelligence</h3><div className="muted">Multi-horizon trend, market regime, momentum, volatility and nearby price zones.</div></div><span className="tag">RULES-BASED</span></div>
+    <div className="stats-grid" style={{marginTop:12}}>
+      <div><div className="stat-label">Trend alignment</div><div className="stat-value" style={{color:color(analysis.aligned)}}>{analysis.aligned}</div><div className="muted">{analysis.bull} bullish · {analysis.bear} bearish horizons</div></div>
+      <div><div className="stat-label">Market regime</div><div className="stat-value">{analysis.regime}</div><div className="muted">ADX(14): {analysis.adx==null?'—':analysis.adx.toFixed(1)}</div></div>
+      <div><div className="stat-label">Momentum</div><div className="stat-value" style={{color:color(analysis.momentum)}}>{analysis.momentum}</div><div className="muted">Score: {analysis.momentumScore} · RSI: {analysis.rsi==null?'—':analysis.rsi.toFixed(1)}</div></div>
+      <div><div className="stat-label">Volatility</div><div className="stat-value">{analysis.volatility}</div><div className="muted">ATR(14): {analysis.atr==null?'—':analysis.atr.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</div></div>
+    </div>
+    <div className="card-heading" style={{marginTop:18}}><h3>Multi-horizon trend confirmation</h3><span className="muted">Aggregated from the currently loaded candle series</span></div>
+    <div className="table-wrap"><table><thead><tr><th>Horizon</th><th>Trend</th><th>Moving average context</th></tr></thead><tbody>{analysis.trendRows.map(row=><tr key={row.label}><td>{row.label}</td><td style={{color:color(row.trend)}}>{row.trend}</td><td>{row.detail}</td></tr>)}</tbody></table></div>
+    <div className="stats-grid" style={{marginTop:14}}>
+      <div><div className="stat-label">Nearest support zone</div><div className="stat-value" style={{fontSize:18}}>{analysis.nearestSupport?analysis.nearestSupport.price.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5):'Not detected'}</div><div className="muted">Repeated swing-low area</div></div>
+      <div><div className="stat-label">Nearest resistance zone</div><div className="stat-value" style={{fontSize:18}}>{analysis.nearestResistance?analysis.nearestResistance.price.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5):'Not detected'}</div><div className="muted">Repeated swing-high area</div></div>
+    </div>
+    <p className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:12}}>Higher horizons are aggregated from the same downloaded base-timeframe candles; they are not independently fetched provider timeframes. Regime and volatility labels are transparent heuristics, not forecasts or trade signals. Confirm price action, spreads, session conditions and risk before making decisions.</p>
+  </div>;
+}
+
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -2184,6 +2244,7 @@ function App() {
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
+            <MarketIntelligencePanel candles={candles} symbol={selectedMarket} timeframe={period}/>
           </> : activePage === 'Technical Indicators' ? <>
             <div className="welcome"><div><h1>All Technical Indicators</h1><div className="muted">EMA, RSI, MACD, Bollinger Bands, ATR, ADX and Stochastic studies.</div></div><div className="demo-badge">● INDICATORS · ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} candlestick chart</h3><span className="muted">{candles.length} candles</span></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div></div>
