@@ -2359,7 +2359,15 @@ function App() {
           <div className="nav-label">Account</div>
           <button className={`nav-item ${activePage === 'Account Overview' ? 'active' : ''}`} onClick={() => {setActivePage('Account Overview');setSidebarOpen(false);}}><Wallet size={17} />Account overview</button>
           <button className={`nav-item ${activePage === 'Security Centre' ? 'active' : ''}`} onClick={() => {setActivePage('Security Centre');setSidebarOpen(false);}}><LockKeyhole size={17} />Security</button>
-          <button className="nav-item"><LogOut size={17} />Sign out</button>
+          <button
+  className="nav-item"
+  onClick={() => window.dispatchEvent(
+    new Event("tradelab:logout")
+  )}
+>
+  <LogOut size={17} />
+  Sign out
+</button>
         </div>
       </aside>
 
