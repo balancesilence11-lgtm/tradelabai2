@@ -430,10 +430,11 @@ function runStrategyBacktest(candles, config) {
   const spreadBps = Math.max(0, Number(config.spreadBps ?? 1));
   const commissionBps = Math.max(0, Number(config.commissionBps ?? 0.2));
   const slippageBps = Math.max(0, Number(config.slippageBps ?? (config.costBps ?? 0.3)));
-  // Half the quoted spread is paid on each side; commission and slippage are per side.
-  const costPerSideBps = spreadBps / 2 + commissionBps + slippageBps;
-  const fee = costPerSideBps / 10000;
-  const initial = Math.max(100, config.capital);
+  const stopLossPct = Math.max(0, Number(config.stopLossPct ?? 0));
+  const takeProfitPct = Math.max(0, Number(config.takeProfitPct ?? 0));
+  // Full quoted spread is charged once per round trip; commission/slippage per side.
+  const feePerSide = (spreadBps / 2 + commissionBps + slippageBps) / 10000;
+  const initial = Math.max(100, Number(config.capital) || 10000);
   let equity = initial, position = 0, activeTrade = null;
   const curve = [{ index: 0, time: clean[0].time, equity }];
   const trades = [];
@@ -467,60 +468,106 @@ function runStrategyBacktest(candles, config) {
     }
     if (i < lookback) return position;
     const prior = clean.slice(i - lookback, i);
-    const ceiling = Math.max(...prior.map(c => Number(c.high)));
-    const floor = Math.min(...prior.map(c => Number(c.low)));
+    const ceiling = Math.max(...prior.map(c => Number(c.high ?? c.close)));
+    const floor = Math.min(...prior.map(c => Number(c.low ?? c.close)));
     if (closes[i] > ceiling) return 1;
     if (closes[i] < floor) return -1;
     return position;
   };
-  const closeTrade = (index, reason) => {
+  const closeTrade = (index, rawExitPrice, reason) => {
     if (!activeTrade) return;
-    equity *= (1 - fee);
+    const exitPrice = Math.max(0.00000001, rawExitPrice);
+    equity *= (1 - feePerSide);
     const pnlPct = (equity / activeTrade.startEquity - 1) * 100;
     trades.push({
-      id: trades.length + 1,
-      side: activeTrade.side,
-      entryTime: activeTrade.entryTime,
-      exitTime: clean[index].time,
-      entryPrice: activeTrade.entryPrice,
-      exitPrice: closes[index],
-      pnlPct,
-      pnlCash: equity - activeTrade.startEquity,
-      reason
+      id: trades.length + 1, side: activeTrade.side,
+      entryTime: activeTrade.entryTime, exitTime: clean[index].time,
+      entryPrice: activeTrade.entryPrice, exitPrice,
+      pnlPct, pnlCash: equity - activeTrade.startEquity, reason
     });
     activeTrade = null;
   };
   for (let i = 1; i < clean.length; i++) {
-    if (position !== 0) equity *= (1 + position * (closes[i] / closes[i - 1] - 1));
-    const desired = signalAt(i);
+    const candle = clean[i];
+    const prevClose = closes[i - 1];
+    const open = Number.isFinite(Number(candle.open)) && Number(candle.open) > 0 ? Number(candle.open) : closes[i];
+    const high = Number.isFinite(Number(candle.high)) && Number(candle.high) > 0 ? Number(candle.high) : Math.max(open, closes[i]);
+    const low = Number.isFinite(Number(candle.low)) && Number(candle.low) > 0 ? Number(candle.low) : Math.min(open, closes[i]);
+    let intrabarExit = false;
+    if (position !== 0 && activeTrade) {
+      const entry = activeTrade.entryPrice;
+      const stopPrice = stopLossPct > 0 ? entry * (position === 1 ? 1 - stopLossPct/100 : 1 + stopLossPct/100) : null;
+      const targetPrice = takeProfitPct > 0 ? entry * (position === 1 ? 1 + takeProfitPct/100 : 1 - takeProfitPct/100) : null;
+      let exitPrice = null, reason = '';
+      if (position === 1) {
+        const stopHit = stopPrice != null && low <= stopPrice;
+        const targetHit = targetPrice != null && high >= targetPrice;
+        if (stopHit) { exitPrice = open < stopPrice ? open : stopPrice; reason = 'Stop loss'; }
+        else if (targetHit) { exitPrice = open > targetPrice ? open : targetPrice; reason = 'Take profit'; }
+      } else {
+        const stopHit = stopPrice != null && high >= stopPrice;
+        const targetHit = targetPrice != null && low <= targetPrice;
+        if (stopHit) { exitPrice = open > stopPrice ? open : stopPrice; reason = 'Stop loss'; }
+        else if (targetHit) { exitPrice = open < targetPrice ? open : targetPrice; reason = 'Take profit'; }
+      }
+      // If both levels are touched in one candle, conservatively assume stop loss first.
+      if (exitPrice != null) {
+        equity *= (1 + position * (exitPrice / prevClose - 1));
+        closeTrade(i, exitPrice, reason);
+        position = 0;
+        intrabarExit = true;
+      } else {
+        equity *= (1 + position * (closes[i] / prevClose - 1));
+      }
+    }
+    const desired = intrabarExit ? 0 : signalAt(i);
     if (desired !== position) {
-      if (position !== 0) closeTrade(i, desired === 0 ? 'Signal exit' : 'Reversal');
+      if (position !== 0) closeTrade(i, closes[i], desired === 0 ? 'Signal exit' : 'Reversal');
       if (desired !== 0) {
+        const entryFill = closes[i] * (desired === 1 ? 1 + slippageBps/10000 : 1 - slippageBps/10000);
         const beforeEntryCost = equity;
-        equity *= (1 - fee);
-        activeTrade = { side: desired === 1 ? 'LONG' : 'SHORT', entryTime: clean[i].time, entryPrice: closes[i], startEquity: beforeEntryCost };
+        equity *= (1 - feePerSide);
+        activeTrade = { side: desired === 1 ? 'LONG' : 'SHORT', entryTime: candle.time, entryPrice: entryFill, startEquity: beforeEntryCost };
       }
       position = desired;
     }
-    curve.push({ index: i, time: clean[i].time, equity });
+    curve.push({ index: i, time: candle.time, equity });
   }
-  if (position !== 0) closeTrade(clean.length - 1, 'End of data');
+  if (position !== 0) closeTrade(clean.length - 1, closes.at(-1), 'End of data');
   if (curve.length) curve[curve.length - 1] = { ...curve[curve.length - 1], equity };
   const wins = trades.filter(t => t.pnlCash > 0), losses = trades.filter(t => t.pnlCash < 0);
   const grossProfit = wins.reduce((s,t) => s + t.pnlCash, 0);
   const grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnlCash, 0));
+  const avgWin = wins.length ? grossProfit / wins.length : 0;
+  const avgLoss = losses.length ? -grossLoss / losses.length : 0;
+  let currentWinStreak = 0, currentLossStreak = 0, maxWinStreak = 0, maxLossStreak = 0;
+  trades.forEach(t => {
+    if (t.pnlCash > 0) { currentWinStreak++; currentLossStreak = 0; maxWinStreak = Math.max(maxWinStreak, currentWinStreak); }
+    else if (t.pnlCash < 0) { currentLossStreak++; currentWinStreak = 0; maxLossStreak = Math.max(maxLossStreak, currentLossStreak); }
+    else { currentWinStreak = 0; currentLossStreak = 0; }
+  });
   let peak = initial, maxDrawdown = 0;
   curve.forEach(p => { peak = Math.max(peak, p.equity); const dd = peak > 0 ? (peak - p.equity) / peak * 100 : 0; maxDrawdown = Math.max(maxDrawdown, dd); });
   const finalEquity = equity;
-  const buyHold = (closes.at(-1) / closes[0] - 1) * 100;
+  const netReturn = (finalEquity / initial - 1) * 100;
+  const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? Infinity : 0) : grossProfit / grossLoss;
+  const expectancy = trades.length ? trades.reduce((sum,t)=>sum+t.pnlCash,0)/trades.length : 0;
+  // Heuristic diagnostic only; not a probability of profit or investment rating.
+  const sampleScore = Math.min(25, trades.length / 2);
+  const pfScore = Number.isFinite(profitFactor) ? Math.min(30, Math.max(0, profitFactor) * 15) : (grossProfit > 0 ? 30 : 0);
+  const drawdownScore = Math.max(0, 25 - maxDrawdown * 2.5);
+  const consistencyScore = trades.length ? Math.max(0, 20 - maxLossStreak * 2) : 0;
+  const robustnessScore = Math.round(Math.min(100, sampleScore + pfScore + drawdownScore + consistencyScore));
   return {
-    trades, curve, initial, finalEquity,
-    netReturn: (finalEquity / initial - 1) * 100,
-    buyHold, winRate: trades.length ? wins.length / trades.length * 100 : 0,
-    profitFactor: grossLoss === 0 ? (grossProfit > 0 ? Infinity : 0) : grossProfit / grossLoss,
-    maxDrawdown, tradeCount: trades.length, wins: wins.length, losses: losses.length,
-    spreadBps, commissionBps, slippageBps, costPerSideBps,
-    estimatedRoundTripCostBps: costPerSideBps * 2, candlesUsed: clean.length
+    trades, curve, initial, finalEquity, netReturn,
+    buyHold: (closes.at(-1) / closes[0] - 1) * 100,
+    winRate: trades.length ? wins.length / trades.length * 100 : 0,
+    profitFactor, maxDrawdown, tradeCount: trades.length, wins: wins.length, losses: losses.length,
+    avgWin, avgLoss, averageWinLossRatio: avgLoss < 0 ? avgWin / Math.abs(avgLoss) : 0,
+    expectancy, maxWinStreak, maxLossStreak, currentWinStreak, currentLossStreak,
+    robustnessScore, spreadBps, commissionBps, slippageBps,
+    stopLossPct, takeProfitPct, estimatedRoundTripCostBps: spreadBps + commissionBps*2 + slippageBps*2,
+    candlesUsed: clean.length
   };
 }
 
@@ -585,6 +632,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [spreadBps, setSpreadBps] = useState(1);
   const [commissionBps, setCommissionBps] = useState(0.2);
   const [slippageBps, setSlippageBps] = useState(0.3);
+  const [stopLossPct, setStopLossPct] = useState(1);
+  const [takeProfitPct, setTakeProfitPct] = useState(2);
   const [runKey, setRunKey] = useState(0);
   const [optimization, setOptimization] = useState([]);
   const [optimizing, setOptimizing] = useState(false);
@@ -601,7 +650,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     try { localStorage.setItem('tradelab_strategy_library_v1', JSON.stringify(savedStrategies)); }
     catch (e) { console.warn('Strategy library could not be saved in this browser.', e); setLibraryMessage('Storage is unavailable or full. Export or remove saved strategies.'); }
   }, [savedStrategies]);
-  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps };
+  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct };
   const applyStrategyConfig = saved => {
     if (!saved?.config) return;
     const c = saved.config;
@@ -615,6 +664,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     setSpreadBps(Math.max(0, Math.min(100, Number(c.spreadBps ?? 0) || 0)));
     setCommissionBps(Math.max(0, Math.min(100, Number(c.commissionBps ?? 0) || 0)));
     setSlippageBps(Math.max(0, Math.min(100, Number(c.slippageBps ?? c.costBps ?? 0) || 0)));
+    setStopLossPct(Math.max(0, Math.min(50, Number(c.stopLossPct ?? 1) || 0)));
+    setTakeProfitPct(Math.max(0, Math.min(100, Number(c.takeProfitPct ?? 2) || 0)));
     setStrategyName(saved.name || 'My strategy'); setSelectedSavedId(saved.id);
     setOptimization([]); setRunKey(k => k + 1); setLibraryMessage(`Loaded “${saved.name}”.`);
   };
@@ -647,7 +698,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       const incoming = Array.isArray(parsed) ? parsed : parsed?.strategies;
       if (!Array.isArray(incoming) || !incoming.length || incoming.length > 200) throw new Error('Expected 1–200 strategies in a TradeLab JSON export.');
       const allowed = ['ema','rsi','breakout','macd','bollinger'];
-      const numericRanges = { fast:[2,200], slow:[3,500], rsiPeriod:[2,100], oversold:[1,49], overbought:[51,99], lookback:[2,500], macdFast:[2,100], macdSlow:[3,200], macdSignal:[2,50], bbPeriod:[5,200], bbDeviation:[0.5,4], capital:[100,1000000000], costBps:[0,100], spreadBps:[0,100], commissionBps:[0,100], slippageBps:[0,100] };
+      const numericRanges = { fast:[2,200], slow:[3,500], rsiPeriod:[2,100], oversold:[1,49], overbought:[51,99], lookback:[2,500], macdFast:[2,100], macdSlow:[3,200], macdSignal:[2,50], bbPeriod:[5,200], bbDeviation:[0.5,4], capital:[100,1000000000], costBps:[0,100], spreadBps:[0,100], commissionBps:[0,100], slippageBps:[0,100], stopLossPct:[0,50], takeProfitPct:[0,100] };
       const valid = incoming.map((item,index) => {
         if (!item || typeof item !== 'object' || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 60 || !item.config || typeof item.config !== 'object') throw new Error(`Strategy ${index+1} has an invalid name or configuration.`);
         const c = item.config;
@@ -686,7 +737,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     if (selectedSavedId === id) setSelectedSavedId('');
     setLibraryMessage(`Deleted “${item.name}”.`);
   };
-  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, runKey]);
+  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct, runKey]);
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
   const chart = result?.curve || [];
@@ -709,6 +760,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         <div className="field"><label>Spread (bps, full spread)</label><input type="number" min="0" max="100" step="0.1" value={spreadBps} onChange={e=>setSpreadBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
         <div className="field"><label>Commission (bps per side)</label><input type="number" min="0" max="100" step="0.1" value={commissionBps} onChange={e=>setCommissionBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
         <div className="field"><label>Slippage (bps per side)</label><input type="number" min="0" max="100" step="0.1" value={slippageBps} onChange={e=>setSlippageBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
+        <div className="field"><label>Stop loss (%) · 0 disables</label><input type="number" min="0" max="50" step="0.1" value={stopLossPct} onChange={e=>setStopLossPct(Math.max(0,Math.min(50,Number(e.target.value)||0)))}/></div>
+        <div className="field"><label>Take profit (%) · 0 disables</label><input type="number" min="0" max="100" step="0.1" value={takeProfitPct} onChange={e=>setTakeProfitPct(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
         {strategy==='ema' && <><div className="field"><label>Fast EMA</label><input type="number" min="2" max="150" value={fastPeriod} onChange={e=>setFastPeriod(Math.max(2,Math.min(150,Number(e.target.value)||2)))}/></div><div className="field"><label>Slow EMA</label><input type="number" min="3" max="250" value={slowPeriod} onChange={e=>setSlowPeriod(Math.max(3,Math.min(250,Number(e.target.value)||3)))}/></div></>}
         {strategy==='rsi' && <><div className="field"><label>RSI period</label><input type="number" min="2" max="50" value={rsiPeriod} onChange={e=>setRsiPeriod(Math.max(2,Math.min(50,Number(e.target.value)||2)))}/></div><div className="field"><label>Oversold threshold</label><input type="number" min="5" max="45" value={oversold} onChange={e=>setOversold(Math.max(5,Math.min(45,Number(e.target.value)||5)))}/></div><div className="field"><label>Overbought threshold</label><input type="number" min="55" max="95" value={overbought} onChange={e=>setOverbought(Math.max(55,Math.min(95,Number(e.target.value)||55)))}/></div></>}
         {strategy==='breakout' && <div className="field"><label>Breakout lookback candles</label><input type="number" min="5" max="100" value={lookback} onChange={e=>setLookback(Math.max(5,Math.min(100,Number(e.target.value)||5)))}/></div>}
@@ -748,6 +801,18 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         <div className="card"><div className="stat-label">Profit factor</div><div className="stat-value">{Number.isFinite(result.profitFactor)?result.profitFactor.toFixed(2):'∞'}</div><div className="muted">Gross profit ÷ gross loss</div></div>
         <div className="card"><div className="stat-label">Maximum drawdown</div><div className="stat-value" style={{color:'#fb7185'}}>{result.maxDrawdown.toFixed(2)}%</div><div className="muted">Peak-to-trough equity decline</div></div>
       </div>
+      <div className="stats-grid" style={{marginTop:18}}>
+        <div className="card"><div className="stat-label">Average winning trade</div><div className="stat-value positive">{money(result.avgWin)}</div><div className="muted">Across {result.wins} profitable trades</div></div>
+        <div className="card"><div className="stat-label">Average losing trade</div><div className="stat-value negative">{money(result.avgLoss)}</div><div className="muted">Across {result.losses} losing trades</div></div>
+        <div className="card"><div className="stat-label">Average win / loss</div><div className="stat-value">{result.averageWinLossRatio ? result.averageWinLossRatio.toFixed(2) : '—'}</div><div className="muted">Average win ÷ absolute average loss</div></div>
+        <div className="card"><div className="stat-label">Trade expectancy</div><div className="stat-value" style={{color:result.expectancy>=0?'#21d6a0':'#fb7185'}}>{money(result.expectancy)}</div><div className="muted">Average net P/L per closed trade</div></div>
+      </div>
+      <div className="stats-grid" style={{marginTop:18}}>
+        <div className="card"><div className="stat-label">Maximum win streak</div><div className="stat-value positive">{result.maxWinStreak}</div><div className="muted">Consecutive profitable trades</div></div>
+        <div className="card"><div className="stat-label">Maximum loss streak</div><div className="stat-value negative">{result.maxLossStreak}</div><div className="muted">Consecutive losing trades</div></div>
+        <div className="card"><div className="stat-label">Robustness diagnostic</div><div className="stat-value">{result.robustnessScore}/100</div><div className="muted">Heuristic score, not a probability</div></div>
+        <div className="card"><div className="stat-label">Exit controls</div><div className="stat-value">{result.stopLossPct || result.takeProfitPct ? 'Active' : 'Off'}</div><div className="muted">SL {result.stopLossPct}% · TP {result.takeProfitPct}%</div></div>
+      </div>
       <div className="card" style={{marginTop:18}}>
         <div className="card-heading"><div><h3>Equity curve</h3><div className="muted">Start: {money(result.initial)} · End: {money(result.finalEquity)}</div></div><span className="tag">{result.tradeCount} trades</span></div>
         <div style={{height:220,width:'100%'}}><svg viewBox="0 0 1000 205" width="100%" height="100%" preserveAspectRatio="none"><line x1="20" x2="980" y1="188" y2="188" stroke="#26364e"/><line x1="20" x2="980" y1="12" y2="12" stroke="#26364e" strokeDasharray="4 4"/><path d={path} fill="none" stroke={result.netReturn>=0?'#21d6a0':'#fb7185'} strokeWidth="2.5"/><text x="20" y="202" fill="#8290a8" fontSize="10">First candle</text><text x="980" y="202" textAnchor="end" fill="#8290a8" fontSize="10">Last candle</text></svg></div>
@@ -771,7 +836,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       </div>
       <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Closed trades</h3><span className="muted">Most recent 20 shown · {result.tradeCount} total</span></div><div className="table-wrap"><table><thead><tr><th>#</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Net P/L</th><th>Exit reason</th></tr></thead><tbody>{result.trades.length===0?<tr><td colSpan="8" className="empty">No completed trades for this strategy and data window.</td></tr>:result.trades.slice(-20).reverse().map(t=><tr key={t.id}><td>{t.id}</td><td className={t.side==='LONG'?'positive':'negative'}>{t.side}</td><td>{t.entryTime}</td><td>{t.exitTime}</td><td>{t.entryPrice.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</td><td>{t.exitPrice.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</td><td className={t.pnlCash>=0?'positive':'negative'}>{money(t.pnlCash)} ({pct(t.pnlPct)})</td><td>{t.reason}</td></tr>)}</tbody></table></div></div>
     </>}
-    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{fontSize:11,lineHeight:1.7,margin:0}}><strong style={{color:'#fbbf24'}}>Backtest limitations:</strong> Sharpe and Sortino are trade-based, not annualized; the out-of-sample split uses the final 30% but is still the same downloaded sample; optimizer rankings are in-sample and can overfit; Monte Carlo only resamples observed trades. This is a local historical simulation using the currently fetched candle sample, not a broker-grade tester. It assumes close-price fills, constant percentage transaction costs, full-equity exposure and no margin, swaps, spread changes, liquidity constraints or intrabar stop execution. Results can be distorted by the limited 300-candle sample and are not a forecast. Test on more data and out-of-sample periods before relying on any strategy.</p></div>
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{fontSize:11,lineHeight:1.7,margin:0}}><strong style={{color:'#fbbf24'}}>Backtest limitations:</strong> Sharpe and Sortino are trade-based, not annualized; the out-of-sample split uses the final 30% but is still the same downloaded sample; optimizer rankings are in-sample and can overfit; Monte Carlo only resamples observed trades. This is a local historical simulation using the currently fetched candle sample, not a broker-grade tester. Stop-loss/take-profit checks use candle high/low; if both levels are touched in one candle, the stop is assumed first. Gap-through stops fill at the candle open when worse. Entry/exit costs are estimates; the model still assumes full-equity exposure and does not model margin, swaps, changing spreads, liquidity, partial fills or market impact. The robustness score is a heuristic diagnostic, not a probability or rating. Results can be distorted by the limited candle sample and are not a forecast. Test on more data and out-of-sample periods before relying on any strategy.</p></div>
   </>;
 }
 
