@@ -8,5 +8,12 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"],
     "not_found_handling": "single-page-application"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tradelab-ai-db",
+      "database_id": "a83ed9da-0af2-465c-9508-d2f18190826f"
+    }
+  ]
 }
