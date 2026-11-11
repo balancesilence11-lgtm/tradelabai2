@@ -612,9 +612,55 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     const name = strategyName.trim();
     if (!name) { setLibraryMessage('Enter a name before saving.'); return; }
     const existing = savedStrategies.find(item => item.id === selectedSavedId);
+    if (existing && !window.confirm(`Overwrite the saved strategy “${existing.name}” with the current settings?`)) {
+      setLibraryMessage('Save cancelled. Your saved strategy was not changed.'); return;
+    }
     const item = { id: existing?.id || `strategy-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, name, config: { ...config }, updatedAt: new Date().toISOString(), createdAt: existing?.createdAt || new Date().toISOString() };
     setSavedStrategies(old => existing ? old.map(x => x.id === existing.id ? item : x) : [item, ...old]);
     setSelectedSavedId(item.id); setLibraryMessage(`“${name}” saved on this device.`);
+  };
+  const exportStrategies = () => {
+    if (!savedStrategies.length) { setLibraryMessage('There are no saved strategies to export.'); return; }
+    const payload = { app: 'TradeLab AI', type: 'strategy-library', version: 1, exportedAt: new Date().toISOString(), strategies: savedStrategies };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob); const link = document.createElement('a');
+    link.href = url; link.download = `tradelab-strategies-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    setLibraryMessage(`Exported ${savedStrategies.length} strateg${savedStrategies.length===1?'y':'ies'} to JSON.`);
+  };
+  const importStrategies = async event => {
+    const file = event.target.files?.[0]; event.target.value = '';
+    if (!file) return;
+    try {
+      if (file.size > 1024 * 1024) throw new Error('File is larger than 1 MB.');
+      const parsed = JSON.parse(await file.text());
+      const incoming = Array.isArray(parsed) ? parsed : parsed?.strategies;
+      if (!Array.isArray(incoming) || !incoming.length || incoming.length > 200) throw new Error('Expected 1–200 strategies in a TradeLab JSON export.');
+      const allowed = ['ema','rsi','breakout','macd','bollinger'];
+      const numericRanges = { fast:[2,200], slow:[3,500], rsiPeriod:[2,100], oversold:[1,49], overbought:[51,99], lookback:[2,500], macdFast:[2,100], macdSlow:[3,200], macdSignal:[2,50], bbPeriod:[5,200], bbDeviation:[0.5,4], capital:[100,1000000000], costBps:[0,100] };
+      const valid = incoming.map((item,index) => {
+        if (!item || typeof item !== 'object' || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 60 || !item.config || typeof item.config !== 'object') throw new Error(`Strategy ${index+1} has an invalid name or configuration.`);
+        const c = item.config;
+        if (!allowed.includes(c.strategy)) throw new Error(`Strategy ${index+1} uses an unsupported strategy type.`);
+        for (const [key,[min,max]] of Object.entries(numericRanges)) {
+          if (c[key] !== undefined && (!Number.isFinite(Number(c[key])) || Number(c[key]) < min || Number(c[key]) > max)) throw new Error(`Strategy ${index+1} has an invalid ${key} value.`);
+        }
+        if (c.strategy === 'ema' && Number(c.fast ?? 20) >= Number(c.slow ?? 50)) throw new Error(`Strategy ${index+1} must have fast EMA below slow EMA.`);
+        if (c.strategy === 'macd' && Number(c.macdFast ?? 12) >= Number(c.macdSlow ?? 26)) throw new Error(`Strategy ${index+1} must have MACD fast below MACD slow.`);
+        if (c.oversold !== undefined && c.overbought !== undefined && Number(c.oversold) >= Number(c.overbought)) throw new Error(`Strategy ${index+1} has oversold at or above overbought.`);
+        return { ...item, name:item.name.trim(), config:{ ...c } };
+      });
+      const now = new Date().toISOString();
+      const existingNames = new Set(savedStrategies.map(x => x.name.toLowerCase()));
+      const imported = valid.map(item => {
+        let name = item.name; let suffix = ' (Imported)'; let n = 2;
+        while (existingNames.has(name.toLowerCase())) { name = `${item.name}${suffix}${n>2?` ${n}`:''}`; n++; }
+        existingNames.add(name.toLowerCase());
+        return { id:`strategy-${Date.now()}-${Math.random().toString(36).slice(2,9)}`, name, config:item.config, createdAt:now, updatedAt:now };
+      });
+      setSavedStrategies(old => [...imported, ...old]); setSelectedSavedId('');
+      setLibraryMessage(`Imported ${imported.length} strateg${imported.length===1?'y':'ies'}. Existing saved strategies were not overwritten.`);
+    } catch (error) { setLibraryMessage(`Import failed: ${error?.message || 'Invalid JSON file'}`); }
   };
   const duplicateSavedStrategy = id => {
     const source = savedStrategies.find(item => item.id === id);
@@ -668,7 +714,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
     </div>
     <div className="card" style={{marginTop:18}}>
-      <div className="card-heading"><div><h3>Strategy Library</h3><div className="muted">Save, reload, duplicate and manage your strategy configurations on this device.</div></div><span className="tag">{savedStrategies.length} SAVED</span></div>
+      <div className="card-heading"><div><h3>Strategy Library</h3><div className="muted">Save, load, duplicate, import and export strategy configurations on this device.</div></div><span className="tag">{savedStrategies.length} SAVED</span></div>
       <div className="order-grid" style={{marginTop:12,alignItems:'end'}}>
         <div className="field"><label>Strategy name</label><input value={strategyName} onChange={e=>setStrategyName(e.target.value)} maxLength={60} placeholder="e.g. XAUUSD MACD setup"/></div>
         <div className="field"><label>Saved strategies</label><select value={selectedSavedId} onChange={e=>setSelectedSavedId(e.target.value)}><option value="">Select a saved strategy…</option>{savedStrategies.map(item=><option key={item.id} value={item.id}>{item.name} · {String(item.config.strategy || '').toUpperCase()}</option>)}</select></div>
@@ -676,6 +722,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         <button className="execute-btn" style={{background:'#26364e'}} disabled={!selectedSavedId} onClick={()=>applyStrategyConfig(savedStrategies.find(x=>x.id===selectedSavedId))}>Load</button>
         <button className="execute-btn" style={{background:'#26364e'}} disabled={!selectedSavedId} onClick={()=>duplicateSavedStrategy(selectedSavedId)}>Duplicate</button>
         <button className="execute-btn" style={{background:'#713b48'}} disabled={!selectedSavedId} onClick={()=>deleteSavedStrategy(selectedSavedId)}>Delete</button>
+        <button className="execute-btn" style={{background:'#26364e'}} onClick={exportStrategies}>Export JSON</button>
+        <label className="execute-btn" style={{background:'#26364e',cursor:'pointer',display:'inline-flex',alignItems:'center',justifyContent:'center'}}>Import JSON<input type="file" accept=".json,application/json" onChange={importStrategies} style={{display:'none'}} /></label>
       </div>
       {libraryMessage && <p className="muted" role="status" style={{fontSize:11,marginBottom:0}}>{libraryMessage}</p>}
       {savedStrategies.length > 0 && <div className="table-wrap" style={{marginTop:14}}><table><thead><tr><th>Name</th><th>Strategy</th><th>Last updated</th><th>Actions</th></tr></thead><tbody>{savedStrategies.map(item=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{({ema:'EMA crossover',rsi:'RSI mean-reversion',breakout:'Price breakout',macd:'MACD crossover',bollinger:'Bollinger Bands'})[item.config.strategy] || item.config.strategy}</td><td>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : '—'}</td><td><div style={{display:'flex',gap:6,flexWrap:'wrap'}}><button className="execute-btn" style={{padding:'7px 10px'}} onClick={()=>applyStrategyConfig(item)}>Load</button><button className="execute-btn" style={{padding:'7px 10px',background:'#26364e'}} onClick={()=>duplicateSavedStrategy(item.id)}>Copy</button><button className="execute-btn" style={{padding:'7px 10px',background:'#713b48'}} onClick={()=>deleteSavedStrategy(item.id)}>Delete</button></div></td></tr>)}</tbody></table></div>}
