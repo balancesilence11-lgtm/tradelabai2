@@ -629,11 +629,24 @@ export default {
         return await handleAuth(request, env, url);
       }
 
-      const marketResponse = await handleMarket(
-        request,
-        env,
-        url
-      );
+      if (
+  url.pathname === "/api/market" ||
+  url.pathname === "/api/candles"
+) {
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return json({
+      error: "Authentication required"
+    }, 401);
+  }
+}
+
+const marketResponse = await handleMarket(
+  request,
+  env,
+  url
+);
 
       if (marketResponse) return marketResponse;
 
