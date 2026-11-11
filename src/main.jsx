@@ -705,6 +705,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   });
   const [selectedSavedId, setSelectedSavedId] = useState('');
   const [libraryMessage, setLibraryMessage] = useState('');
+  const [portfolioAllocations, setPortfolioAllocations] = useState(() => { try { return JSON.parse(localStorage.getItem('tradelab_portfolio_allocations_v1') || '{}'); } catch { return {}; } });
+  useEffect(() => { try { localStorage.setItem('tradelab_portfolio_allocations_v1', JSON.stringify(portfolioAllocations)); } catch { /* allocation preferences remain usable for this session */ } }, [portfolioAllocations]);
   useEffect(() => {
     try { localStorage.setItem('tradelab_strategy_library_v1', JSON.stringify(savedStrategies)); }
     catch (e) { console.warn('Strategy library could not be saved in this browser.', e); setLibraryMessage('Storage is unavailable or full. Export or remove saved strategies.'); }
@@ -809,6 +811,26 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const outOfSample = candles.length >= 100 ? runStrategyBacktest(candles.slice(splitIndex), config) : null;
   const windowStability = useMemo(() => calculateWindowStability(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct]);
   const sensitivity = useMemo(() => candles.length >= 60 ? buildParameterSensitivity(candles, config) : [], [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct]);
+  const portfolio = useMemo(() => {
+    if (savedStrategies.length < 2) return { error: 'Save at least two strategies to build a strategy portfolio.' };
+    if (candles.length < 60) return { error: 'At least 60 candles are required to simulate a strategy portfolio.' };
+    const members = savedStrategies.map(item => {
+      const allocation = Math.max(0, Math.min(100, Number(portfolioAllocations[item.id] ?? (100 / savedStrategies.length)) || 0));
+      const backtest = runStrategyBacktest(candles, { ...item.config, capital: 10000 });
+      return { item, allocation, result: backtest };
+    }).filter(x => !x.result.error);
+    const allocationTotal = members.reduce((sum,x)=>sum+x.allocation,0);
+    if (!members.length || allocationTotal <= 0) return { error: 'Assign a positive allocation to at least one valid saved strategy.' };
+    const length = Math.min(...members.map(x=>x.result.curve.length));
+    const curve = Array.from({length},(_,i)=>({ index:i, time:members[0].result.curve[i]?.time, equity: members.reduce((sum,x)=>sum + (x.result.curve[i].equity / x.result.initial) * (x.allocation / allocationTotal) * 10000,0) }));
+    let peak=10000, maxDrawdown=0;
+    curve.forEach(point=>{ peak=Math.max(peak,point.equity); maxDrawdown=Math.max(maxDrawdown,peak>0?(peak-point.equity)/peak*100:0); });
+    const finalEquity=curve.at(-1)?.equity ?? 10000;
+    const returns=members.map(x=>({ ...x, series:x.result.curve.slice(1,length).map((point,i)=>point.equity / x.result.curve[i].equity - 1) }));
+    const correlation=(a,b)=>{ const n=Math.min(a.length,b.length); if(n<2)return null; const aa=a.slice(0,n),bb=b.slice(0,n),ma=aa.reduce((v,x)=>v+x,0)/n,mb=bb.reduce((v,x)=>v+x,0)/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){const da=aa[i]-ma,db=bb[i]-mb;cov+=da*db;va+=da*da;vb+=db*db;} return va>0&&vb>0?cov/Math.sqrt(va*vb):null; };
+    const correlations=returns.map(a=>returns.map(b=>correlation(a.series,b.series)));
+    return { members, allocationTotal, curve, finalEquity, netReturn:(finalEquity/10000-1)*100, maxDrawdown, correlations };
+  }, [savedStrategies, candles, portfolioAllocations]);
   const runOptimization = () => { setOptimizing(true); setOptimization([]); setTimeout(() => { setOptimization(optimizeStrategy(candles, config)); setOptimizing(false); }, 30); };
   return <>
     <div className="welcome"><div><h1>Strategy Lab & Backtesting</h1><div className="muted">Test rule-based strategies against the currently loaded historical candles.</div></div><div className="demo-badge">● HISTORICAL SIMULATION</div></div>
@@ -854,6 +876,21 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       {libraryMessage && <p className="muted" role="status" style={{fontSize:11,marginBottom:0}}>{libraryMessage}</p>}
       {savedStrategies.length > 0 && <div className="table-wrap" style={{marginTop:14}}><table><thead><tr><th>Name</th><th>Strategy</th><th>Last updated</th><th>Actions</th></tr></thead><tbody>{savedStrategies.map(item=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{({ema:'EMA crossover',rsi:'RSI mean-reversion',breakout:'Price breakout',macd:'MACD crossover',bollinger:'Bollinger Bands'})[item.config.strategy] || item.config.strategy}</td><td>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : '—'}</td><td><div style={{display:'flex',gap:6,flexWrap:'wrap'}}><button className="execute-btn" style={{padding:'7px 10px'}} onClick={()=>applyStrategyConfig(item)}>Load</button><button className="execute-btn" style={{padding:'7px 10px',background:'#26364e'}} onClick={()=>duplicateSavedStrategy(item.id)}>Copy</button><button className="execute-btn" style={{padding:'7px 10px',background:'#713b48'}} onClick={()=>deleteSavedStrategy(item.id)}>Delete</button></div></td></tr>)}</tbody></table></div>}
       <p className="muted" style={{fontSize:10,lineHeight:1.5,marginBottom:0}}>Saved strategies remain in this browser's local storage. They are not synced across devices or accounts and are not sent to a broker.</p>
+    </div>
+    <div className="card" style={{marginTop:18}}>
+      <div className="card-heading"><div><h3>Strategy Portfolio Lab</h3><div className="muted">Combine saved strategies, set capital weights and compare their historical return streams.</div></div><span className="tag">PORTFOLIO SIMULATION</span></div>
+      {portfolio.error ? <p className="muted">{portfolio.error}</p> : <>
+        <div className="stats-grid" style={{marginTop:12}}>
+          <div><div className="stat-label">Combined return</div><div className="stat-value" style={{color:portfolio.netReturn>=0?'#21d6a0':'#fb7185'}}>{pct(portfolio.netReturn)}</div></div>
+          <div><div className="stat-label">Simulated final equity</div><div className="stat-value">{money(portfolio.finalEquity)}</div></div>
+          <div><div className="stat-label">Portfolio max drawdown</div><div className="stat-value negative">{portfolio.maxDrawdown.toFixed(2)}%</div></div>
+          <div><div className="stat-label">Allocation entered</div><div className="stat-value">{portfolio.allocationTotal.toFixed(1)}%</div><div className="muted">Weights are normalized to 100% for simulation.</div></div>
+        </div>
+        <div className="table-wrap" style={{marginTop:14}}><table><thead><tr><th>Saved strategy</th><th>Type</th><th>Allocation (%)</th><th>Individual return</th><th>Individual drawdown</th></tr></thead><tbody>{portfolio.members.map(({item,allocation,result:memberResult})=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{String(item.config.strategy||'').toUpperCase()}</td><td><input aria-label={`Allocation for ${item.name}`} type="number" min="0" max="100" step="1" value={portfolioAllocations[item.id] ?? (100 / savedStrategies.length).toFixed(1)} onChange={e=>setPortfolioAllocations(old=>({...old,[item.id]:Math.max(0,Math.min(100,Number(e.target.value)||0))}))} style={{width:90}} /></td><td className={memberResult.netReturn>=0?'positive':'negative'}>{pct(memberResult.netReturn)}</td><td>{memberResult.maxDrawdown.toFixed(2)}%</td></tr>)}</tbody></table></div>
+        <div className="card-heading" style={{marginTop:18}}><div><h3>Strategy return correlation</h3><div className="muted">Pearson correlation of candle-by-candle equity returns; values near +1 move similarly, near 0 show weak linear relation, and near −1 move oppositely.</div></div></div>
+        <div className="table-wrap"><table><thead><tr><th>Strategy</th>{portfolio.members.map(x=><th key={x.item.id}>{x.item.name}</th>)}</tr></thead><tbody>{portfolio.members.map((row,i)=><tr key={row.item.id}><td><strong>{row.item.name}</strong></td>{portfolio.members.map((col,j)=>{const value=portfolio.correlations[i][j];return <td key={col.item.id}>{value==null?'—':value.toFixed(2)}</td>;})}</tr>)}</tbody></table></div>
+        <p className="muted" style={{fontSize:11,lineHeight:1.6}}>Simulation starts with a notional $10,000 portfolio and combines each saved strategy's normalized historical equity curve using the entered allocation weights. Weights are normalized if their total is not 100%. This is a research simulation, not an account-level allocation engine; it does not model overlapping positions, shared margin, currency conversion, portfolio-level order netting or live execution.</p>
+      </>}
     </div>
     {result?.error ? <div className="card" style={{marginTop:18}}><div className="empty">{result.error}</div></div> : <>
       <div className="stats-grid" style={{marginTop:18}}>
