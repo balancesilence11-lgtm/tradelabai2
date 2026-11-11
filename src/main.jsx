@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import AuthGate from "./AuthGate";import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
@@ -2510,5 +2510,9 @@ function App() {
 }
 
 createRoot(document.getElementById('root')).render(
-  <React.StrictMode><App /></React.StrictMode>
+  <React.StrictMode>
+    <AuthGate>
+      <App />
+    </AuthGate>
+  </React.StrictMode>
 );
