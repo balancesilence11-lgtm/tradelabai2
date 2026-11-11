@@ -34,6 +34,7 @@ const navigation = [
   { name: 'Trade Journal', icon: Clock3 },
   { name: 'Automation Centre', icon: Radio },
   { name: 'Account Overview', icon: Wallet },
+  { name: 'Broker Connections', icon: Radio },
   { name: 'Security Centre', icon: LockKeyhole },
   { name: 'Settings', icon: Settings }
 ];
@@ -1459,6 +1460,67 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
   </>;
 }
 
+
+function BrokerConnectionsPage() {
+  const [health, setHealth] = useState({ checked: false, time: null });
+  const [checks, setChecks] = useState(() => {
+    try { const v=JSON.parse(localStorage.getItem('tradelab_broker_readiness_v1')||'{}'); return {serverProxy:!!v.serverProxy,readOnly:!!v.readOnly,twoFactor:!!v.twoFactor}; }
+    catch { return {serverProxy:false,readOnly:false,twoFactor:false}; }
+  });
+  const [events, setEvents] = useState(() => {
+    try { const v=JSON.parse(localStorage.getItem('tradelab_broker_readiness_log_v1')||'[]'); return Array.isArray(v)?v:[]; }
+    catch { return []; }
+  });
+  function record(text) {
+    const next=[{id:Date.now(),text,time:new Date().toLocaleString()},...events].slice(0,20);
+    setEvents(next); try { localStorage.setItem('tradelab_broker_readiness_log_v1',JSON.stringify(next)); } catch {}
+  }
+  function toggle(key) {
+    const next={...checks,[key]:!checks[key]}; setChecks(next);
+    try { localStorage.setItem('tradelab_broker_readiness_v1',JSON.stringify(next)); } catch {}
+    record(`Readiness checklist updated: ${key} ${next[key]?'marked':'unmarked'}`);
+  }
+  function runHealthCheck() {
+    setHealth({checked:true,time:new Date().toLocaleString()});
+    record('Local readiness check completed. No broker server was contacted.');
+  }
+  const ready=Object.values(checks).every(Boolean);
+  return <>
+    <div className="welcome"><div><h1>Broker Connections</h1><div className="muted">Secure integration readiness and read-only connection planning.</div></div><div className="demo-badge">● CONNECTIONS DISABLED</div></div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Broker API backend</div><div className="stat-value negative">Not configured</div><div className="muted">No server-side connector is deployed</div></div>
+      <div className="card"><div className="stat-label">Account synchronisation</div><div className="stat-value">Unavailable</div><div className="muted">No external account data retrieved</div></div>
+      <div className="card"><div className="stat-label">Live execution</div><div className="stat-value negative">Disabled</div><div className="muted">No order route exists in this UI</div></div>
+      <div className="card"><div className="stat-label">Readiness checklist</div><div className="stat-value">{Object.values(checks).filter(Boolean).length}/3</div><div className="muted">Planning checklist only</div></div>
+    </div>
+    <div className="dashboard-grid" style={{marginTop:18}}>
+      <div className="card"><div className="card-heading"><h3>MetaTrader 5</h3><span className="tag">NOT CONNECTED</span></div>
+        <div className="signal"><span>Connection method</span><strong>Secure server-side bridge</strong></div>
+        <div className="signal"><span>Account access target</span><strong>Read-only first</strong></div>
+        <p className="muted" style={{lineHeight:1.7}}>MT5 requires a separately deployed connector or broker-supported API bridge. A browser-only React page cannot securely access a desktop terminal or protect a broker password.</p>
+        <div className="signal"><span>Current status</span><strong className="negative">Backend not configured</strong></div>
+      </div>
+      <div className="card"><div className="card-heading"><h3>Deriv</h3><span className="tag">RESERVED FOR FINAL PHASE</span></div>
+        <div className="signal"><span>Connection method</span><strong>Official API via backend</strong></div>
+        <div className="signal"><span>Initial permission</span><strong>Read-only account scope</strong></div>
+        <p className="muted" style={{lineHeight:1.7}}>Deriv integration remains intentionally inactive until the general platform is complete and the API flow, token permissions, account identity checks and disconnect handling are implemented and tested.</p>
+        <div className="signal"><span>Current status</span><strong className="negative">Not connected</strong></div>
+      </div>
+    </div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Secure integration readiness</h3><span className={`tag`}>{ready?'CHECKLIST COMPLETE':'IN PROGRESS'}</span></div>
+      {[['serverProxy','A server-side API proxy is deployed; secrets are stored only as encrypted server environment secrets.'],['readOnly','Broker API credentials are restricted to read-only permissions for the first integration.'],['twoFactor','Broker-side two-factor authentication and account identity verification are enabled.']].map(([key,label])=><label className="signal" key={key} style={{cursor:'pointer',gap:14}}><span>{label}</span><input type="checkbox" checked={checks[key]} onChange={()=>toggle(key)} style={{width:18,height:18,accentColor:'#20d6a1'}}/></label>)}
+      <p className="muted" style={{fontSize:11,lineHeight:1.6}}>These checkboxes are a local planning checklist, not proof that the controls have been deployed. Do not paste API tokens, passwords or recovery codes into this page, chat, or GitHub.</p>
+    </div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Connection health monitor</h3><button className="period-btn" onClick={runHealthCheck}>Run local readiness check</button></div>
+      <div className="signal"><span>Broker API endpoint</span><strong className="negative">Not configured</strong></div>
+      <div className="signal"><span>Last check</span><strong>{health.time||'Not checked'}</strong></div>
+      {health.checked&&<p className="muted" role="status">Local configuration reviewed. No external endpoint was contacted and no broker connection was tested.</p>}
+    </div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Integration activity</h3><span className="muted">{events.length} local events</span></div>{events.length?events.map(e=><div className="signal" key={e.id}><span>{e.time}</span><span>{e.text}</span></div>):<div className="empty">No integration readiness events yet.</div>}</div>
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{lineHeight:1.7,margin:0}}>Security boundary: this page does not connect to a broker, verify credentials, sync balances or execute orders. A production connector must validate OAuth/API scopes, encrypt secrets server-side, enforce user-level authorization, rate-limit requests, audit access, and provide an immediate revoke/disconnect path. Live trading remains disabled.</p></div>
+  </>;
+}
+
 function AccountOverviewPage({ trades = [] }) {
   const [accountName, setAccountName] = useState(() => localStorage.getItem('tradelab_account_label') || 'Trader Account');
   const [saved, setSaved] = useState(false);
@@ -2066,7 +2128,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <BrokerConnectionsPage/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
