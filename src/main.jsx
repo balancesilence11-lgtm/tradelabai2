@@ -4,7 +4,7 @@ import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
   Moon, Radio, Settings, ShieldCheck, SlidersHorizontal, Sparkles,
-  TrendingUp, Wallet
+  TrendingUp, Wallet, Plus, Star, Trash2, CheckCircle2, X
 } from 'lucide-react';
 import './style.css';
 
@@ -22,6 +22,7 @@ const supportedSymbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSD'];
 const navigation = [
   { name: 'Dashboard', icon: LayoutDashboard },
   { name: 'Market Analysis', icon: BarChart3 },
+  { name: 'Market Watch & Alerts', icon: Bell },
   { name: 'Technical Indicators', icon: SlidersHorizontal },
   { name: 'AI Analysis', icon: Sparkles },
   { name: 'AI Assistant', icon: Bot },
@@ -1942,6 +1943,80 @@ function MarketIntelligencePanel({ candles, symbol, timeframe }) {
 }
 
 
+
+function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
+  const [watchlist, setWatchlist] = useState(() => {
+    try { const saved=JSON.parse(localStorage.getItem('tradelab_watchlist_v1')||'null'); return Array.isArray(saved)?saved:['EURUSD','GBPUSD','XAUUSD']; }
+    catch { return ['EURUSD','GBPUSD','XAUUSD']; }
+  });
+  const [alerts, setAlerts] = useState(() => {
+    try { const saved=JSON.parse(localStorage.getItem('tradelab_price_alerts_v1')||'[]'); return Array.isArray(saved)?saved:[]; }
+    catch { return []; }
+  });
+  const [newSymbol,setNewSymbol]=useState(selectedMarket||'EURUSD');
+  const [condition,setCondition]=useState('above');
+  const [target,setTarget]=useState('');
+  const [notice,setNotice]=useState('');
+  const [permission,setPermission]=useState(typeof Notification==='undefined'?'unsupported':Notification.permission);
+  const priceFor = symbol => { const m=markets.find(x=>x.symbol===symbol); const n=Number(m?.price); return m?.live&&Number.isFinite(n)&&n>0?n:null; };
+  useEffect(()=>{localStorage.setItem('tradelab_watchlist_v1',JSON.stringify(watchlist));},[watchlist]);
+  useEffect(()=>{localStorage.setItem('tradelab_price_alerts_v1',JSON.stringify(alerts));},[alerts]);
+  useEffect(()=>{
+    setAlerts(previous=>previous.map(a=>{
+      if(!a.enabled||a.triggeredAt)return a;
+      const price=priceFor(a.symbol); if(price===null)return a;
+      const hit=a.condition==='above'?price>=a.target:a.condition==='below'?price<=a.target:Math.abs((price-a.referencePrice)/a.referencePrice*100)>=a.target;
+      if(!hit)return {...a,lastPrice:price};
+      const triggeredAt=new Date().toISOString();
+      if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
+        try { new Notification(`TradeLab price alert · ${a.symbol}`,{body:`${a.condition==='move'?'Move threshold reached':a.condition==='above'?'Price reached or exceeded':'Price reached or fell below'} ${a.target}${a.condition==='move'?'%':` · Current ${price}`}.`}); } catch {}
+      }
+      return {...a,lastPrice:price,triggeredAt};
+    }));
+  },[markets]);
+  const addWatch=(symbol)=>{if(!watchlist.includes(symbol))setWatchlist(v=>[...v,symbol]);};
+  const addAlert=()=>{
+    const value=Number(target),price=priceFor(newSymbol);
+    if(!Number.isFinite(value)||value<=0){setNotice('Enter a target greater than zero.');return;}
+    if(condition==='move'&&(!price||price<=0)){setNotice('A confirmed live price is required to set a percentage-move baseline.');return;}
+    setAlerts(v=>[{id:`${Date.now()}-${Math.random().toString(16).slice(2)}`,symbol:newSymbol,condition,target:value,referencePrice:condition==='move'?price:null,lastPrice:price,enabled:true,triggeredAt:null,createdAt:new Date().toISOString()},...v].slice(0,100));
+    addWatch(newSymbol);setTarget('');setNotice('Price alert saved on this browser.');
+  };
+  const enableNotifications=async()=>{
+    if(typeof Notification==='undefined'){setNotice('Browser notifications are not supported here.');return;}
+    try { const result=await Notification.requestPermission();setPermission(result);setNotice(result==='granted'?'Browser notifications enabled.':'Browser notifications were not enabled; in-app alert history remains active.'); }
+    catch {setNotice('Could not request browser notification permission.');}
+  };
+  const fmt=(symbol,value)=>value==null?'—':Number(value).toLocaleString(undefined,{maximumFractionDigits:symbol==='USDJPY'?3:symbol==='XAUUSD'||symbol==='BTCUSD'||symbol==='US30'?2:5});
+  return <>
+    <div className="welcome"><div><h1>Market Watchlist & Price Alerts</h1><div className="muted">Track selected instruments and monitor price levels using confirmed quotes received by this browser.</div></div><div className="demo-badge">● LOCAL WATCH & ALERTS</div></div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Watchlist instruments</div><div className="stat-value">{watchlist.length}</div><div className="muted">Saved in this browser</div></div>
+      <div className="card"><div className="stat-label">Active alerts</div><div className="stat-value">{alerts.filter(a=>a.enabled&&!a.triggeredAt).length}</div><div className="muted">Waiting for a qualifying quote</div></div>
+      <div className="card"><div className="stat-label">Triggered alerts</div><div className="stat-value">{alerts.filter(a=>!!a.triggeredAt).length}</div><div className="muted">Stored in local alert history</div></div>
+      <div className="card"><div className="stat-label">Browser notifications</div><div className="stat-value" style={{fontSize:18}}>{permission==='granted'?'Enabled':permission==='unsupported'?'Unsupported':permission==='denied'?'Blocked':'Not enabled'}</div><button className="period-btn" style={{marginTop:8}} onClick={enableNotifications}>Enable notifications</button></div>
+    </div>
+    <div className="bottom-grid" style={{marginTop:16}}>
+      <div className="card"><div className="card-heading"><div><h3><Star size={16} style={{verticalAlign:'middle'}}/> My Watchlist</h3><div className="muted">Select an instrument to open its Market Analysis.</div></div></div>
+        <div className="field"><label>Add instrument</label><div style={{display:'flex',gap:8}}><select value={newSymbol} onChange={e=>setNewSymbol(e.target.value)}>{markets.map(m=><option key={m.symbol} value={m.symbol}>{m.symbol} · {m.name}</option>)}</select><button className="period-btn" onClick={()=>addWatch(newSymbol)}><Plus size={15}/> Add</button></div></div>
+        <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Latest quote</th><th>Data status</th><th>Actions</th></tr></thead><tbody>{watchlist.length===0?<tr><td colSpan="4" className="empty">Your watchlist is empty.</td></tr>:watchlist.map(symbol=>{const m=markets.find(x=>x.symbol===symbol);return <tr key={symbol}><td><strong>{symbol}</strong><div className="muted">{m?.name||'Instrument'}</div></td><td>{m?.live?fmt(symbol,m.price):'—'}</td><td><span className="tag" style={{background:m?.live?'#153c36':'#3a2d20',color:m?.live?'#21d6a0':'#f0b66a'}}>{m?.live?'LIVE QUOTE':'WAITING / UNAVAILABLE'}</span></td><td><div style={{display:'flex',gap:6}}><button className="period-btn" onClick={()=>onSelectMarket(symbol)}>Analyse</button><button className="period-btn" title="Remove from watchlist" onClick={()=>setWatchlist(v=>v.filter(x=>x!==symbol))}><X size={14}/></button></div></td></tr>;})}</tbody></table></div>
+      </div>
+      <div className="card"><div className="card-heading"><div><h3><Bell size={16} style={{verticalAlign:'middle'}}/> Create Price Alert</h3><div className="muted">Alerts are evaluated when the app receives an updated quote.</div></div></div>
+        <div className="field"><label>Instrument</label><select value={newSymbol} onChange={e=>setNewSymbol(e.target.value)}>{markets.map(m=><option key={m.symbol} value={m.symbol}>{m.symbol}</option>)}</select></div>
+        <div className="field"><label>Alert condition</label><select value={condition} onChange={e=>setCondition(e.target.value)}><option value="above">Price reaches / rises above</option><option value="below">Price reaches / falls below</option><option value="move">Absolute percentage move from current quote</option></select></div>
+        <div className="field"><label>{condition==='move'?'Move threshold (%)':'Target price'}</label><input type="number" min="0.00001" step="any" placeholder={condition==='move'?'e.g. 1.0':'Enter target price'} value={target} onChange={e=>setTarget(e.target.value)}/></div>
+        {condition==='move'&&<div className="muted" style={{marginBottom:10}}>Baseline: {priceFor(newSymbol)?fmt(newSymbol,priceFor(newSymbol)):'Waiting for a confirmed live quote'}; alert triggers on an absolute move in either direction.</div>}
+        <button className="execute-btn" onClick={addAlert}>Save price alert</button>
+        {notice&&<p className="muted" role="status">{notice}</p>}
+      </div>
+    </div>
+    <div className="card" style={{marginTop:16}}><div className="card-heading"><div><h3>Alert Monitor & History</h3><div className="muted">Triggered alerts remain in history until you remove them.</div></div><button className="period-btn" onClick={()=>setAlerts(v=>v.filter(a=>!a.triggeredAt))}>Clear triggered history</button></div>
+      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Condition</th><th>Threshold</th><th>Latest quote</th><th>Status</th><th>Triggered</th><th>Action</th></tr></thead><tbody>{alerts.length===0?<tr><td colSpan="7" className="empty">No price alerts configured.</td></tr>:alerts.map(a=><tr key={a.id}><td>{a.symbol}</td><td>{a.condition==='above'?'Price above':a.condition==='below'?'Price below':'Absolute move'}</td><td>{a.condition==='move'?`${a.target}%` :fmt(a.symbol,a.target)}</td><td>{fmt(a.symbol,priceFor(a.symbol)??a.lastPrice)}</td><td><span className="tag" style={{background:a.triggeredAt?'#3b2630':a.enabled?'#153c36':'#26364e',color:a.triggeredAt?'#ff8da1':a.enabled?'#21d6a0':'#aab5c5'}}>{a.triggeredAt?'TRIGGERED':a.enabled?'ACTIVE':'PAUSED'}</span></td><td>{a.triggeredAt?new Date(a.triggeredAt).toLocaleString():'—'}</td><td><div style={{display:'flex',gap:5}}>{!a.triggeredAt&&<button className="period-btn" onClick={()=>setAlerts(v=>v.map(x=>x.id===a.id?{...x,enabled:!x.enabled}:x))}>{a.enabled?'Pause':'Resume'}</button>}<button className="period-btn" onClick={()=>setAlerts(v=>v.filter(x=>x.id!==a.id))}><Trash2 size={14}/></button></div></td></tr>)}</tbody></table></div>
+      <p className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:12}}>Important: quote checks use the platform's existing periodic market-data refresh, not a continuous tick stream. Alerts only evaluate while TradeLab is open and the relevant instrument is being refreshed; browser notifications depend on permission and browser support. Watchlists and alerts are stored locally on this device and do not sync across devices. No orders are placed when an alert triggers.</p>
+    </div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -2240,7 +2315,7 @@ function App() {
                 </tbody>
               </table></div>
             </div>
-          </> : activePage === 'Market Analysis' ? <>
+          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
