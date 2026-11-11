@@ -4,7 +4,7 @@ import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
   Moon, Radio, Settings, ShieldCheck, SlidersHorizontal, Sparkles,
-  TrendingUp, Wallet, Plus, Star, Trash2, CheckCircle2, X, CalendarDays
+  TrendingUp, Wallet, Plus, Star, Trash2, CheckCircle2, X, CalendarDays, Newspaper
 } from 'lucide-react';
 import './style.css';
 
@@ -24,6 +24,7 @@ const navigation = [
   { name: 'Market Analysis', icon: BarChart3 },
   { name: 'Market Watch & Alerts', icon: Bell },
   { name: 'Economic Calendar', icon: CalendarDays },
+  { name: 'News & Sentiment', icon: Newspaper },
   { name: 'Technical Indicators', icon: SlidersHorizontal },
   { name: 'AI Analysis', icon: Sparkles },
   { name: 'AI Assistant', icon: Bot },
@@ -2089,6 +2090,58 @@ function EconomicCalendarPage({ selectedMarket }) {
   </>;
 }
 
+function NewsSentimentPage({ selectedMarket }) {
+  const STORE_KEY = 'tradelab_news_sentiment_v1';
+  const [items, setItems] = useState(() => {
+    try { const saved = JSON.parse(localStorage.getItem(STORE_KEY) || '[]'); return Array.isArray(saved) ? saved : []; }
+    catch { return []; }
+  });
+  const [title, setTitle] = useState('');
+  const [source, setSource] = useState('');
+  const [symbol, setSymbol] = useState(selectedMarket || 'EURUSD');
+  const [category, setCategory] = useState('Macro');
+  const [notes, setNotes] = useState('');
+  const [filter, setFilter] = useState('All');
+  useEffect(() => { try { localStorage.setItem(STORE_KEY, JSON.stringify(items)); } catch {} }, [items]);
+  const scoreText = text => {
+    const positive = ['beats','beat','growth','strong','surge','rise','rises','gain','gains','bullish','upgrade','higher','positive','inflow','easing','cuts'];
+    const negative = ['miss','misses','weak','fall','falls','drop','drops','bearish','downgrade','lower','negative','outflow','war','crisis','hike','inflation'];
+    const words = String(text || '').toLowerCase().match(/[a-z]+/g) || [];
+    const pos = words.filter(w => positive.includes(w)).length;
+    const neg = words.filter(w => negative.includes(w)).length;
+    const score = pos + neg ? Math.round(100 * (pos - neg) / (pos + neg)) : 0;
+    return { score, label: score > 15 ? 'Positive' : score < -15 ? 'Negative' : 'Neutral' };
+  };
+  const addItem = e => {
+    e.preventDefault();
+    if (!title.trim()) return;
+    const sentiment = scoreText(`${title} ${notes}`);
+    setItems(old => [{ id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, title: title.trim(), source: source.trim() || 'Unspecified', symbol, category, notes: notes.trim(), createdAt: new Date().toISOString(), ...sentiment }, ...old]);
+    setTitle(''); setSource(''); setNotes('');
+  };
+  const visible = items.filter(x => filter === 'All' || x.label === filter).sort((a,b) => new Date(b.createdAt)-new Date(a.createdAt));
+  const counts = ['Positive','Neutral','Negative'].map(label => ({ label, count: items.filter(x=>x.label===label).length }));
+  const related = items.filter(x => x.symbol === selectedMarket);
+  return <>
+    <div className="welcome"><div><h1>News & Sentiment Intelligence</h1><div className="muted">Capture market headlines, assess keyword sentiment and review instrument-specific news context.</div></div><div className="demo-badge">● MANUAL RESEARCH WORKSPACE</div></div>
+    <div className="stats-grid" style={{marginBottom:18}}>{counts.map(c=><div className="card stat-card" key={c.label}><div className="muted">{c.label} headlines</div><div className="stat-value">{c.count}</div></div>)}<div className="card stat-card"><div className="muted">{selectedMarket} coverage</div><div className="stat-value">{related.length}</div></div></div>
+    <div className="card" style={{marginBottom:18}}><div className="card-heading"><h3>Add a verified headline</h3><span className="muted">Saved on this device</span></div>
+      <form onSubmit={addItem} className="form-grid">
+        <div className="field" style={{gridColumn:'1 / -1'}}><label>Headline / event summary</label><input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Enter the headline exactly as reported" required maxLength={240}/></div>
+        <div className="field"><label>Source</label><input value={source} onChange={e=>setSource(e.target.value)} placeholder="Publisher or source name" maxLength={100}/></div>
+        <div className="field"><label>Instrument</label><select value={symbol} onChange={e=>setSymbol(e.target.value)}>{['EURUSD','GBPUSD','USDJPY','XAUUSD','US30','BTCUSD','AUDUSD','USDCAD','NZDUSD','ALL MARKETS'].map(v=><option key={v}>{v}</option>)}</select></div>
+        <div className="field"><label>Category</label><select value={category} onChange={e=>setCategory(e.target.value)}>{['Macro','Central bank','Geopolitics','Earnings','Commodities','Crypto','Other'].map(v=><option key={v}>{v}</option>)}</select></div>
+        <div className="field" style={{gridColumn:'1 / -1'}}><label>Additional context (optional)</label><textarea value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Add relevant details or your own context" rows="3" maxLength={1000}/></div>
+        <div><button className="primary-btn" type="submit" disabled={!title.trim()}><Plus size={15}/> Add headline</button></div>
+      </form>
+    </div>
+    <div className="card"><div className="card-heading"><h3>Headline monitor</h3><div className="field"><select value={filter} onChange={e=>setFilter(e.target.value)}>{['All','Positive','Neutral','Negative'].map(v=><option key={v}>{v}</option>)}</select></div></div>
+      {visible.length===0 ? <div className="empty">No headlines match this filter. Add a verified headline to begin your research log.</div> : <div className="table-wrap"><table><thead><tr><th>Headline</th><th>Source</th><th>Instrument</th><th>Category</th><th>Sentiment</th><th>Score</th><th>Captured</th><th>Action</th></tr></thead><tbody>{visible.map(x=><tr key={x.id}><td style={{minWidth:220}}><strong>{x.title}</strong>{x.notes&&<div className="muted" style={{fontSize:11,marginTop:4}}>{x.notes}</div>}</td><td>{x.source}</td><td>{x.symbol}</td><td>{x.category}</td><td><span className="tag" style={{color:x.label==='Positive'?'#20d6a1':x.label==='Negative'?'#fb7185':'#fbbf24'}}>{x.label}</span></td><td>{x.score>0?'+':''}{x.score}</td><td>{new Date(x.createdAt).toLocaleString()}</td><td><button className="period-btn" onClick={()=>setItems(old=>old.filter(y=>y.id!==x.id))} aria-label="Delete headline"><Trash2 size={14}/></button></td></tr>)}</tbody></table></div>}
+      <p className="muted" style={{fontSize:11,lineHeight:1.7,marginTop:12}}>Sentiment is a transparent keyword heuristic applied to the headline and notes; it is not an AI model, verified market-impact assessment or trading signal. This page does not fetch live news. Verify the source, publication time and facts independently. Headlines are stored in this browser only.</p>
+    </div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -2387,7 +2440,7 @@ function App() {
                 </tbody>
               </table></div>
             </div>
-          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
+          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
