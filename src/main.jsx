@@ -1491,35 +1491,122 @@ function AccountOverviewPage({ trades = [] }) {
 }
 
 function SecurityCentrePage() {
+  const STORAGE_KEYS = [
+    'tradelab_account_label', 'tradelab_auto_alerts_v1', 'tradelab_auto_last_candle_v1',
+    'tradelab_auto_log_v1', 'tradelab_auto_trades_v1', 'tradelab_demo_orders',
+    'tradelab_paper_lock', 'tradelab_portfolio_allocations_v1', 'tradelab_portfolio_risk_limit_v1',
+    'tradelab_portfolio_risk_v1', 'tradelab_risk_positions_v1', 'tradelab_strategy_library_v1',
+    'tradelab_trade_journal_v1', 'tradelab_user_settings', 'tradelab_security_log_v1'
+  ];
   const [lockEnabled, setLockEnabled] = useState(() => localStorage.getItem('tradelab_paper_lock') === 'true');
   const [showKeys, setShowKeys] = useState(false);
-  function toggleLock(value) { setLockEnabled(value); localStorage.setItem('tradelab_paper_lock', String(value)); }
+  const [securityLog, setSecurityLog] = useState(() => {
+    try { const value=JSON.parse(localStorage.getItem('tradelab_security_log_v1')||'[]'); return Array.isArray(value)?value.slice(0,50):[]; }
+    catch { return []; }
+  });
+  const [backupMessage, setBackupMessage] = useState('');
+  const [integrity, setIntegrity] = useState({checked:false,valid:0,invalid:0});
+  const fileInput = React.useRef(null);
+  function recordSecurityEvent(action, detail='') {
+    const next=[{id:`${Date.now()}-${Math.random().toString(36).slice(2,7)}`,action,detail,time:new Date().toISOString()},...securityLog].slice(0,50);
+    setSecurityLog(next);
+    try { localStorage.setItem('tradelab_security_log_v1',JSON.stringify(next)); } catch {}
+  }
+  function toggleLock(value) {
+    setLockEnabled(value);
+    localStorage.setItem('tradelab_paper_lock', String(value));
+    recordSecurityEvent(value?'Local paper lock enabled':'Local paper lock disabled','Browser-local preference only');
+  }
+  function checkIntegrity() {
+    let valid=0,invalid=0;
+    STORAGE_KEYS.forEach(key=>{
+      const raw=localStorage.getItem(key);
+      if(raw===null){valid++;return;}
+      try { JSON.parse(raw); valid++; } catch { invalid++; }
+    });
+    setIntegrity({checked:true,valid,invalid});
+    recordSecurityEvent('Workspace integrity check',`${valid} readable entries; ${invalid} invalid JSON entries`);
+  }
+  function exportBackup() {
+    try {
+      const data={format:'TradeLabAI-LocalBackup',version:1,createdAt:new Date().toISOString(),storage:{}};
+      STORAGE_KEYS.forEach(key=>{const value=localStorage.getItem(key);if(value!==null)data.storage[key]=value;});
+      const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download=`tradelab-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();
+      URL.revokeObjectURL(url);
+      setBackupMessage('Workspace backup exported. Store the file somewhere private.');
+      recordSecurityEvent('Workspace backup exported',`${Object.keys(data.storage).length} local data entries`);
+    } catch { setBackupMessage('Backup export failed in this browser.'); recordSecurityEvent('Backup export failed'); }
+  }
+  async function importBackup(event) {
+    const file=event.target.files?.[0];
+    if(!file)return;
+    try {
+      if(file.size>2*1024*1024)throw new Error('Backup file exceeds the 2 MB safety limit.');
+      const parsed=JSON.parse(await file.text());
+      if(parsed?.format!=='TradeLabAI-LocalBackup'||parsed?.version!==1||!parsed.storage||typeof parsed.storage!=='object'||Array.isArray(parsed.storage))throw new Error('This is not a supported TradeLab AI backup.');
+      const entries=Object.entries(parsed.storage);
+      if(!entries.length||entries.length>STORAGE_KEYS.length)throw new Error('Backup contains an unexpected number of entries.');
+      for(const [key,value] of entries){
+        if(!STORAGE_KEYS.includes(key)||typeof value!=='string')throw new Error('Backup contains an unsupported key or value.');
+        if(value.length>750000)throw new Error('A backup entry exceeds the safety limit.');
+        if(!['tradelab_auto_last_candle_v1','tradelab_account_label'].includes(key))JSON.parse(value);
+      }
+      if(!window.confirm(`Restore ${entries.length} TradeLab data entries? Current values for matching entries will be replaced.`))return;
+      entries.forEach(([key,value])=>localStorage.setItem(key,value));
+      setLockEnabled(localStorage.getItem('tradelab_paper_lock')==='true');
+      setBackupMessage(`Restore complete: ${entries.length} entries imported. Reload the app to refresh all sections.`);
+      recordSecurityEvent('Workspace backup restored',`${entries.length} entries imported from ${file.name}`);
+      checkIntegrity();
+    } catch(error) { setBackupMessage(error.message||'Backup restore failed.'); recordSecurityEvent('Backup restore rejected',error.message||'Invalid backup'); }
+    finally { event.target.value=''; }
+  }
+  function clearSecurityLog() {
+    if(!window.confirm('Clear the local security activity log?'))return;
+    setSecurityLog([]);localStorage.removeItem('tradelab_security_log_v1');
+  }
   return <>
-    <div className="welcome"><div><h1>Security Centre</h1><div className="muted">Security status and safe-use controls for this browser workspace.</div></div><div className="demo-badge">● LOCAL SECURITY CHECK</div></div>
+    <div className="welcome"><div><h1>Security Centre</h1><div className="muted">Local workspace protection, backup and data-integrity tools.</div></div><div className="demo-badge">● LOCAL SECURITY CHECK</div></div>
     <div className="stats-grid">
       <div className="card"><div className="stat-label">Live trading</div><div className="stat-value positive">Disabled</div><div className="muted">No live broker execution</div></div>
-      <div className="card"><div className="stat-label">Broker credentials</div><div className="stat-value">Not stored</div><div className="muted">Do not paste secrets into the app</div></div>
-      <div className="card"><div className="stat-label">Two-factor authentication</div><div className="stat-value">Not configured</div><div className="muted">Requires account authentication backend</div></div>
-      <div className="card"><div className="stat-label">Security mode</div><div className="stat-value">Browser demo</div><div className="muted">No server-side identity verification</div></div>
+      <div className="card"><div className="stat-label">Broker credentials</div><div className="stat-value">Not stored</div><div className="muted">Never paste secrets into the app</div></div>
+      <div className="card"><div className="stat-label">Two-factor authentication</div><div className="stat-value">Not configured</div><div className="muted">Requires a secure account backend</div></div>
+      <div className="card"><div className="stat-label">Workspace storage</div><div className="stat-value">Browser-local</div><div className="muted">Data is stored on this device/browser</div></div>
     </div>
     <div className="card"><div className="card-heading"><h3>Paper trading lock</h3><span className={lockEnabled?'tag':'demo-badge'}>{lockEnabled?'LOCK ENABLED':'LOCK DISABLED'}</span></div>
-      <p className="muted" style={{lineHeight:1.7}}>This local safety switch records your preference in this browser. It is not an authentication system and does not currently block backend or broker actions. Live execution remains disabled independently.</p>
+      <p className="muted" style={{lineHeight:1.7}}>This is a local preference and audit event only. It is not a login, does not encrypt browser data and does not independently block broker or backend actions. Live execution remains disabled.</p>
       <button className="execute-btn" style={{background:lockEnabled?'#087d69':'#9b354d'}} onClick={()=>toggleLock(!lockEnabled)}>{lockEnabled?'Turn off local paper lock':'Enable local paper lock'}</button>
+    </div>
+    <div className="dashboard-grid" style={{marginTop:18}}>
+      <div className="card"><div className="card-heading"><h3>Workspace backup & recovery</h3><ShieldCheck size={19} color="#20d6a1"/></div>
+        <p className="muted" style={{lineHeight:1.7}}>Export the app's supported browser-local trading data to a JSON backup. Restore validates the file format and permitted storage keys before replacing matching entries.</p>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap'}}><button className="execute-btn" onClick={exportBackup}>Export workspace backup</button><button className="period-btn" onClick={()=>fileInput.current?.click()}>Restore from backup</button></div>
+        <input ref={fileInput} type="file" accept="application/json,.json" style={{display:'none'}} onChange={importBackup}/>
+        {backupMessage&&<p className="muted" role="status" style={{marginTop:12}}>{backupMessage}</p>}
+      </div>
+      <div className="card"><div className="card-heading"><h3>Data integrity check</h3><ShieldCheck size={19} color="#20d6a1"/></div>
+        <p className="muted" style={{lineHeight:1.7}}>Check whether supported TradeLab browser-storage entries contain readable JSON. This does not verify market data, trade accuracy or server security.</p>
+        <button className="execute-btn" onClick={checkIntegrity}>Run integrity check</button>
+        {integrity.checked&&<div className="signal" style={{marginTop:12}}><span>Readable entries: {integrity.valid}</span><strong className={integrity.invalid?'negative':'positive'}>{integrity.invalid} invalid</strong></div>}
+      </div>
     </div>
     <div className="dashboard-grid" style={{marginTop:18}}>
       <div className="card"><div className="card-heading"><h3>Security checklist</h3><ShieldCheck size={19} color="#20d6a1"/></div>
         {['Use a unique password for every broker account','Enable two-factor authentication with your broker','Never share API secrets, passwords or recovery codes','Use read-only API permissions for market analysis','Review broker sessions and revoke unknown devices','Keep your browser and operating system updated'].map((item,i)=><div className="signal" key={i}><span>{item}</span><span className="muted">Recommended</span></div>)}
       </div>
       <div className="card"><div className="card-heading"><h3>API key safety</h3><LockKeyhole size={19} color="#20d6a1"/></div>
-        <p className="muted" style={{lineHeight:1.7}}>API credentials must never be embedded in React source code or committed to GitHub. When broker connectivity is added, secrets should be stored as encrypted server-side environment secrets and scoped to the minimum required permissions.</p>
+        <p className="muted" style={{lineHeight:1.7}}>Credentials must never be embedded in React source code or committed to GitHub. Broker secrets must be stored as encrypted server-side environment secrets with minimum permissions.</p>
         <button className="period-btn" onClick={()=>setShowKeys(v=>!v)}>{showKeys?'Hide guidance':'Show key-handling guidance'}</button>
         {showKeys&&<div className="signal" style={{marginTop:12}}><span>Required approach</span><strong>Server-side secrets only</strong></div>}
       </div>
     </div>
-    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{lineHeight:1.7,margin:0}}>Important limitation: these are advisory UI controls, not a substitute for real authentication, encrypted storage, server-side authorization, audit logging, rate limiting or penetration testing. Do not enter real broker credentials until those backend protections are implemented and independently tested.</p></div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Security activity log</h3><button className="period-btn" onClick={clearSecurityLog}>Clear log</button></div>
+      {securityLog.length===0?<div className="empty">No local security events recorded yet.</div>:<div className="table-wrap"><table><thead><tr><th>Event</th><th>Details</th><th>Time</th></tr></thead><tbody>{securityLog.map(item=><tr key={item.id}><td>{item.action}</td><td>{item.detail||'—'}</td><td>{new Date(item.time).toLocaleString()}</td></tr>)}</tbody></table></div>}
+    </div>
+    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{lineHeight:1.7,margin:0}}>Important: these are browser-side safeguards, not real authentication or a substitute for encrypted server storage, server-side authorization, audit logging, rate limiting or penetration testing. Backups may contain personal trading records; keep exported files private. Do not enter real broker credentials until backend protections are implemented and independently tested.</p></div>
   </>;
 }
-
 
 function PerformanceAnalyticsPage() {
   const [entries, setEntries] = useState(() => {
