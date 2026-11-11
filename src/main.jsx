@@ -424,6 +424,8 @@ function runStrategyBacktest(candles, config) {
   const fast = calcEMA(closes, config.fast);
   const slow = calcEMA(closes, config.slow);
   const rsi = calcRSI(closes, config.rsiPeriod);
+  const macd = calcMACD(closes, config.macdFast, config.macdSlow, config.macdSignal);
+  const bands = calcBollinger(closes, config.bbPeriod, config.bbDeviation);
   const lookback = Math.max(5, config.lookback);
   const fee = Math.max(0, config.costBps) / 10000;
   const initial = Math.max(100, config.capital);
@@ -439,6 +441,23 @@ function runStrategyBacktest(candles, config) {
       if (rsi[i] == null) return position;
       if (rsi[i] <= config.oversold) return 1;
       if (rsi[i] >= config.overbought) return -1;
+      return position;
+    }
+    if (config.strategy === 'macd') {
+      if (i < 1 || macd.line[i] == null || macd.signal[i] == null || macd.line[i-1] == null || macd.signal[i-1] == null) return position;
+      const previous = macd.line[i-1] - macd.signal[i-1];
+      const current = macd.line[i] - macd.signal[i];
+      if (previous <= 0 && current > 0) return 1;
+      if (previous >= 0 && current < 0) return -1;
+      return position;
+    }
+    if (config.strategy === 'bollinger') {
+      const band = bands[i];
+      if (!band) return position;
+      if (closes[i] <= band.lower) return 1;
+      if (closes[i] >= band.upper) return -1;
+      if (position === 1 && closes[i] >= band.middle) return 0;
+      if (position === -1 && closes[i] <= band.middle) return 0;
       return position;
     }
     if (i < lookback) return position;
@@ -531,6 +550,10 @@ function optimizeStrategy(candles, base) {
     [8,12,20,30,40].forEach(fast => [34,50,75,100,150].forEach(slow => { if (fast < slow) configs.push({...base,fast,slow}); }));
   } else if (base.strategy === 'rsi') {
     [7,10,14,21].forEach(rsiPeriod => [20,25,30,35].forEach(oversold => [65,70,75,80].forEach(overbought => { if (overbought-oversold>=30) configs.push({...base,rsiPeriod,oversold,overbought}); })));
+  } else if (base.strategy === 'macd') {
+    [8,12,16].forEach(macdFast => [21,26,32].forEach(macdSlow => [5,9].forEach(macdSignal => { if (macdFast < macdSlow) configs.push({...base,macdFast,macdSlow,macdSignal}); })));
+  } else if (base.strategy === 'bollinger') {
+    [10,14,20,30].forEach(bbPeriod => [1.5,2,2.5,3].forEach(bbDeviation => configs.push({...base,bbPeriod,bbDeviation})));
   } else {
     [5,8,10,15,20,30,40].forEach(lookback => configs.push({...base,lookback}));
   }
@@ -547,33 +570,18 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
   const [oversold, setOversold] = useState(30);
   const [overbought, setOverbought] = useState(70);
   const [lookback, setLookback] = useState(20);
+  const [macdFast, setMacdFast] = useState(12);
+  const [macdSlow, setMacdSlow] = useState(26);
+  const [macdSignal, setMacdSignal] = useState(9);
+  const [bbPeriod, setBbPeriod] = useState(20);
+  const [bbDeviation, setBbDeviation] = useState(2);
   const [capital, setCapital] = useState(10000);
   const [costBps, setCostBps] = useState(1.5);
   const [runKey, setRunKey] = useState(0);
-  const [runMessage, setRunMessage] = useState('');
   const [optimization, setOptimization] = useState([]);
   const [optimizing, setOptimizing] = useState(false);
-  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps };
-  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, capital, costBps, runKey]);
-
-  const handleRunBacktest = () => {
-    if (loading) return;
-
-    try {
-      const check = runStrategyBacktest(candles, config);
-
-      if (check?.error) {
-        setRunMessage(`Backtest could not run: ${check.error}`);
-        return;
-      }
-
-      setRunKey(key => key + 1);
-      setRunMessage(`Backtest completed — ${check.tradeCount} closed trades from ${check.candlesUsed} candles.`);
-    } catch (err) {
-      setRunMessage(`Backtest failed: ${err?.message || 'Unexpected calculation error.'}`);
-    }
-  };
-
+  const config = { strategy, fast: fastPeriod, slow: slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, costBps };
+  const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, costBps, runKey]);
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
   const chart = result?.curve || [];
@@ -591,15 +599,24 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       <div className="card-heading"><div><h3>Strategy builder</h3><div className="muted">{symbol} · {timeframe} · {candles.length} candles available</div></div><span className="tag">NO LIVE ORDERS</span></div>
       {(loading || error) && <div className="empty">{loading ? 'Loading historical data…' : error}</div>}
       <div className="order-grid" style={{marginTop:12}}>
-        <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="ema">EMA crossover</option><option value="rsi">RSI mean-reversion</option><option value="breakout">Price breakout</option></select></div>
+        <div className="field"><label>Strategy</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="ema">EMA crossover</option><option value="rsi">RSI mean-reversion</option><option value="breakout">Price breakout</option><option value="macd">MACD crossover</option><option value="bollinger">Bollinger Bands mean-reversion</option></select></div>
         <div className="field"><label>Starting capital (USD)</label><input type="number" min="100" step="100" value={capital} onChange={e=>setCapital(Math.max(100,Number(e.target.value)||100))}/></div>
         <div className="field"><label>Trading cost per side (bps)</label><input type="number" min="0" max="100" step="0.1" value={costBps} onChange={e=>setCostBps(Math.max(0,Math.min(100,Number(e.target.value)||0)))}/></div>
         {strategy==='ema' && <><div className="field"><label>Fast EMA</label><input type="number" min="2" max="150" value={fastPeriod} onChange={e=>setFastPeriod(Math.max(2,Math.min(150,Number(e.target.value)||2)))}/></div><div className="field"><label>Slow EMA</label><input type="number" min="3" max="250" value={slowPeriod} onChange={e=>setSlowPeriod(Math.max(3,Math.min(250,Number(e.target.value)||3)))}/></div></>}
         {strategy==='rsi' && <><div className="field"><label>RSI period</label><input type="number" min="2" max="50" value={rsiPeriod} onChange={e=>setRsiPeriod(Math.max(2,Math.min(50,Number(e.target.value)||2)))}/></div><div className="field"><label>Oversold threshold</label><input type="number" min="5" max="45" value={oversold} onChange={e=>setOversold(Math.max(5,Math.min(45,Number(e.target.value)||5)))}/></div><div className="field"><label>Overbought threshold</label><input type="number" min="55" max="95" value={overbought} onChange={e=>setOverbought(Math.max(55,Math.min(95,Number(e.target.value)||55)))}/></div></>}
         {strategy==='breakout' && <div className="field"><label>Breakout lookback candles</label><input type="number" min="5" max="100" value={lookback} onChange={e=>setLookback(Math.max(5,Math.min(100,Number(e.target.value)||5)))}/></div>}
+        {strategy==='macd' && <>
+          <div className="field"><label>MACD fast EMA</label><input type="number" min="2" max="50" value={macdFast} onChange={e=>setMacdFast(Math.max(2,Math.min(50,Number(e.target.value)||2)))}/></div>
+          <div className="field"><label>MACD slow EMA</label><input type="number" min="3" max="100" value={macdSlow} onChange={e=>setMacdSlow(Math.max(3,Math.min(100,Number(e.target.value)||3)))}/></div>
+          <div className="field"><label>MACD signal period</label><input type="number" min="2" max="30" value={macdSignal} onChange={e=>setMacdSignal(Math.max(2,Math.min(30,Number(e.target.value)||2)))}/></div>
+          {macdFast >= macdSlow && <div className="muted" style={{gridColumn:'1/-1',color:'#fbbf24'}}>For a conventional MACD setup, the fast EMA should be shorter than the slow EMA.</div>}
+        </>}
+        {strategy==='bollinger' && <>
+          <div className="field"><label>Bollinger period</label><input type="number" min="5" max="100" value={bbPeriod} onChange={e=>setBbPeriod(Math.max(5,Math.min(100,Number(e.target.value)||5)))}/></div>
+          <div className="field"><label>Standard deviation multiplier</label><input type="number" min="0.5" max="4" step="0.1" value={bbDeviation} onChange={e=>setBbDeviation(Math.max(0.5,Math.min(4,Number(e.target.value)||0.5)))}/></div>
+        </>}
       </div>
-      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button type="button" className="execute-btn" onClick={handleRunBacktest} disabled={loading}>{loading ? 'Loading candles…' : 'Run backtest'}</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
-      {runMessage && <div className="muted" role="status" aria-live="polite" style={{marginTop:10,fontSize:12}}>{runMessage}</div>}
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Costs are a simplified basis-point assumption.</span></div>
     </div>
     {result?.error ? <div className="card" style={{marginTop:18}}><div className="empty">{result.error}</div></div> : <>
       <div className="stats-grid" style={{marginTop:18}}>
@@ -627,7 +644,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       </div>
       <div className="card" style={{marginTop:18}}>
         <div className="card-heading"><div><h3>Parameter optimizer</h3><div className="muted">Tests a bounded set of parameter combinations on the currently loaded candles.</div></div><button className="execute-btn" onClick={runOptimization} disabled={loading || optimizing || candles.length<60}>{optimizing?'Optimizing…':'Optimize strategy'}</button></div>
-        {optimization.length ? <div className="table-wrap"><table><thead><tr><th>Rank</th><th>Parameters</th><th>Net return</th><th>Max drawdown</th><th>Trades</th><th>Profit factor</th></tr></thead><tbody>{optimization.map((item,i)=><tr key={i}><td>{i+1}</td><td>{item.config.strategy==='ema'?`EMA ${item.config.fast}/${item.config.slow}`:item.config.strategy==='rsi'?`RSI ${item.config.rsiPeriod}, ${item.config.oversold}/${item.config.overbought}`:`Breakout ${item.config.lookback}`}</td><td className={item.result.netReturn>=0?'positive':'negative'}>{pct(item.result.netReturn)}</td><td>{item.result.maxDrawdown.toFixed(2)}%</td><td>{item.result.tradeCount}</td><td>{Number.isFinite(item.result.profitFactor)?item.result.profitFactor.toFixed(2):'∞'}</td></tr>)}</tbody></table></div> : <p className="muted" style={{fontSize:11}}>{optimizing?'Evaluating candidate settings…':'Run the optimizer to compare candidate settings. It ranks by return penalized for drawdown; it does not guarantee a better live result.'}</p>}
+        {optimization.length ? <div className="table-wrap"><table><thead><tr><th>Rank</th><th>Parameters</th><th>Net return</th><th>Max drawdown</th><th>Trades</th><th>Profit factor</th></tr></thead><tbody>{optimization.map((item,i)=><tr key={i}><td>{i+1}</td><td>{item.config.strategy==='ema'?`EMA ${item.config.fast}/${item.config.slow}`:item.config.strategy==='rsi'?`RSI ${item.config.rsiPeriod}, ${item.config.oversold}/${item.config.overbought}`:item.config.strategy==='macd'?`MACD ${item.config.macdFast}/${item.config.macdSlow}/${item.config.macdSignal}`:item.config.strategy==='bollinger'?`Bollinger ${item.config.bbPeriod}, ${item.config.bbDeviation}σ`:`Breakout ${item.config.lookback}`}</td><td className={item.result.netReturn>=0?'positive':'negative'}>{pct(item.result.netReturn)}</td><td>{item.result.maxDrawdown.toFixed(2)}%</td><td>{item.result.tradeCount}</td><td>{Number.isFinite(item.result.profitFactor)?item.result.profitFactor.toFixed(2):'∞'}</td></tr>)}</tbody></table></div> : <p className="muted" style={{fontSize:11}}>{optimizing?'Evaluating candidate settings…':'Run the optimizer to compare candidate settings. It ranks by return penalized for drawdown; it does not guarantee a better live result.'}</p>}
       </div>
       <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Closed trades</h3><span className="muted">Most recent 20 shown · {result.tradeCount} total</span></div><div className="table-wrap"><table><thead><tr><th>#</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Net P/L</th><th>Exit reason</th></tr></thead><tbody>{result.trades.length===0?<tr><td colSpan="8" className="empty">No completed trades for this strategy and data window.</td></tr>:result.trades.slice(-20).reverse().map(t=><tr key={t.id}><td>{t.id}</td><td className={t.side==='LONG'?'positive':'negative'}>{t.side}</td><td>{t.entryTime}</td><td>{t.exitTime}</td><td>{t.entryPrice.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</td><td>{t.exitPrice.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5)}</td><td className={t.pnlCash>=0?'positive':'negative'}>{money(t.pnlCash)} ({pct(t.pnlPct)})</td><td>{t.reason}</td></tr>)}</tbody></table></div></div>
     </>}
