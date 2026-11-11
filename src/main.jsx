@@ -25,7 +25,7 @@ const navigation = [
   { name: 'Market Watch & Alerts', icon: Bell },
   { name: 'Economic Calendar', icon: CalendarDays },
   { name: 'News & Sentiment', icon: Newspaper },
-  { name: 'Market Sessions', icon: Clock3 },
+  { name: 'Trade Planner', icon: Activity },
   { name: 'Technical Indicators', icon: SlidersHorizontal },
   { name: 'AI Analysis', icon: Sparkles },
   { name: 'AI Assistant', icon: Bot },
@@ -2143,54 +2143,43 @@ function NewsSentimentPage({ selectedMarket }) {
   </>;
 }
 
-function MarketSessionsPage({ selectedMarket }) {
-  const [now, setNow] = useState(() => new Date());
-  const [instrumentClass, setInstrumentClass] = useState(selectedMarket === 'BTCUSD' ? 'Crypto' : selectedMarket === 'US30' ? 'US indices' : selectedMarket === 'XAUUSD' ? 'Metals' : 'Forex');
-  useEffect(() => { const timer = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(timer); }, []);
-  useEffect(() => { setInstrumentClass(selectedMarket === 'BTCUSD' ? 'Crypto' : selectedMarket === 'US30' ? 'US indices' : selectedMarket === 'XAUUSD' ? 'Metals' : 'Forex'); }, [selectedMarket]);
-  const sessions = [
-    { name: 'Sydney', open: 21, close: 6, focus: 'AUD, NZD', note: 'Asia-Pacific activity' },
-    { name: 'Tokyo', open: 0, close: 9, focus: 'JPY, AUD', note: 'Asian session' },
-    { name: 'London', open: 8, close: 17, focus: 'EUR, GBP, CHF', note: 'European session' },
-    { name: 'New York', open: 13, close: 22, focus: 'USD, CAD', note: 'North American session' }
+
+function TradePlannerPage({ selectedMarket }) {
+  const KEY = 'tradelab_trade_plans_v1';
+  const [symbol, setSymbol] = useState(selectedMarket || 'EURUSD');
+  const [direction, setDirection] = useState('BUY');
+  const [balance, setBalance] = useState('10000');
+  const [riskPct, setRiskPct] = useState('1');
+  const [entry, setEntry] = useState('');
+  const [stop, setStop] = useState('');
+  const [target, setTarget] = useState('');
+  const [tickSize, setTickSize] = useState('0.0001');
+  const [tickValue, setTickValue] = useState('10');
+  const [contractSize, setContractSize] = useState('100000');
+  const [plans, setPlans] = useState(() => { try { const v=JSON.parse(localStorage.getItem(KEY)||'[]'); return Array.isArray(v)?v:[]; } catch { return []; } });
+  useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(plans)); } catch {} }, [plans]);
+  const n = v => Number(v);
+  const valid = [balance,riskPct,entry,stop,target,tickSize,tickValue,contractSize].every(v=>v!==''&&Number.isFinite(n(v))) && n(balance)>0 && n(riskPct)>0 && n(riskPct)<=100 && n(tickSize)>0 && n(tickValue)>0 && n(contractSize)>0 && n(entry)!==n(stop);
+  const distance = valid ? Math.abs(n(entry)-n(stop)) : 0;
+  const riskCash = valid ? n(balance)*n(riskPct)/100 : 0;
+  const riskPerLot = valid ? distance/n(tickSize)*n(tickValue) : 0;
+  const lots = riskPerLot>0 ? riskCash/riskPerLot : 0;
+  const rr = valid && distance>0 ? (direction==='BUY' ? (n(target)-n(entry))/distance : (n(entry)-n(target))/distance) : 0;
+  const targetCash = rr>0 ? riskCash*rr : 0;
+  const savePlan = () => { if(!valid || lots<=0) return; setPlans(old=>[{id:`${Date.now()}`,symbol,direction,balance:n(balance),riskPct:n(riskPct),entry:n(entry),stop:n(stop),target:n(target),tickSize:n(tickSize),tickValue:n(tickValue),contractSize:n(contractSize),lots,rr,createdAt:new Date().toISOString()},...old].slice(0,50)); };
+  const fields = [
+    ['Account balance',balance,setBalance],['Risk per trade (%)',riskPct,setRiskPct],['Entry price',entry,setEntry],['Stop-loss price',stop,setStop],['Take-profit price',target,setTarget],['Tick size',tickSize,setTickSize],['Tick value per standard lot',tickValue,setTickValue],['Contract size (units per lot)',contractSize,setContractSize]
   ];
-  const minuteOfDay = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const getState = session => {
-    const open = session.open * 60, close = session.close * 60;
-    const active = open < close ? minuteOfDay >= open && minuteOfDay < close : minuteOfDay >= open || minuteOfDay < close;
-    let remaining;
-    if (active) remaining = ((close - minuteOfDay + 1440) % 1440);
-    else remaining = ((open - minuteOfDay + 1440) % 1440);
-    return { active, remaining };
-  };
-  const activeSessions = sessions.filter(s => getState(s).active);
-  const fmt = mins => `${Math.floor(mins / 60)}h ${mins % 60}m`;
-  const isWeekend = now.getUTCDay() === 0 || now.getUTCDay() === 6;
-  const marketGuidance = instrumentClass === 'Crypto'
-    ? 'Crypto trades continuously on many venues, including weekends. Liquidity and spreads still vary by exchange and time.'
-    : instrumentClass === 'US indices'
-      ? 'US index cash-market activity is generally strongest around the New York cash open and close. Check the instrument provider’s trading hours and holidays.'
-      : instrumentClass === 'Metals'
-        ? 'Gold trades across global OTC and broker venues. London and New York hours often see greater participation, but broker conditions vary.'
-        : 'Forex activity often increases during the London and New York sessions, especially when both are open. Actual liquidity is broker- and pair-dependent.';
   return <>
-    <div className="welcome"><div><h1>Market Sessions & Trading Hours</h1><div className="muted">Track global session windows, overlaps and timing context for {selectedMarket}.</div></div><div className="demo-badge">● UTC SESSION CLOCK</div></div>
-    <div className="stats-grid" style={{marginBottom:18}}>
-      <div className="card stat-card"><div className="muted">Current UTC time</div><div className="stat-value">{now.toLocaleTimeString('en-GB',{timeZone:'UTC',hour:'2-digit',minute:'2-digit'})}</div><div className="muted">{now.toLocaleDateString('en-GB',{timeZone:'UTC',weekday:'long',day:'2-digit',month:'short'})}</div></div>
-      <div className="card stat-card"><div className="muted">Active sessions</div><div className="stat-value">{activeSessions.length}</div><div className="muted">{activeSessions.map(s=>s.name).join(' · ') || 'No listed session open'}</div></div>
-      <div className="card stat-card"><div className="muted">London–New York overlap</div><div className="stat-value">{getState(sessions[2]).active && getState(sessions[3]).active ? 'ACTIVE' : 'INACTIVE'}</div><div className="muted">Indicative overlap window</div></div>
-      <div className="card stat-card"><div className="muted">Weekly market context</div><div className="stat-value">{isWeekend ? 'WEEKEND' : 'WEEKDAY'}</div><div className="muted">UTC calendar day</div></div>
+    <div className="welcome"><div><h1>Trade Planner & Position Sizing</h1><div className="muted">Calculate risk-based position size, stop distance and reward-to-risk before placing a trade.</div></div><div className="demo-badge">● PLANNING TOOL · NO ORDERS</div></div>
+    <div className="card" style={{marginBottom:18}}><div className="card-heading"><h3>Trade parameters</h3><span className="muted">Use instrument-specific contract and tick specifications from your broker.</span></div>
+      <div className="form-grid"><div className="field"><label>Instrument</label><select value={symbol} onChange={e=>setSymbol(e.target.value)}>{['EURUSD','GBPUSD','USDJPY','XAUUSD','US30','BTCUSD','AUDUSD','USDCAD','NZDUSD'].map(v=><option key={v}>{v}</option>)}</select></div><div className="field"><label>Direction</label><select value={direction} onChange={e=>setDirection(e.target.value)}><option>BUY</option><option>SELL</option></select></div>
+      {fields.map(([label,value,setter])=><div className="field" key={label}><label>{label}</label><input type="number" step="any" min="0" value={value} onChange={e=>setter(e.target.value)} placeholder="Enter value"/></div>)}</div>
+      <p className="muted" style={{fontSize:11,lineHeight:1.6}}>Tick value is the cash value of one tick for one standard lot in your account currency. Confirm tick size, tick value and contract size for the selected instrument with your broker. Defaults are illustrative and are not universal.</p>
     </div>
-    <div className="card" style={{marginBottom:18}}><div className="card-heading"><h3>Global trading sessions</h3><span className="muted">Indicative UTC schedule</span></div>
-      <div className="table-wrap"><table><thead><tr><th>Session</th><th>UTC hours</th><th>Market focus</th><th>Status</th><th>{'Time to next change'}</th></tr></thead><tbody>{sessions.map(session=>{const state=getState(session);return <tr key={session.name}><td><strong>{session.name}</strong><div className="muted">{session.note}</div></td><td>{String(session.open).padStart(2,'0')}:00 – {String(session.close).padStart(2,'0')}:00</td><td>{session.focus}</td><td><span className="tag" style={{color:state.active?'#20d6a1':'#fbbf24'}}>{state.active?'OPEN':'CLOSED'}</span></td><td>{fmt(state.remaining)} {state.active?'to close':'to open'}</td></tr>;})}</tbody></table></div>
-    </div>
-    <div className="card" style={{marginBottom:18}}><div className="card-heading"><h3>Instrument trading context</h3><div className="field"><select value={instrumentClass} onChange={e=>setInstrumentClass(e.target.value)}><option>Forex</option><option>Metals</option><option>US indices</option><option>Crypto</option></select></div></div>
-      <p style={{lineHeight:1.7}}>{marketGuidance}</p>
-      <div className="signal"><span>Selected instrument</span><span>{selectedMarket}</span></div>
-      <div className="signal"><span>Session overlap</span><span>{getState(sessions[2]).active && getState(sessions[3]).active ? 'London + New York active' : 'No London–New York overlap now'}</span></div>
-      <div className="signal"><span>Weekend note</span><span>{isWeekend ? 'Forex and many index CFDs may be closed; crypto may remain open' : 'Check instrument-specific daily breaks and holidays'}</span></div>
-      <p className="muted" style={{fontSize:11,lineHeight:1.7,marginTop:12}}>Session windows are fixed UTC reference hours and do not automatically adjust for daylight-saving changes. They are not exchange calendars or a live liquidity feed. Broker opening hours, holidays, daily breaks, spreads and execution conditions can differ. Confirm the current schedule with your broker before trading.</p>
-    </div>
+    <div className="stats-grid" style={{marginBottom:18}}>{[['Cash risk',valid?riskCash.toFixed(2):'—'],['Position size (lots)',lots>0&&Number.isFinite(lots)?lots.toFixed(3):'—'],['Reward / risk',rr>0?`${rr.toFixed(2)}R`:'Invalid target'],['Potential target amount',targetCash>0?targetCash.toFixed(2):'—']].map(([label,value])=><div className="card stat-card" key={label}><div className="muted">{label}</div><div className="stat-value">{value}</div></div>)}</div>
+    <div className="card" style={{marginBottom:18}}><div className="card-heading"><h3>Calculation checks</h3><span className="tag">{valid&&lots>0&&rr>0?'READY TO REVIEW':'CHECK INPUTS'}</span></div><div className="signal"><span>Stop distance</span><strong>{valid?distance.toFixed(6):'—'}</strong></div><div className="signal"><span>Cash risk per standard lot</span><strong>{riskPerLot>0?riskPerLot.toFixed(2):'—'}</strong></div><div className="signal"><span>Estimated units</span><strong>{lots>0?(lots*n(contractSize)).toFixed(0):'—'}</strong></div><div className="signal"><span>Target direction check</span><strong style={{color:rr>0?'#20d6a1':'#fb7185'}}>{rr>0?'Valid':'Target must be beyond entry in trade direction'}</strong></div><button className="primary-btn" style={{marginTop:14}} onClick={savePlan} disabled={!valid||lots<=0||rr<=0}><Plus size={15}/> Save trade plan</button></div>
+    <div className="card"><div className="card-heading"><h3>Saved trade plans</h3><span className="tag">{plans.length} SAVED</span></div>{plans.length===0?<div className="empty">No saved plans yet. Complete the parameters and save a plan for later review.</div>:<div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>Lots</th><th>R:R</th><th>Saved</th><th></th></tr></thead><tbody>{plans.map(p=><tr key={p.id}><td>{p.symbol}</td><td>{p.direction}</td><td>{p.entry}</td><td>{p.stop}</td><td>{p.target}</td><td>{p.balance*p.riskPct/100}</td><td>{p.lots.toFixed(3)}</td><td>{p.rr.toFixed(2)}R</td><td>{new Date(p.createdAt).toLocaleString()}</td><td><button className="period-btn" onClick={()=>setPlans(old=>old.filter(x=>x.id!==p.id))} aria-label="Delete saved plan"><Trash2 size={14}/></button></td></tr>)}</tbody></table></div>}<p className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:12}}>This is a planning estimate, not an order ticket. It excludes spread, commission, slippage, conversion-rate effects, margin requirements and broker-specific volume steps. It does not submit, modify or execute trades. Saved plans remain in this browser only.</p></div>
   </>;
 }
 
@@ -2492,7 +2481,7 @@ function App() {
                 </tbody>
               </table></div>
             </div>
-          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Market Sessions' ? <MarketSessionsPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
+          </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Trade Planner' ? <TradePlannerPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
