@@ -1849,6 +1849,39 @@ function PortfolioRiskPage() {
 }
 
 
+const TIMEFRAME_MS = { '1min':60000, '5min':300000, '15min':900000, '30min':1800000, '1h':3600000, '4h':14400000 };
+function validateMarketCandles(input, timeframe) {
+  if (!Array.isArray(input) || input.length < 60) return { ok:false, message:'At least 60 candles are required for reliable analysis.', count:Array.isArray(input)?input.length:0 };
+  const clean=[]; let invalid=0, duplicates=0, outOfOrder=0, gaps=0; const seen=new Set(); let previousTime=null;
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') { invalid++; continue; }
+    const open=Number(raw.open), high=Number(raw.high), low=Number(raw.low), close=Number(raw.close);
+    const values=[open,high,low,close];
+    if (values.some(v=>!Number.isFinite(v) || v<=0) || high<Math.max(open,close,low) || low>Math.min(open,close,high)) { invalid++; continue; }
+    const rawTime=raw.time ?? raw.datetime ?? raw.timestamp;
+    const parsedTime=typeof rawTime==='number' ? (rawTime<1e12?rawTime*1000:rawTime) : Date.parse(rawTime);
+    if (!Number.isFinite(parsedTime)) { invalid++; continue; }
+    const key=String(parsedTime);
+    if (seen.has(key)) { duplicates++; continue; }
+    if (previousTime!==null && parsedTime<previousTime) outOfOrder++;
+    if (previousTime!==null && parsedTime>previousTime+(TIMEFRAME_MS[timeframe]||300000)*1.8) gaps++;
+    seen.add(key); previousTime=parsedTime;
+    clean.push({...raw,open,high,low,close,__timeMs:parsedTime});
+  }
+  clean.sort((a,b)=>a.__timeMs-b.__timeMs);
+  if (invalid || duplicates || outOfOrder) return { ok:false, message:`Data quality check failed: ${invalid} invalid, ${duplicates} duplicate and ${outOfOrder} out-of-order candles.`, count:clean.length, invalid, duplicates, outOfOrder, gaps };
+  if (clean.length<60) return { ok:false, message:`Only ${clean.length} valid candles remain after quality checks.`, count:clean.length, invalid, duplicates, outOfOrder, gaps };
+  const latest=clean[clean.length-1], ageMs=Math.max(0,Date.now()-latest.__timeMs), interval=TIMEFRAME_MS[timeframe]||300000;
+  const stale=ageMs>Math.max(interval*3,15*60000);
+  return { ok:true, candles:clean.map(({__timeMs,...c})=>c), count:clean.length, invalid, duplicates, outOfOrder, gaps, stale, ageMs, latestTime:new Date(latest.__timeMs).toISOString(), message:stale?'Latest candle is older than expected; this may be due to a closed market or delayed provider.':gaps?`${gaps} time gaps detected; session closures may explain some gaps.`:'Candle history passed basic OHLC and timestamp checks.' };
+}
+function formatAge(ms) {
+  if (!Number.isFinite(ms)) return '—';
+  const mins=Math.floor(ms/60000); if(mins<1)return 'just now'; if(mins<60)return `${mins} min ago`;
+  const hours=Math.floor(mins/60); if(hours<48)return `${hours} hr ${mins%60} min ago`; return `${Math.floor(hours/24)} days ago`;
+}
+
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -1859,6 +1892,8 @@ function App() {
   const [candles, setCandles] = useState([]);
   const [candleLoading, setCandleLoading] = useState(false);
   const [candleError, setCandleError] = useState('');
+  const [marketDataHealth, setMarketDataHealth] = useState({status:'WAITING', message:'Waiting for market-data response.', checkedAt:null, source:'/api/market + /api/candles', quoteAgeMs:null, candleAgeMs:null, gaps:0, invalid:0, duplicates:0});
+  const [lastCandleUpdated, setLastCandleUpdated] = useState(null);
   const [orderType, setOrderType] = useState('Market');
   const [direction, setDirection] = useState('BUY');
   const [lotSize, setLotSize] = useState('0.10');
@@ -1891,14 +1926,19 @@ function App() {
         const response = await fetch(`/api/market?symbol=${encodeURIComponent(selectedMarket)}`);
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.error || data.details || 'Market data unavailable');
+        const quote=Number(data.price);
+        if (!Number.isFinite(quote) || quote<=0) throw new Error('Provider returned an invalid or empty market price.');
         if (!active) return;
+        const receivedAt=new Date();
         setMarkets(previous => previous.map(m => m.symbol === selectedMarket
-          ? { ...m, price: String(data.price), live: true } : m));
+          ? { ...m, price: String(quote), live: true } : m));
         setMarketStatus('LIVE');
-        setLastUpdated(data.timestamp ? new Date(data.timestamp) : new Date());
+        setLastUpdated(data.timestamp ? new Date(data.timestamp) : receivedAt);
+        setMarketDataHealth(previous=>({...previous,status:'CHECKING',message:'Quote received; validating historical candles…',checkedAt:receivedAt,source:'Market API',quoteAgeMs:0}));
       } catch (error) {
         if (!active) return;
         setMarketStatus('Connection error');
+        setMarketDataHealth(previous=>({...previous,status:'ERROR',message:`Market quote unavailable: ${error.message}`,checkedAt:new Date(),source:'Market API'}));
         console.error('Market data error:', error);
       }
     };
@@ -1924,10 +1964,20 @@ function App() {
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.details || data.error || 'Unable to load historical candles.');
         if (!active) return;
-        setCandles(Array.isArray(data.candles) ? data.candles : []);
+        const quality=validateMarketCandles(data.candles,period);
+        if (!quality.ok) {
+          setCandleError(quality.message);
+          setMarketDataHealth(previous=>({...previous,status:'WARNING',message:quality.message,checkedAt:new Date(),source:'Historical candle API',invalid:quality.invalid||0,duplicates:quality.duplicates||0,gaps:quality.gaps||0}));
+          return;
+        }
+        setCandles(quality.candles);
+        setCandleError('');
+        setLastCandleUpdated(new Date());
+        setMarketDataHealth(previous=>({...previous,status:quality.stale?'STALE':quality.gaps?'WARNING':'HEALTHY',message:quality.message,checkedAt:new Date(),source:'Market + candle API',candleAgeMs:quality.ageMs,gaps:quality.gaps,invalid:quality.invalid,duplicates:quality.duplicates,latestCandleTime:quality.latestTime}));
       } catch (error) {
         if (!active) return;
         setCandleError(error.message);
+        setMarketDataHealth(previous=>({...previous,status:'ERROR',message:`Historical candle request failed: ${error.message}`,checkedAt:new Date(),source:'Historical candle API'}));
         console.error('Candlestick error:', error);
       } finally {
         if (active) setCandleLoading(false);
@@ -2039,6 +2089,20 @@ function App() {
               <div className="card"><div className="stat-label">Demo Orders</div><div className="stat-value">{trades.length}</div><div className="muted">Simulated orders created</div></div>
               <div className="card"><div className="stat-label">Market Status</div><div className="stat-value" style={{fontSize:19}}>{marketStatus}</div><div className="muted">{lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : 'Waiting for market data'}</div></div>
               <div className="card"><div className="stat-label">Selected Instrument</div><div className="stat-value" style={{fontSize:19}}>{selectedMarket}</div><div className="muted">{currentMarket?.live ? 'Live price received' : 'Live price not confirmed'}</div></div>
+            </div>
+
+            <div className="card" style={{marginTop:16,borderColor:marketDataHealth.status==='HEALTHY'?'#245b4b':marketDataHealth.status==='ERROR'||marketDataHealth.status==='STALE'?'#70404a':'#5b512c'}}>
+              <div className="card-heading">
+                <div><h3>Market Data Reliability</h3><div className="muted">Live quote and historical candle quality monitor · automatic refresh every 60 seconds</div></div>
+                <span className="tag" style={{background:marketDataHealth.status==='HEALTHY'?'#153c36':marketDataHealth.status==='ERROR'||marketDataHealth.status==='STALE'?'#48232d':'#403719',color:marketDataHealth.status==='HEALTHY'?'#21d6a0':marketDataHealth.status==='ERROR'||marketDataHealth.status==='STALE'?'#fb7185':'#fbbf24'}}>{marketDataHealth.status}</span>
+              </div>
+              <div className="stats-grid" style={{marginTop:10}}>
+                <div><div className="stat-label">Data source</div><div className="stat-value" style={{fontSize:14}}>{marketDataHealth.source}</div><div className="muted">Backend API route; provider name depends on server configuration.</div></div>
+                <div><div className="stat-label">Latest candle age</div><div className="stat-value" style={{fontSize:17}}>{formatAge(marketDataHealth.candleAgeMs)}</div><div className="muted">Last successful candle refresh: {lastCandleUpdated?lastCandleUpdated.toLocaleTimeString():'Not yet confirmed'}</div></div>
+                <div><div className="stat-label">History quality</div><div className="stat-value" style={{fontSize:17}}>{marketDataHealth.invalid||marketDataHealth.duplicates? 'Issues found':'OHLC checked'}</div><div className="muted">Invalid: {marketDataHealth.invalid||0} · Duplicates: {marketDataHealth.duplicates||0} · Gaps: {marketDataHealth.gaps||0}</div></div>
+                <div><div className="stat-label">Last quality check</div><div className="stat-value" style={{fontSize:17}}>{marketDataHealth.checkedAt?marketDataHealth.checkedAt.toLocaleTimeString():'Waiting'}</div><div className="muted">Quote status: {marketStatus} · candle count: {candles.length}</div></div>
+              </div>
+              <p className="muted" role="status" style={{margin:'12px 0 0',lineHeight:1.6}}>{marketDataHealth.message} Stale candles can occur during weekends, holidays or instrument session closures. Time gaps are reported for review and are not automatically treated as missing tradable bars.</p>
             </div>
 
             <div className="dashboard-grid">
