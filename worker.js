@@ -776,18 +776,8 @@ async function handleMarket(request, env, url) {
 ========================================= */
 
 async function handleDeriv(request, env, url) {
-  if (request.method !== "GET") {
-    return json({
-      error: "Method not allowed"
-    }, 405);
-  }
-
   /* Require an authenticated TradeLab session */
-
-  const user = await getAuthenticatedUser(
-    request,
-    env
-  );
+  const user = await getAuthenticatedUser(request, env);
 
   if (!user) {
     return json({
@@ -795,8 +785,8 @@ async function handleDeriv(request, env, url) {
     }, 401);
   }
 
-  /* Restrict shared administrator token */
-
+  /* The configured Deriv token is an administrator token.
+     Do not expose this route to other TradeLab users. */
   if (
     !env.ADMIN_EMAIL ||
     user.email.toLowerCase() !==
@@ -808,54 +798,78 @@ async function handleDeriv(request, env, url) {
   }
 
   /* Check Cloudflare credentials */
-
-  if (
-    !env.DERIV_API_TOKEN ||
-    !env.DERIV_APP_ID
-  ) {
+  if (!env.DERIV_API_TOKEN || !env.DERIV_APP_ID) {
     return json({
       error: "Deriv credentials are not configured"
     }, 500);
   }
 
+  const isOtpRoute = url.pathname === "/api/deriv/otp";
+  const isReadRoute =
+    url.pathname === "/api/deriv/test" ||
+    url.pathname === "/api/deriv/accounts";
+
+  if (!isOtpRoute && !isReadRoute) {
+    return json({
+      error: "Deriv route not found"
+    }, 404);
+  }
+
+  if (isOtpRoute && request.method !== "POST") {
+    return json({
+      error: "Method not allowed"
+    }, 405, { "Allow": "POST" });
+  }
+
+  if (isReadRoute && request.method !== "GET") {
+    return json({
+      error: "Method not allowed"
+    }, 405, { "Allow": "GET" });
+  }
+
+  if (request.method === "POST" && !validOrigin(request, url)) {
+    return json({
+      error: "Request origin rejected"
+    }, 403);
+  }
+
+  const headers = {
+    "Authorization": `Bearer ${env.DERIV_API_TOKEN}`,
+    "Deriv-App-ID": String(env.DERIV_APP_ID),
+    "Accept": "application/json"
+  };
+
   try {
-    const response = await fetch(
+    /* Retrieve the Options accounts associated with the PAT. */
+    const accountsResponse = await fetch(
       "https://api.derivws.com/trading/v1/options/accounts",
       {
         method: "GET",
-        headers: {
-          "Authorization":
-            `Bearer ${env.DERIV_API_TOKEN}`,
-
-          "Deriv-App-ID":
-            String(env.DERIV_APP_ID),
-
-          "Accept": "application/json"
-        },
+        headers,
         signal: AbortSignal.timeout(15000)
       }
     );
 
-    if (!response.ok) {
+    const accountsData = await accountsResponse.json();
+
+    if (!accountsResponse.ok) {
       console.error(
-        "Deriv API rejected request:",
-        response.status
+        "Deriv accounts request failed:",
+        accountsResponse.status
       );
 
       return json({
         ok: false,
         connected: false,
-        error: "Deriv authentication failed",
-        status: response.status
+        error: "Deriv authentication or account retrieval failed",
+        status: accountsResponse.status
       }, 502);
     }
 
-    const data = await response.json();
-
-    const accounts = Array.isArray(data.data)
-      ? data.data
-      : data.data
-        ? [data.data]
+    const accounts = Array.isArray(accountsData.data)
+      ? accountsData.data
+      : accountsData.data
+        ? [accountsData.data]
         : [];
 
     if (url.pathname === "/api/deriv/test") {
@@ -879,9 +893,94 @@ async function handleDeriv(request, env, url) {
       });
     }
 
+    /* Generate a short-lived, single-use WebSocket URL for a selected account. */
+    let body;
+
+    try {
+      body = await readJson(request);
+    } catch {
+      return json({
+        error: "Invalid request body"
+      }, 400);
+    }
+
+    const accountId = String(body.account_id || "").trim();
+
+    if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
+      return json({
+        error: "Invalid Deriv account ID"
+      }, 400);
+    }
+
+    const selectedAccount = accounts.find(
+      account => String(account.account_id || "") === accountId
+    );
+
+    if (!selectedAccount) {
+      return json({
+        error: "Deriv account not found for this API token"
+      }, 404);
+    }
+
+    const otpResponse = await fetch(
+      `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+      {
+        method: "POST",
+        headers,
+        signal: AbortSignal.timeout(15000)
+      }
+    );
+
+    const otpData = await otpResponse.json();
+
+    if (!otpResponse.ok || !otpData.data || !otpData.data.url) {
+      console.error(
+        "Deriv OTP request failed:",
+        otpResponse.status
+      );
+
+      return json({
+        ok: false,
+        connected: false,
+        error: "Unable to generate Deriv WebSocket authentication URL",
+        status: otpResponse.status
+      }, 502);
+    }
+
+    const websocketUrl = String(otpData.data.url);
+
+    /* Only accept the official Deriv secure WebSocket host. */
+    let parsedWebSocketUrl;
+
+    try {
+      parsedWebSocketUrl = new URL(websocketUrl);
+    } catch {
+      return json({
+        ok: false,
+        error: "Deriv returned an invalid WebSocket URL"
+      }, 502);
+    }
+
+    if (
+      parsedWebSocketUrl.protocol !== "wss:" ||
+      parsedWebSocketUrl.hostname !== "api.derivws.com"
+    ) {
+      return json({
+        ok: false,
+        error: "Deriv returned an unexpected WebSocket URL"
+      }, 502);
+    }
+
     return json({
-      error: "Deriv route not found"
-    }, 404);
+      ok: true,
+      connected: true,
+      provider: "Deriv",
+      account_id: accountId,
+      account_type: selectedAccount.account_type || null,
+      websocket_url: websocketUrl,
+      message: "Authenticated WebSocket URL generated. Connect immediately; it expires after 120 seconds and can be used once.",
+      timestamp: new Date().toISOString()
+    });
 
   } catch (error) {
     console.error(
