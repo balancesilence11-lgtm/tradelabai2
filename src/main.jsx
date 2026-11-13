@@ -1258,7 +1258,7 @@ function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTi
 
 
 
-function AutomationCentrePage({ symbol, price, candles }) {
+function TradingTerminalPage({ symbol, price, candles }) {
   const [side, setSide] = useState('BUY');
   const [type, setType] = useState('Market');
   const [volume, setVolume] = useState('0.10');
