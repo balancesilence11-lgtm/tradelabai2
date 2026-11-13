@@ -955,7 +955,8 @@ async function handleDeriv(request, env, url) {
     if (!selectedAccount) {
       return json({ error: "Deriv account not found" }, 404);
     }
- /* =========================================
+
+    /* =========================================
        TRADE ACCOUNT SECURITY
        DEMO ACCOUNTS ALLOWED BY DEFAULT
        REAL ACCOUNTS REQUIRE EXPLICIT AUTHORISATION
@@ -983,30 +984,11 @@ async function handleDeriv(request, env, url) {
           : "Unrecognised account type. Access denied."
       }, 403);
     }
-      /* =========================================
-       STRICT DERIV ACCOUNT AUTHORISATION
+
+    /* =========================================
+       GENERATE DERIV WEBSOCKET OTP
     ========================================= */
 
-    const accountType = String(
-      selectedAccount.account_type || ""
-    ).toLowerCase();
-
-    if (accountType === "demo") {
-      // Demo execution permitted.
-    } else if (
-      accountType === "real" &&
-      env.DERIV_ALLOW_REAL_TRADING === "true" &&
-      body.confirm_real_trading === true
-    ) {
-      // Real execution requires server permission
-      // and explicit user confirmation.
-    } else {
-      return json({
-        ok: false,
-        authorised: false,
-        error: "Account execution blocked by TradeLab AI security policy."
-      }, 403);
-    }
     const otpResponse = await derivApiFetch(
       token,
       `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
