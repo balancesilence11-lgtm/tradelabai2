@@ -1466,65 +1466,473 @@ function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5m
 
 
 function BrokerConnectionsPage() {
-  const [health, setHealth] = useState({ checked: false, time: null });
-  const [checks, setChecks] = useState(() => {
-    try { const v=JSON.parse(localStorage.getItem('tradelab_broker_readiness_v1')||'{}'); return {serverProxy:!!v.serverProxy,readOnly:!!v.readOnly,twoFactor:!!v.twoFactor}; }
-    catch { return {serverProxy:false,readOnly:false,twoFactor:false}; }
+  const [derivStatus, setDerivStatus] = useState({
+    loading: true,
+    connected: false,
+    error: ''
   });
-  const [events, setEvents] = useState(() => {
-    try { const v=JSON.parse(localStorage.getItem('tradelab_broker_readiness_log_v1')||'[]'); return Array.isArray(v)?v:[]; }
-    catch { return []; }
-  });
-  function record(text) {
-    const next=[{id:Date.now(),text,time:new Date().toLocaleString()},...events].slice(0,20);
-    setEvents(next); try { localStorage.setItem('tradelab_broker_readiness_log_v1',JSON.stringify(next)); } catch {}
-  }
-  function toggle(key) {
-    const next={...checks,[key]:!checks[key]}; setChecks(next);
-    try { localStorage.setItem('tradelab_broker_readiness_v1',JSON.stringify(next)); } catch {}
-    record(`Readiness checklist updated: ${key} ${next[key]?'marked':'unmarked'}`);
-  }
-  function runHealthCheck() {
-    setHealth({checked:true,time:new Date().toLocaleString()});
-    record('Local readiness check completed. No broker server was contacted.');
-  }
-  const ready=Object.values(checks).every(Boolean);
-  return <>
-    <div className="welcome"><div><h1>Broker Connections</h1><div className="muted">Secure integration readiness and read-only connection planning.</div></div><div className="demo-badge">● CONNECTIONS DISABLED</div></div>
-    <div className="stats-grid">
-      <div className="card"><div className="stat-label">Broker API backend</div><div className="stat-value negative">Not configured</div><div className="muted">No server-side connector is deployed</div></div>
-      <div className="card"><div className="stat-label">Account synchronisation</div><div className="stat-value">Unavailable</div><div className="muted">No external account data retrieved</div></div>
-      <div className="card"><div className="stat-label">Live execution</div><div className="stat-value negative">Disabled</div><div className="muted">No order route exists in this UI</div></div>
-      <div className="card"><div className="stat-label">Readiness checklist</div><div className="stat-value">{Object.values(checks).filter(Boolean).length}/3</div><div className="muted">Planning checklist only</div></div>
-    </div>
-    <div className="dashboard-grid" style={{marginTop:18}}>
-      <div className="card"><div className="card-heading"><h3>MetaTrader 5</h3><span className="tag">NOT CONNECTED</span></div>
-        <div className="signal"><span>Connection method</span><strong>Secure server-side bridge</strong></div>
-        <div className="signal"><span>Account access target</span><strong>Read-only first</strong></div>
-        <p className="muted" style={{lineHeight:1.7}}>MT5 requires a separately deployed connector or broker-supported API bridge. A browser-only React page cannot securely access a desktop terminal or protect a broker password.</p>
-        <div className="signal"><span>Current status</span><strong className="negative">Backend not configured</strong></div>
-      </div>
-      <div className="card"><div className="card-heading"><h3>Deriv</h3><span className="tag">RESERVED FOR FINAL PHASE</span></div>
-        <div className="signal"><span>Connection method</span><strong>Official API via backend</strong></div>
-        <div className="signal"><span>Initial permission</span><strong>Read-only account scope</strong></div>
-        <p className="muted" style={{lineHeight:1.7}}>Deriv integration remains intentionally inactive until the general platform is complete and the API flow, token permissions, account identity checks and disconnect handling are implemented and tested.</p>
-        <div className="signal"><span>Current status</span><strong className="negative">Not connected</strong></div>
-      </div>
-    </div>
-    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Secure integration readiness</h3><span className={`tag`}>{ready?'CHECKLIST COMPLETE':'IN PROGRESS'}</span></div>
-      {[['serverProxy','A server-side API proxy is deployed; secrets are stored only as encrypted server environment secrets.'],['readOnly','Broker API credentials are restricted to read-only permissions for the first integration.'],['twoFactor','Broker-side two-factor authentication and account identity verification are enabled.']].map(([key,label])=><label className="signal" key={key} style={{cursor:'pointer',gap:14}}><span>{label}</span><input type="checkbox" checked={checks[key]} onChange={()=>toggle(key)} style={{width:18,height:18,accentColor:'#20d6a1'}}/></label>)}
-      <p className="muted" style={{fontSize:11,lineHeight:1.6}}>These checkboxes are a local planning checklist, not proof that the controls have been deployed. Do not paste API tokens, passwords or recovery codes into this page, chat, or GitHub.</p>
-    </div>
-    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Connection health monitor</h3><button className="period-btn" onClick={runHealthCheck}>Run local readiness check</button></div>
-      <div className="signal"><span>Broker API endpoint</span><strong className="negative">Not configured</strong></div>
-      <div className="signal"><span>Last check</span><strong>{health.time||'Not checked'}</strong></div>
-      {health.checked&&<p className="muted" role="status">Local configuration reviewed. No external endpoint was contacted and no broker connection was tested.</p>}
-    </div>
-    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Integration activity</h3><span className="muted">{events.length} local events</span></div>{events.length?events.map(e=><div className="signal" key={e.id}><span>{e.time}</span><span>{e.text}</span></div>):<div className="empty">No integration readiness events yet.</div>}</div>
-    <div className="card" style={{marginTop:18,borderColor:'#5b4520'}}><p className="muted" style={{lineHeight:1.7,margin:0}}>Security boundary: this page does not connect to a broker, verify credentials, sync balances or execute orders. A production connector must validate OAuth/API scopes, encrypt secrets server-side, enforce user-level authorization, rate-limit requests, audit access, and provide an immediate revoke/disconnect path. Live trading remains disabled.</p></div>
-  </>;
-}
 
+  const [accounts, setAccounts] = useState([]);
+
+  const [selectedAccount, setSelectedAccount] = useState(
+    () => localStorage.getItem('tradelab_deriv_selected_account') || ''
+  );
+
+  const [refreshing, setRefreshing] = useState(false);
+  const [message, setMessage] = useState('');
+
+  async function loadDerivAccounts() {
+    setRefreshing(true);
+    setMessage('');
+
+    try {
+      const statusResponse = await fetch('/api/deriv/status', {
+        method: 'GET',
+        credentials: 'include'
+      });
+
+      const statusData = await statusResponse.json();
+
+      if (!statusResponse.ok || !statusData.connected) {
+        setDerivStatus({
+          loading: false,
+          connected: false,
+          error: statusData.error || 'Deriv is not connected.'
+        });
+
+        setAccounts([]);
+        return;
+      }
+
+      const accountsResponse = await fetch('/api/deriv/accounts', {
+        method: 'GET',
+        credentials: 'include'
+      });
+
+      const accountsData = await accountsResponse.json();
+
+      if (!accountsResponse.ok || !accountsData.ok) {
+        throw new Error(
+          accountsData.error || 'Unable to retrieve Deriv accounts.'
+        );
+      }
+
+      const retrievedAccounts = Array.isArray(accountsData.accounts)
+        ? accountsData.accounts
+        : [];
+
+      setAccounts(retrievedAccounts);
+
+      const savedAccount = localStorage.getItem(
+        'tradelab_deriv_selected_account'
+      );
+
+      const validSavedAccount = retrievedAccounts.find(
+        account => account.account_id === savedAccount
+      );
+
+      const demoAccount = retrievedAccounts.find(
+        account => account.account_type === 'demo'
+      );
+
+      const defaultAccount =
+        validSavedAccount || demoAccount || retrievedAccounts[0];
+
+      if (defaultAccount) {
+        setSelectedAccount(defaultAccount.account_id);
+
+        localStorage.setItem(
+          'tradelab_deriv_selected_account',
+          defaultAccount.account_id
+        );
+      }
+
+      setDerivStatus({
+        loading: false,
+        connected: true,
+        error: '',
+        expiresAt: statusData.expiresAt || null
+      });
+
+    } catch (error) {
+      setDerivStatus({
+        loading: false,
+        connected: false,
+        error: error.message || 'Deriv connection could not be verified.'
+      });
+
+      setAccounts([]);
+
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    loadDerivAccounts();
+  }, []);
+
+  function handleAccountChange(event) {
+    const accountId = event.target.value;
+
+    setSelectedAccount(accountId);
+
+    localStorage.setItem(
+      'tradelab_deriv_selected_account',
+      accountId
+    );
+
+    setMessage('Account selection updated.');
+  }
+
+  async function disconnectDeriv() {
+    const confirmed = window.confirm(
+      'Disconnect Deriv from TradeLab AI? This will not close or modify any Deriv trades.'
+    );
+
+    if (!confirmed) return;
+
+    try {
+      const response = await fetch('/api/deriv/disconnect', {
+        method: 'POST',
+        credentials: 'include'
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || data.ok === false) {
+        throw new Error(data.error || 'Unable to disconnect Deriv.');
+      }
+
+      setAccounts([]);
+      setSelectedAccount('');
+
+      localStorage.removeItem('tradelab_deriv_selected_account');
+
+      setDerivStatus({
+        loading: false,
+        connected: false,
+        error: ''
+      });
+
+      setMessage('Deriv disconnected successfully.');
+
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  const activeAccount = accounts.find(
+    account => account.account_id === selectedAccount
+  );
+
+  const demoAccounts = accounts.filter(
+    account => account.account_type === 'demo'
+  );
+
+  const realAccounts = accounts.filter(
+    account => account.account_type === 'real'
+  );
+
+  function formatBalance(account) {
+    if (!account) return '—';
+
+    return `${Number(account.balance).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    })} ${account.currency || 'USD'}`;
+  }
+
+  return (
+    <>
+      <div className="welcome">
+        <div>
+          <h1>Broker Connections</h1>
+          <div className="muted">
+            Secure broker integration and account synchronisation.
+          </div>
+        </div>
+
+        <div className="demo-badge">
+          {derivStatus.loading
+            ? 'CHECKING CONNECTION'
+            : derivStatus.connected
+              ? 'DERIV CONNECTED'
+              : 'DERIV DISCONNECTED'}
+        </div>
+      </div>
+
+      <div className="stats-grid">
+        <div className="card">
+          <div className="stat-label">Deriv Connection</div>
+          <div className="stat-value">
+            {derivStatus.loading
+              ? 'Checking...'
+              : derivStatus.connected
+                ? 'Connected'
+                : 'Disconnected'}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Accounts Retrieved</div>
+          <div className="stat-value">{accounts.length}</div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Demo Accounts</div>
+          <div className="stat-value">{demoAccounts.length}</div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Real Accounts</div>
+          <div className="stat-value">{realAccounts.length}</div>
+        </div>
+      </div>
+
+      <div className="dashboard-grid" style={{ marginTop: 18 }}>
+        <div className="card">
+          <div className="card-heading">
+            <h3>Deriv Connection</h3>
+            <span className="tag">
+              {derivStatus.connected ? 'CONNECTED' : 'NOT CONNECTED'}
+            </span>
+          </div>
+
+          <div className="signal">
+            <span>Provider</span>
+            <strong>Deriv Official API</strong>
+          </div>
+
+          <div className="signal">
+            <span>Authentication</span>
+            <strong>OAuth 2.0</strong>
+          </div>
+
+          <div className="signal">
+            <span>Account Synchronisation</span>
+            <strong>
+              {derivStatus.connected ? 'Active' : 'Unavailable'}
+            </strong>
+          </div>
+
+          {derivStatus.error && (
+            <p className="muted">{derivStatus.error}</p>
+          )}
+
+          <div className="trade-buttons">
+            {!derivStatus.connected && (
+              <button
+                className="execute-btn"
+                onClick={() => {
+                  window.location.href = '/api/deriv/connect';
+                }}
+              >
+                Connect Deriv
+              </button>
+            )}
+
+            <button
+              className="period-btn"
+              onClick={loadDerivAccounts}
+              disabled={refreshing}
+            >
+              {refreshing ? 'Synchronising...' : 'Refresh Accounts'}
+            </button>
+
+            {derivStatus.connected && (
+              <button
+                className="period-btn"
+                onClick={disconnectDeriv}
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-heading">
+            <h3>Selected Trading Account</h3>
+            <span className="tag">
+              {activeAccount?.account_type?.toUpperCase() || 'NO ACCOUNT'}
+            </span>
+          </div>
+
+          <div className="field">
+            <label>Select Deriv Account</label>
+
+            <select
+              value={selectedAccount}
+              onChange={handleAccountChange}
+              disabled={!accounts.length}
+            >
+              {!accounts.length && (
+                <option value="">No accounts available</option>
+              )}
+
+              {demoAccounts.length > 0 && (
+                <optgroup label="DEMO ACCOUNTS">
+                  {demoAccounts.map(account => (
+                    <option
+                      key={account.account_id}
+                      value={account.account_id}
+                    >
+                      {account.account_id} - DEMO
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+
+              {realAccounts.length > 0 && (
+                <optgroup label="REAL ACCOUNTS">
+                  {realAccounts.map(account => (
+                    <option
+                      key={account.account_id}
+                      value={account.account_id}
+                    >
+                      {account.account_id} - REAL
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </div>
+
+          <div className="signal">
+            <span>Account ID</span>
+            <strong>{activeAccount?.account_id || '—'}</strong>
+          </div>
+
+          <div className="signal">
+            <span>Account Type</span>
+            <strong>
+              {activeAccount?.account_type?.toUpperCase() || '—'}
+            </strong>
+          </div>
+
+          <div className="signal">
+            <span>Balance</span>
+            <strong>{formatBalance(activeAccount)}</strong>
+          </div>
+
+          <div className="signal">
+            <span>Account Status</span>
+            <strong>{activeAccount?.status?.toUpperCase() || '—'}</strong>
+          </div>
+
+          {message && <p className="muted">{message}</p>}
+
+          <p className="muted">
+            Demo account is selected by default. Selecting a real account
+            does not automatically enable live trading.
+          </p>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 18 }}>
+        <div className="card-heading">
+          <h3>Connected Deriv Accounts</h3>
+          <span className="muted">{accounts.length} accounts</span>
+        </div>
+
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Account ID</th>
+                <th>Account Type</th>
+                <th>Balance</th>
+                <th>Currency</th>
+                <th>Status</th>
+                <th>Selection</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {accounts.length === 0 ? (
+                <tr>
+                  <td colSpan="6" className="empty">
+                    {derivStatus.loading
+                      ? 'Loading Deriv accounts...'
+                      : 'No Deriv accounts retrieved.'}
+                  </td>
+                </tr>
+              ) : (
+                accounts.map(account => (
+                  <tr key={account.account_id}>
+                    <td>{account.account_id}</td>
+                    <td>{account.account_type.toUpperCase()}</td>
+                    <td>{formatBalance(account)}</td>
+                    <td>{account.currency}</td>
+                    <td>{account.status?.toUpperCase()}</td>
+                    <td>
+                      {selectedAccount === account.account_id ? (
+                        <span className="positive">SELECTED</span>
+                      ) : (
+                        <button
+                          className="period-btn"
+                          onClick={() => {
+                            handleAccountChange({
+                              target: { value: account.account_id }
+                            });
+                          }}
+                        >
+                          Select
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="dashboard-grid" style={{ marginTop: 18 }}>
+        <div className="card">
+          <div className="card-heading">
+            <h3>MetaTrader 5</h3>
+            <span className="tag">PENDING INTEGRATION</span>
+          </div>
+
+          <div className="signal">
+            <span>Connection Method</span>
+            <strong>Secure Server-side Bridge</strong>
+          </div>
+
+          <div className="signal">
+            <span>Current Status</span>
+            <strong>Not Connected</strong>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-heading">
+            <h3>Security and Permissions</h3>
+            <span className="tag">PROTECTED</span>
+          </div>
+
+          <div className="signal">
+            <span>OAuth Authentication</span>
+            <strong>Enabled</strong>
+          </div>
+
+          <div className="signal">
+            <span>Server-side Token Storage</span>
+            <strong>Encrypted</strong>
+          </div>
+
+          <div className="signal">
+            <span>Live Execution</span>
+            <strong>Not enabled by this page</strong>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
 function AccountOverviewPage({ trades = [] }) {
   const [accountName, setAccountName] = useState(() => localStorage.getItem('tradelab_account_label') || 'Trader Account');
   const [saved, setSaved] = useState(false);
