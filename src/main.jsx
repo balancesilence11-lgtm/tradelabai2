@@ -1331,7 +1331,8 @@ function AutomationCentrePage({ symbol, price, candles }) {
     <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper order history</h3><span className="muted">{orders.length} saved</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Entry</th><th>Stop loss</th><th>Take profit</th><th>R:R</th><th>Time</th></tr></thead><tbody>{orders.length===0?<tr><td colSpan="8" className="empty">No paper orders yet.</td></tr>:orders.map(o=><tr key={o.id}><td>{o.symbol}</td><td className={o.side==='BUY'?'positive':'negative'}>{o.side}</td><td>{o.volume}</td><td>{o.entry}</td><td>{o.sl}</td><td>{o.tp}</td><td>1:{o.rr}</td><td>{o.time}</td></tr>)}</tbody></table></div></div>
   </>;
 }
- {
+
+function AutomationCentrePage({ candles = [], symbol = 'EURUSD', timeframe = '5min' }) {
   const [strategy,setStrategy] = useState('Confluence');
   const [risk,setRisk] = useState('0.5');
   const [maxTrades,setMaxTrades] = useState('3');
