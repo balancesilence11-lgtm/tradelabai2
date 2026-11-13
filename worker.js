@@ -6,17 +6,12 @@ const SYMBOLS = {
   BTCUSD: "BTC/USD"
 };
 
-const ALLOWED_INTERVALS = [
-  "1min", "5min", "15min", "30min",
-  "1h", "4h", "1day"
-];
-
+const ALLOWED_INTERVALS = ["1min", "5min", "15min", "30min", "1h", "4h", "1day"];
 const SESSION_COOKIE = "__Host-tl_session";
 const SESSION_DAYS = 7;
 const PASSWORD_ITERATIONS = 100000;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-
 const encoder = new TextEncoder();
 
 /* =========================================
@@ -36,31 +31,17 @@ function json(data, status = 200, extraHeaders = {}) {
 
 function randomId(bytes = 32) {
   const data = crypto.getRandomValues(new Uint8Array(bytes));
-
-  return Array.from(data, b =>
-    b.toString(16).padStart(2, "0")
-  ).join("");
+  return Array.from(data, b => b.toString(16).padStart(2, "0")).join("");
 }
 
 function base64Url(bytes) {
   let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 async function sha256(value) {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    encoder.encode(value)
-  );
-
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
   return Array.from(new Uint8Array(digest))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
@@ -75,38 +56,26 @@ async function hashPassword(password, salt) {
     ["deriveBits"]
   );
 
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt: encoder.encode(salt),
-      iterations: PASSWORD_ITERATIONS,
-      hash: "SHA-256"
-    },
-    key,
-    256
-  );
+  const bits = await crypto.subtle.deriveBits({
+    name: "PBKDF2",
+    salt: encoder.encode(salt),
+    iterations: PASSWORD_ITERATIONS,
+    hash: "SHA-256"
+  }, key, 256);
 
   return base64Url(new Uint8Array(bits));
 }
 
 function cookieValue(request) {
   const cookies = request.headers.get("Cookie") || "";
-
   for (const item of cookies.split(";")) {
     const [name, ...parts] = item.trim().split("=");
-
-    if (name === SESSION_COOKIE) {
-      return parts.join("=");
-    }
+    if (name === SESSION_COOKIE) return parts.join("=");
   }
-
   return null;
 }
 
-function sessionCookie(
-  token,
-  maxAge = SESSION_DAYS * 86400
-) {
+function sessionCookie(token, maxAge = SESSION_DAYS * 86400) {
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
@@ -117,29 +86,16 @@ function clearSessionCookie() {
 function validOrigin(request, url) {
   const origin = request.headers.get("Origin");
   const fetchSite = request.headers.get("Sec-Fetch-Site");
-
   if (origin && origin !== url.origin) return false;
-
   if (fetchSite === "cross-site") return false;
-
   return true;
 }
 
 async function readJson(request) {
-  const contentLength = Number(
-    request.headers.get("Content-Length") || 0
-  );
-
-  if (contentLength > 8192) {
-    throw new Error("Request too large");
-  }
-
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (contentLength > 8192) throw new Error("Request too large");
   const text = await request.text();
-
-  if (text.length > 8192) {
-    throw new Error("Request too large");
-  }
-
+  if (text.length > 8192) throw new Error("Request too large");
   return JSON.parse(text);
 }
 
@@ -147,48 +103,28 @@ async function readJson(request) {
    AUTHENTICATION DATABASE HELPERS
 ========================================= */
 
-async function logAuthEvent(
-  env,
-  userId,
-  email,
-  eventType
-) {
+async function logAuthEvent(env, userId, email, eventType) {
   await env.DB.prepare(`
     INSERT INTO auth_events (user_id, email, event_type)
     VALUES (?, ?, ?)
-  `).bind(
-    userId || null,
-    email || null,
-    eventType
-  ).run();
+  `).bind(userId || null, email || null, eventType).run();
 }
 
 async function createSession(env, userId) {
-  const token = base64Url(
-    crypto.getRandomValues(new Uint8Array(32))
-  );
-
+  const token = base64Url(crypto.getRandomValues(new Uint8Array(32)));
   const sessionId = await sha256(token);
-
-  const expiresAt = new Date(
-    Date.now() + SESSION_DAYS * 86400000
-  ).toISOString();
+  const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
 
   await env.DB.prepare(`
     INSERT INTO sessions (id, user_id, expires_at)
     VALUES (?, ?, ?)
-  `).bind(
-    sessionId,
-    userId,
-    expiresAt
-  ).run();
+  `).bind(sessionId, userId, expiresAt).run();
 
   return token;
 }
 
 async function getAuthenticatedUser(request, env) {
   const token = cookieValue(request);
-
   if (!token) return null;
 
   const sessionId = await sha256(token);
@@ -212,10 +148,8 @@ async function getAuthenticatedUser(request, env) {
     Date.parse(session.expires_at) <= Date.now() ||
     session.status !== "active"
   ) {
-    await env.DB.prepare(
-      "DELETE FROM sessions WHERE id = ?"
-    ).bind(sessionId).run();
-
+    await env.DB.prepare("DELETE FROM sessions WHERE id = ?")
+      .bind(sessionId).run();
     return null;
   }
 
@@ -236,96 +170,49 @@ async function register(request, env) {
   try {
     body = await readJson(request);
   } catch {
-    return json({
-      error: "Invalid request body"
-    }, 400);
+    return json({ error: "Invalid request body" }, 400);
   }
 
-  const email = String(body.email || "")
-    .trim()
-    .toLowerCase();
-
+  const email = String(body.email || "").trim().toLowerCase();
   const password = String(body.password || "");
 
   if (
     email.length > 254 ||
     !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
   ) {
-    return json({
-      error: "Enter a valid email address"
-    }, 400);
+    return json({ error: "Enter a valid email address" }, 400);
   }
 
   if (password.length < 12 || password.length > 128) {
-    return json({
-      error: "Password must contain 12–128 characters"
-    }, 400);
+    return json({ error: "Password must contain 12–128 characters" }, 400);
   }
 
   const userId = randomId(16);
   const salt = randomId(16);
-
-  const passwordHash = await hashPassword(
-    password,
-    salt
-  );
+  const passwordHash = await hashPassword(password, salt);
 
   try {
     await env.DB.prepare(`
-      INSERT INTO users (
-        id,
-        email,
-        password_hash,
-        password_salt
-      )
+      INSERT INTO users (id, email, password_hash, password_salt)
       VALUES (?, ?, ?, ?)
-    `).bind(
-      userId,
-      email,
-      passwordHash,
-      salt
-    ).run();
+    `).bind(userId, email, passwordHash, salt).run();
 
   } catch (error) {
-    if (
-      String(error.message)
-        .toLowerCase()
-        .includes("unique")
-    ) {
-      return json({
-        error: "An account with this email already exists"
-      }, 409);
+    if (String(error.message).toLowerCase().includes("unique")) {
+      return json({ error: "An account with this email already exists" }, 409);
     }
 
-    console.error(
-      "Registration database error:",
-      error.message
-    );
-
-    return json({
-      error: "Unable to create account"
-    }, 500);
+    console.error("Registration database error:", error.message);
+    return json({ error: "Unable to create account" }, 500);
   }
 
-  await logAuthEvent(
-    env,
-    userId,
-    email,
-    "registration"
-  );
-
-  const token = await createSession(
-    env,
-    userId
-  );
+  await logAuthEvent(env, userId, email, "registration");
+  const token = await createSession(env, userId);
 
   return json({
     ok: true,
     message: "Account created successfully",
-    user: {
-      id: userId,
-      email
-    }
+    user: { id: userId, email }
   }, 201, {
     "Set-Cookie": sessionCookie(token)
   });
@@ -341,26 +228,14 @@ async function login(request, env) {
   try {
     body = await readJson(request);
   } catch {
-    return json({
-      error: "Invalid request body"
-    }, 400);
+    return json({ error: "Invalid request body" }, 400);
   }
 
-  const email = String(body.email || "")
-    .trim()
-    .toLowerCase();
-
+  const email = String(body.email || "").trim().toLowerCase();
   const password = String(body.password || "");
 
-  if (
-    !email ||
-    email.length > 254 ||
-    !password ||
-    password.length > 128
-  ) {
-    return json({
-      error: "Invalid email or password"
-    }, 400);
+  if (!email || email.length > 254 || !password || password.length > 128) {
+    return json({ error: "Invalid email or password" }, 400);
   }
 
   const now = Date.now();
@@ -371,22 +246,12 @@ async function login(request, env) {
     WHERE email = ?
   `).bind(email).first();
 
-  if (
-    attempts?.locked_until &&
-    Date.parse(attempts.locked_until) > now
-  ) {
-    return json({
-      error: "Too many login attempts. Try again later."
-    }, 429);
+  if (attempts?.locked_until && Date.parse(attempts.locked_until) > now) {
+    return json({ error: "Too many login attempts. Try again later." }, 429);
   }
 
   const user = await env.DB.prepare(`
-    SELECT
-      id,
-      email,
-      password_hash,
-      password_salt,
-      status
+    SELECT id, email, password_hash, password_salt, status
     FROM users
     WHERE email = ?
   `).bind(email).first();
@@ -394,11 +259,7 @@ async function login(request, env) {
   let valid = false;
 
   if (user && user.status === "active") {
-    const suppliedHash = await hashPassword(
-      password,
-      user.password_salt
-    );
-
+    const suppliedHash = await hashPassword(password, user.password_salt);
     valid = suppliedHash === user.password_hash;
   }
 
@@ -407,25 +268,16 @@ async function login(request, env) {
       ? Date.parse(attempts.window_started_at)
       : 0;
 
-    const withinWindow =
-      now - windowStart < LOGIN_WINDOW_MS;
-
-    const count = withinWindow
-      ? Number(attempts.attempts) + 1
-      : 1;
+    const withinWindow = now - windowStart < LOGIN_WINDOW_MS;
+    const count = withinWindow ? Number(attempts.attempts) + 1 : 1;
 
     const lockedUntil = count >= MAX_LOGIN_ATTEMPTS
-      ? new Date(
-          now + LOGIN_WINDOW_MS
-        ).toISOString()
+      ? new Date(now + LOGIN_WINDOW_MS).toISOString()
       : null;
 
     await env.DB.prepare(`
       INSERT INTO login_attempts (
-        email,
-        attempts,
-        window_started_at,
-        locked_until
+        email, attempts, window_started_at, locked_until
       )
       VALUES (?, ?, ?, ?)
       ON CONFLICT(email) DO UPDATE SET
@@ -435,47 +287,25 @@ async function login(request, env) {
     `).bind(
       email,
       count,
-      withinWindow
-        ? attempts.window_started_at
-        : new Date(now).toISOString(),
+      withinWindow ? attempts.window_started_at : new Date(now).toISOString(),
       lockedUntil
     ).run();
 
-    await logAuthEvent(
-      env,
-      null,
-      email,
-      "login_failed"
-    );
-
-    return json({
-      error: "Invalid email or password"
-    }, 401);
+    await logAuthEvent(env, null, email, "login_failed");
+    return json({ error: "Invalid email or password" }, 401);
   }
 
-  await env.DB.prepare(
-    "DELETE FROM login_attempts WHERE email = ?"
-  ).bind(email).run();
+  await env.DB.prepare("DELETE FROM login_attempts WHERE email = ?")
+    .bind(email).run();
 
-  await logAuthEvent(
-    env,
-    user.id,
-    email,
-    "login_success"
-  );
+  await logAuthEvent(env, user.id, email, "login_success");
 
-  const token = await createSession(
-    env,
-    user.id
-  );
+  const token = await createSession(env, user.id);
 
   return json({
     ok: true,
     message: "Login successful",
-    user: {
-      id: user.id,
-      email: user.email
-    }
+    user: { id: user.id, email: user.email }
   }, 200, {
     "Set-Cookie": sessionCookie(token)
   });
@@ -492,22 +322,14 @@ async function logout(request, env) {
     const sessionId = await sha256(token);
 
     const session = await env.DB.prepare(`
-      SELECT user_id
-      FROM sessions
-      WHERE id = ?
+      SELECT user_id FROM sessions WHERE id = ?
     `).bind(sessionId).first();
 
-    await env.DB.prepare(
-      "DELETE FROM sessions WHERE id = ?"
-    ).bind(sessionId).run();
+    await env.DB.prepare("DELETE FROM sessions WHERE id = ?")
+      .bind(sessionId).run();
 
     if (session) {
-      await logAuthEvent(
-        env,
-        session.user_id,
-        null,
-        "logout"
-      );
+      await logAuthEvent(env, session.user_id, null, "logout");
     }
   }
 
@@ -526,60 +348,31 @@ async function logout(request, env) {
 async function handleAuth(request, env, url) {
   const path = url.pathname;
 
-  if (
-    request.method === "POST" &&
-    !validOrigin(request, url)
-  ) {
-    return json({
-      error: "Request origin rejected"
-    }, 403);
+  if (request.method === "POST" && !validOrigin(request, url)) {
+    return json({ error: "Request origin rejected" }, 403);
   }
 
-  if (
-    path === "/api/auth/register" &&
-    request.method === "POST"
-  ) {
+  if (path === "/api/auth/register" && request.method === "POST") {
     return register(request, env);
   }
 
-  if (
-    path === "/api/auth/login" &&
-    request.method === "POST"
-  ) {
+  if (path === "/api/auth/login" && request.method === "POST") {
     return login(request, env);
   }
 
-  if (
-    path === "/api/auth/logout" &&
-    request.method === "POST"
-  ) {
+  if (path === "/api/auth/logout" && request.method === "POST") {
     return logout(request, env);
   }
 
-  if (
-    path === "/api/auth/me" &&
-    request.method === "GET"
-  ) {
-    const user = await getAuthenticatedUser(
-      request,
-      env
-    );
+  if (path === "/api/auth/me" && request.method === "GET") {
+    const user = await getAuthenticatedUser(request, env);
 
-    if (!user) {
-      return json({
-        authenticated: false
-      }, 401);
-    }
+    if (!user) return json({ authenticated: false }, 401);
 
-    return json({
-      authenticated: true,
-      user
-    });
+    return json({ authenticated: true, user });
   }
 
-  return json({
-    error: "Authentication route not found"
-  }, 404);
+  return json({ error: "Authentication route not found" }, 404);
 }
 
 /* =========================================
@@ -595,50 +388,30 @@ async function handleMarket(request, env, url) {
   }
 
   if (request.method !== "GET") {
-    return json({
-      error: "Method not allowed"
-    }, 405);
+    return json({ error: "Method not allowed" }, 405);
   }
 
-  const symbol = url.searchParams
-    .get("symbol")
+  const symbol = url.searchParams.get("symbol")
     ?.toUpperCase()
     .replace("/", "");
 
   const providerSymbol = SYMBOLS[symbol];
 
   if (!providerSymbol) {
-    return json({
-      error: "Unsupported symbol"
-    }, 400);
+    return json({ error: "Unsupported symbol" }, 400);
   }
 
   if (!env.TWELVE_DATA_API_KEY) {
-    return json({
-      error: "Market data API is not configured"
-    }, 500);
+    return json({ error: "Market data API is not configured" }, 500);
   }
 
   if (url.pathname === "/api/market") {
-    const apiUrl = new URL(
-      "https://api.twelvedata.com/price"
-    );
-
-    apiUrl.searchParams.set(
-      "symbol",
-      providerSymbol
-    );
-
-    apiUrl.searchParams.set(
-      "apikey",
-      env.TWELVE_DATA_API_KEY
-    );
+    const apiUrl = new URL("https://api.twelvedata.com/price");
+    apiUrl.searchParams.set("symbol", providerSymbol);
+    apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
 
     try {
-      const response = await fetch(
-        apiUrl.toString()
-      );
-
+      const response = await fetch(apiUrl.toString());
       const data = await response.json();
 
       if (!response.ok || !data.price) {
@@ -658,20 +431,13 @@ async function handleMarket(request, env, url) {
       });
 
     } catch (error) {
-      console.error(
-        "Market data error:",
-        error.message
-      );
-
-      return json({
-        error: "Unable to retrieve market data"
-      }, 502);
+      console.error("Market data error:", error.message);
+      return json({ error: "Unable to retrieve market data" }, 502);
     }
   }
 
   if (url.pathname === "/api/candles") {
-    const interval =
-      url.searchParams.get("interval") || "5min";
+    const interval = url.searchParams.get("interval") || "5min";
 
     if (!ALLOWED_INTERVALS.includes(interval)) {
       return json({
@@ -680,55 +446,24 @@ async function handleMarket(request, env, url) {
       }, 400);
     }
 
-    const requested = Number(
-      url.searchParams.get("outputsize") || 100
-    );
+    const requested = Number(url.searchParams.get("outputsize") || 100);
 
     const outputsize = Math.min(
       500,
-      Math.max(
-        1,
-        Number.isFinite(requested)
-          ? Math.floor(requested)
-          : 100
-      )
+      Math.max(1, Number.isFinite(requested) ? Math.floor(requested) : 100)
     );
 
-    const apiUrl = new URL(
-      "https://api.twelvedata.com/time_series"
-    );
-
-    apiUrl.searchParams.set(
-      "symbol",
-      providerSymbol
-    );
-
-    apiUrl.searchParams.set(
-      "interval",
-      interval
-    );
-
-    apiUrl.searchParams.set(
-      "outputsize",
-      String(outputsize)
-    );
-
-    apiUrl.searchParams.set(
-      "apikey",
-      env.TWELVE_DATA_API_KEY
-    );
+    const apiUrl = new URL("https://api.twelvedata.com/time_series");
+    apiUrl.searchParams.set("symbol", providerSymbol);
+    apiUrl.searchParams.set("interval", interval);
+    apiUrl.searchParams.set("outputsize", String(outputsize));
+    apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
 
     try {
-      const response = await fetch(
-        apiUrl.toString()
-      );
-
+      const response = await fetch(apiUrl.toString());
       const data = await response.json();
 
-      if (
-        !response.ok ||
-        !Array.isArray(data.values)
-      ) {
+      if (!response.ok || !Array.isArray(data.values)) {
         return json({
           error: "Unable to retrieve historical market data",
           details: data.message || "No candle data returned"
@@ -765,14 +500,8 @@ async function handleMarket(request, env, url) {
       });
 
     } catch (error) {
-      console.error(
-        "Candlestick data error:",
-        error.message
-      );
-
-      return json({
-        error: "Unable to retrieve candlestick data"
-      }, 502);
+      console.error("Candlestick data error:", error.message);
+      return json({ error: "Unable to retrieve candlestick data" }, 502);
     }
   }
 
@@ -780,166 +509,409 @@ async function handleMarket(request, env, url) {
 }
 
 /* =========================================
-   DERIV ADMINISTRATOR CONNECTION
+   DERIV OAUTH CONNECTION (AUTHORIZATION CODE + PKCE)
 ========================================= */
 
+const DERIV_REDIRECT_URI =
+  "https://tradelabai2.balancesilence11.workers.dev/api/deriv/callback";
+
+const DERIV_AUTH_URL = "https://auth.deriv.com/oauth2/auth";
+const DERIV_TOKEN_URL = "https://auth.deriv.com/oauth2/token";
+const DERIV_API_BASE = "https://api.derivws.com";
+const DERIV_SCOPES = "trade account_manage";
+
+function randomBytes(length) {
+  return crypto.getRandomValues(new Uint8Array(length));
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
+  return Uint8Array.from(binary, character => character.charCodeAt(0));
+}
+
+async function sha256Bytes(value) {
+  return new Uint8Array(
+    await crypto.subtle.digest("SHA-256", encoder.encode(value))
+  );
+}
+
+async function encryptDerivToken(env, token) {
+  if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
+    throw new Error("Deriv encryption key is not configured");
+  }
+
+  const rawKey = base64ToBytes(env.DERIV_TOKEN_ENCRYPTION_KEY);
+
+  if (rawKey.length !== 32) {
+    throw new Error("Deriv encryption key must decode to 32 bytes");
+  }
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    rawKey,
+    "AES-GCM",
+    false,
+    ["encrypt"]
+  );
+
+  const iv = randomBytes(12);
+
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder.encode(token)
+  );
+
+  return `${bytesToBase64Url(iv)}.${bytesToBase64Url(new Uint8Array(ciphertext))}`;
+}
+
+async function decryptDerivToken(env, encrypted) {
+  if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
+    throw new Error("Deriv encryption key is not configured");
+  }
+
+  const rawKey = base64ToBytes(env.DERIV_TOKEN_ENCRYPTION_KEY);
+
+  if (rawKey.length !== 32) {
+    throw new Error("Deriv encryption key must decode to 32 bytes");
+  }
+
+  const [ivText, ciphertextText] = String(encrypted || "").split(".");
+
+  if (!ivText || !ciphertextText) {
+    throw new Error("Stored Deriv token is invalid");
+  }
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    rawKey,
+    "AES-GCM",
+    false,
+    ["decrypt"]
+  );
+
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(ivText) },
+    key,
+    base64ToBytes(ciphertextText)
+  );
+
+  return new TextDecoder().decode(plaintext);
+}
+
+function redirectToApp(message) {
+  const target = new URL("/", DERIV_REDIRECT_URI);
+  target.searchParams.set("deriv", message);
+  return Response.redirect(target.toString(), 302);
+}
+
+async function getDerivAccessToken(env, userId) {
+  const row = await env.DB.prepare(`
+    SELECT access_token, token_expires_at
+    FROM deriv_oauth
+    WHERE user_id = ?
+  `).bind(userId).first();
+
+  if (!row?.access_token) return null;
+
+  if (
+    row.token_expires_at &&
+    Date.parse(row.token_expires_at) <= Date.now()
+  ) {
+    return null;
+  }
+
+  return decryptDerivToken(env, row.access_token);
+}
+
+async function derivApiFetch(token, path, options = {}) {
+  return fetch(`${DERIV_API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Accept": "application/json",
+      ...(options.headers || {})
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+}
+
 async function handleDeriv(request, env, url) {
+  const path = url.pathname;
+  const isCallback = path === "/api/deriv/callback";
+
   const user = await getAuthenticatedUser(request, env);
 
   if (!user) {
-    return json({
-      ok: false,
-      error: "Authentication required"
-    }, 401);
+    if (isCallback) return redirectToApp("login_required");
+    return json({ error: "Authentication required" }, 401);
   }
 
-  const adminEmail = String(env.ADMIN_EMAIL || "")
-    .trim()
-    .toLowerCase();
-
-  const loggedInEmail = String(user.email || "")
-    .trim()
-    .toLowerCase();
-
-  if (
-    !adminEmail ||
-    !loggedInEmail ||
-    loggedInEmail !== adminEmail
-  ) {
-    return json({
-      ok: false,
-      error: "Administrator access required"
-    }, 403);
+  if (!env.DERIV_CLIENT_ID || !env.DERIV_TOKEN_ENCRYPTION_KEY) {
+    return json({ error: "Deriv OAuth is not fully configured" }, 500);
   }
 
-  if (!env.DERIV_API_TOKEN || !env.DERIV_APP_ID) {
+  /* START OAUTH CONNECTION */
+
+  if (path === "/api/deriv/connect" && request.method === "GET") {
+    const state = bytesToBase64Url(randomBytes(32));
+    const verifier = bytesToBase64Url(randomBytes(32));
+    const challenge = bytesToBase64Url(await sha256Bytes(verifier));
+    const stateHash = await sha256(state);
+    const now = new Date().toISOString();
+
+    await env.DB.prepare(`
+      INSERT INTO deriv_oauth (
+        user_id,
+        state_hash,
+        code_verifier,
+        access_token,
+        token_expires_at,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, NULL, NULL, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        state_hash = excluded.state_hash,
+        code_verifier = excluded.code_verifier,
+        access_token = NULL,
+        token_expires_at = NULL,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
+    `).bind(user.id, stateHash, verifier, now, now).run();
+
+    const authUrl = new URL(DERIV_AUTH_URL);
+
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("client_id", String(env.DERIV_CLIENT_ID));
+    authUrl.searchParams.set("redirect_uri", DERIV_REDIRECT_URI);
+    authUrl.searchParams.set("scope", DERIV_SCOPES);
+    authUrl.searchParams.set("state", state);
+    authUrl.searchParams.set("code_challenge", challenge);
+    authUrl.searchParams.set("code_challenge_method", "S256");
+
+    return Response.redirect(authUrl.toString(), 302);
+  }
+
+  /* OAUTH CALLBACK */
+
+  if (path === "/api/deriv/callback" && request.method === "GET") {
+    const oauthError = url.searchParams.get("error");
+
+    if (oauthError) return redirectToApp("authorization_denied");
+
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+
+    if (!code || !state) return redirectToApp("invalid_callback");
+
+    const pending = await env.DB.prepare(`
+      SELECT state_hash, code_verifier, created_at
+      FROM deriv_oauth
+      WHERE user_id = ?
+    `).bind(user.id).first();
+
+    if (!pending?.state_hash || !pending?.code_verifier) {
+      return redirectToApp("state_missing");
+    }
+
+    if (Date.now() - Date.parse(pending.created_at) > 10 * 60 * 1000) {
+      await env.DB.prepare("DELETE FROM deriv_oauth WHERE user_id = ?")
+        .bind(user.id).run();
+
+      return redirectToApp("state_expired");
+    }
+
+    if (await sha256(state) !== pending.state_hash) {
+      return redirectToApp("state_mismatch");
+    }
+
+    const tokenResponse = await fetch(DERIV_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json"
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: String(env.DERIV_CLIENT_ID),
+        code,
+        redirect_uri: DERIV_REDIRECT_URI,
+        code_verifier: pending.code_verifier
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    const accessToken =
+      tokenData.access_token ||
+      tokenData.data?.access_token;
+
+    if (!tokenResponse.ok || !accessToken) {
+      console.error(
+        "Deriv OAuth token exchange failed:",
+        tokenResponse.status,
+        tokenData.error || tokenData.message || "No access token"
+      );
+
+      return redirectToApp("token_exchange_failed");
+    }
+
+    const encryptedToken = await encryptDerivToken(env, accessToken);
+
+    const expiresIn = Number(
+      tokenData.expires_in ||
+      tokenData.data?.expires_in ||
+      3600
+    );
+
+    const expiresAt = new Date(
+      Date.now() + Math.max(60, expiresIn) * 1000
+    ).toISOString();
+
+    const now = new Date().toISOString();
+
+    await env.DB.prepare(`
+      UPDATE deriv_oauth
+      SET
+        access_token = ?,
+        token_expires_at = ?,
+        state_hash = NULL,
+        code_verifier = NULL,
+        updated_at = ?
+      WHERE user_id = ?
+    `).bind(encryptedToken, expiresAt, now, user.id).run();
+
+    return redirectToApp("connected");
+  }
+
+  /* CONNECTION STATUS */
+
+  if (path === "/api/deriv/status" && request.method === "GET") {
+    const row = await env.DB.prepare(`
+      SELECT token_expires_at
+      FROM deriv_oauth
+      WHERE user_id = ?
+        AND access_token IS NOT NULL
+    `).bind(user.id).first();
+
+    const connected = Boolean(
+      row?.token_expires_at &&
+      Date.parse(row.token_expires_at) > Date.now()
+    );
+
     return json({
-      ok: false,
+      ok: true,
+      connected,
+      provider: "Deriv",
+      expiresAt: row?.token_expires_at || null
+    });
+  }
+
+  /* DISCONNECT DERIV */
+
+  if (path === "/api/deriv/disconnect" && request.method === "POST") {
+    if (!validOrigin(request, url)) {
+      return json({ error: "Request origin rejected" }, 403);
+    }
+
+    await env.DB.prepare("DELETE FROM deriv_oauth WHERE user_id = ?")
+      .bind(user.id).run();
+
+    return json({
+      ok: true,
       connected: false,
-      error: "Deriv credentials are not configured"
+      message: "Deriv disconnected"
+    });
+  }
+
+  if (request.method === "POST" && !validOrigin(request, url)) {
+    return json({ error: "Request origin rejected" }, 403);
+  }
+
+  if (![
+    "/api/deriv/test",
+    "/api/deriv/accounts",
+    "/api/deriv/otp"
+  ].includes(path)) {
+    return json({ error: "Deriv route not found" }, 404);
+  }
+
+  if (path === "/api/deriv/otp" && request.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
+  }
+
+  if (path !== "/api/deriv/otp" && request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
+  }
+
+  let token;
+
+  try {
+    token = await getDerivAccessToken(env, user.id);
+  } catch (error) {
+    console.error("Unable to decrypt Deriv token:", error.message);
+
+    return json({
+      error: "Stored Deriv connection could not be read. Please reconnect."
     }, 500);
   }
 
-  const isOtpRoute =
-    url.pathname === "/api/deriv/otp";
-
-  const isReadRoute =
-    url.pathname === "/api/deriv/test" ||
-    url.pathname === "/api/deriv/accounts";
-
-  if (!isOtpRoute && !isReadRoute) {
+  if (!token) {
     return json({
-      error: "Deriv route not found"
-    }, 404);
-  }
-
-  if (
-    (isOtpRoute && request.method !== "POST") ||
-    (isReadRoute && request.method !== "GET")
-  ) {
-    return json({
-      error: "Method not allowed"
-    }, 405);
-  }
-
-  if (
-    request.method === "POST" &&
-    !validOrigin(request, url)
-  ) {
-    return json({
-      error: "Request origin rejected"
-    }, 403);
-  }
-
-  const headers = {
-    "Authorization": `Bearer ${env.DERIV_API_TOKEN}`,
-    "Deriv-App-ID": String(env.DERIV_APP_ID),
-    "Accept": "application/json"
-  };
-
-  async function parseDerivResponse(response) {
-    const rawText = await response.text();
-
-    let data;
-
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      data = {
-        raw_response: rawText.slice(0, 1000)
-      };
-    }
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      data
-    };
+      ok: false,
+      connected: false,
+      error: "Deriv is not connected or the authorization has expired. Reconnect your account."
+    }, 401);
   }
 
   try {
-    /* GET DERIV ACCOUNTS */
-
-    const accountsResponse = await fetch(
-      "https://api.derivws.com/trading/v1/options/accounts",
-      {
-        method: "GET",
-        headers,
-        signal: AbortSignal.timeout(15000)
-      }
+    const accountsResponse = await derivApiFetch(
+      token,
+      "/trading/v1/options/accounts"
     );
 
-    const result = await parseDerivResponse(
-      accountsResponse
-    );
+    const accountsData = await accountsResponse.json();
 
-    if (!result.ok) {
-      console.error("DERIV API FAILURE:", {
-        status: result.status,
-        response: result.data
-      });
+    if (!accountsResponse.ok) {
+      console.error(
+        "Deriv account request rejected:",
+        accountsResponse.status
+      );
 
       return json({
         ok: false,
         connected: false,
-        provider: "Deriv",
-        error: "Deriv rejected the account request",
-        status: result.status,
-        details: result.data
+        error: "Deriv authorization failed. Please reconnect.",
+        status: accountsResponse.status
       }, 502);
     }
 
-    const accounts = Array.isArray(result.data.data)
-      ? result.data.data
-      : result.data.data
-        ? [result.data.data]
-        : [];
+    const accounts = Array.isArray(accountsData.data)
+      ? accountsData.data
+      : (accountsData.data ? [accountsData.data] : []);
 
-    if (!accounts.length) {
-      return json({
-        ok: false,
-        connected: false,
-        provider: "Deriv",
-        error: "No Deriv accounts were returned"
-      }, 404);
-    }
-
-    /* CONNECTION VERIFICATION */
-
-    if (url.pathname === "/api/deriv/test") {
+    if (path === "/api/deriv/test") {
       return json({
         ok: true,
         connected: true,
         provider: "Deriv",
-        message: "Deriv authentication successful",
         accountCount: accounts.length,
         timestamp: new Date().toISOString()
       });
     }
 
-    /* ACCOUNT INFORMATION */
-
-    if (url.pathname === "/api/deriv/accounts") {
+    if (path === "/api/deriv/accounts") {
       return json({
         ok: true,
         connected: true,
@@ -949,91 +921,55 @@ async function handleDeriv(request, env, url) {
       });
     }
 
-    /* GENERATE WEBSOCKET OTP */
-
     let body;
 
     try {
       body = await readJson(request);
     } catch {
-      return json({
-        error: "Invalid request body"
-      }, 400);
+      return json({ error: "Invalid request body" }, 400);
     }
 
-    const accountId = String(
-      body.account_id || ""
-    ).trim();
+    const accountId = String(body.account_id || "").trim();
 
     if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
-      return json({
-        error: "Invalid Deriv account ID"
-      }, 400);
+      return json({ error: "Invalid Deriv account ID" }, 400);
     }
 
     const selectedAccount = accounts.find(
-      account =>
-        String(account.account_id || "") === accountId
+      account => String(account.account_id || "") === accountId
     );
 
     if (!selectedAccount) {
-      return json({
-        error: "Deriv account not found"
-      }, 404);
+      return json({ error: "Deriv account not found" }, 404);
     }
 
-    const otpResponse = await fetch(
-      `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
-      {
-        method: "POST",
-        headers,
-        signal: AbortSignal.timeout(15000)
-      }
+    const otpResponse = await derivApiFetch(
+      token,
+      `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+      { method: "POST" }
     );
 
-    const otpResult = await parseDerivResponse(
-      otpResponse
-    );
+    const otpData = await otpResponse.json();
+    const websocketUrl = otpData.data?.url;
 
-    if (
-      !otpResult.ok ||
-      !otpResult.data.data ||
-      !otpResult.data.data.url
-    ) {
-      console.error("DERIV OTP FAILURE:", {
-        status: otpResult.status,
-        response: otpResult.data
-      });
-
+    if (!otpResponse.ok || !websocketUrl) {
       return json({
         ok: false,
         connected: false,
         error: "Unable to generate Deriv WebSocket authentication URL",
-        status: otpResult.status,
-        details: otpResult.data
+        status: otpResponse.status
       }, 502);
     }
 
-    const websocketUrl = String(
-      otpResult.data.data.url
-    );
-
-    let parsedUrl;
-
-    try {
-      parsedUrl = new URL(websocketUrl);
-    } catch {
-      return json({
-        error: "Invalid Deriv WebSocket URL"
-      }, 502);
-    }
+    const parsed = new URL(websocketUrl);
 
     if (
-      parsedUrl.protocol !== "wss:" ||
-      parsedUrl.hostname !== "api.derivws.com"
+      parsed.protocol !== "wss:" ||
+      parsed.hostname !== "api.derivws.com"
     ) {
       return json({
-        error: "Unexpected Deriv WebSocket URL"
+        ok: false,
+        error: "Deriv returned an unexpected WebSocket URL"
       }, 502);
     }
 
@@ -1044,24 +980,17 @@ async function handleDeriv(request, env, url) {
       account_id: accountId,
       account_type: selectedAccount.account_type || null,
       websocket_url: websocketUrl,
-      message: "Deriv WebSocket authentication URL generated",
+      message: "Connect immediately; the URL expires after 120 seconds and can be used once.",
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error("DERIV CONNECTION ERROR:", {
-      message: error.message,
-      name: error.name
-    });
+    console.error("Deriv connection error:", error.message);
 
     return json({
       ok: false,
       connected: false,
-      provider: "Deriv",
-      error: "Unable to connect to Deriv",
-      details: error.name === "TimeoutError"
-        ? "Deriv request timed out"
-        : error.message
+      error: "Unable to connect to Deriv"
     }, 502);
   }
 }
@@ -1082,7 +1011,7 @@ export default {
         return await handleAuth(request, env, url);
       }
 
-      /* DERIV ROUTES */
+      /* DERIV OAUTH ROUTES */
 
       if (path.startsWith("/api/deriv/")) {
         return await handleDeriv(request, env, url);
@@ -1090,11 +1019,19 @@ export default {
 
       /* MARKET DATA ROUTES */
 
-      if (
-        path === "/api/market" ||
-        path === "/api/candles"
-      ) {
-        return await handleMarket(request, env, url);
+      if (path === "/api/market" || path === "/api/candles") {
+        const user = await getAuthenticatedUser(request, env);
+
+        if (!user) {
+          return json({
+            ok: false,
+            error: "Authentication required"
+          }, 401);
+        }
+
+        const marketResponse = await handleMarket(request, env, url);
+
+        if (marketResponse) return marketResponse;
       }
 
       /* UNKNOWN API ROUTES */
@@ -1108,7 +1045,17 @@ export default {
 
       /* REACT FRONTEND ASSETS */
 
-      return await env.ASSETS.fetch(request);
+      const response = await env.ASSETS.fetch(request);
+      const headers = new Headers(response.headers);
+
+      headers.set("X-Content-Type-Options", "nosniff");
+      headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+      });
 
     } catch (error) {
       console.error("WORKER ERROR:", {
