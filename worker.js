@@ -19,6 +19,10 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 const encoder = new TextEncoder();
 
+/* =========================================
+   GENERAL RESPONSE AND SECURITY HELPERS
+========================================= */
+
 function json(data, status = 200, extraHeaders = {}) {
   return Response.json(data, {
     status,
@@ -138,6 +142,10 @@ async function readJson(request) {
 
   return JSON.parse(text);
 }
+
+/* =========================================
+   AUTHENTICATION DATABASE HELPERS
+========================================= */
 
 async function logAuthEvent(
   env,
@@ -776,7 +784,6 @@ async function handleMarket(request, env, url) {
 ========================================= */
 
 async function handleDeriv(request, env, url) {
-
   const user = await getAuthenticatedUser(request, env);
 
   if (!user) {
@@ -850,10 +857,7 @@ async function handleDeriv(request, env, url) {
     "Accept": "application/json"
   };
 
-  /* Safely handle JSON and plain-text responses */
-
   async function parseDerivResponse(response) {
-
     const rawText = await response.text();
 
     let data;
@@ -874,10 +878,7 @@ async function handleDeriv(request, env, url) {
   }
 
   try {
-
-    /* =====================================
-       GET DERIV ACCOUNTS
-    ===================================== */
+    /* GET DERIV ACCOUNTS */
 
     const accountsResponse = await fetch(
       "https://api.derivws.com/trading/v1/options/accounts",
@@ -893,7 +894,6 @@ async function handleDeriv(request, env, url) {
     );
 
     if (!result.ok) {
-
       console.error("DERIV API FAILURE:", {
         status: result.status,
         response: result.data
@@ -924,12 +924,9 @@ async function handleDeriv(request, env, url) {
       }, 404);
     }
 
-    /* =====================================
-       CONNECTION VERIFICATION
-    ===================================== */
+    /* CONNECTION VERIFICATION */
 
     if (url.pathname === "/api/deriv/test") {
-
       return json({
         ok: true,
         connected: true,
@@ -940,12 +937,9 @@ async function handleDeriv(request, env, url) {
       });
     }
 
-    /* =====================================
-       ACCOUNT INFORMATION
-    ===================================== */
+    /* ACCOUNT INFORMATION */
 
     if (url.pathname === "/api/deriv/accounts") {
-
       return json({
         ok: true,
         connected: true,
@@ -955,9 +949,7 @@ async function handleDeriv(request, env, url) {
       });
     }
 
-    /* =====================================
-       GENERATE WEBSOCKET OTP
-    ===================================== */
+    /* GENERATE WEBSOCKET OTP */
 
     let body;
 
@@ -1008,7 +1000,6 @@ async function handleDeriv(request, env, url) {
       !otpResult.data.data ||
       !otpResult.data.data.url
     ) {
-
       console.error("DERIV OTP FAILURE:", {
         status: otpResult.status,
         response: otpResult.data
@@ -1058,7 +1049,6 @@ async function handleDeriv(request, env, url) {
     });
 
   } catch (error) {
-
     console.error("DERIV CONNECTION ERROR:", {
       message: error.message,
       name: error.name
@@ -1075,3 +1065,61 @@ async function handleDeriv(request, env, url) {
     }, 502);
   }
 }
+
+/* =========================================
+   MAIN CLOUDFLARE WORKER ENTRY POINT
+========================================= */
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    try {
+      /* AUTHENTICATION ROUTES */
+
+      if (path.startsWith("/api/auth/")) {
+        return await handleAuth(request, env, url);
+      }
+
+      /* DERIV ROUTES */
+
+      if (path.startsWith("/api/deriv/")) {
+        return await handleDeriv(request, env, url);
+      }
+
+      /* MARKET DATA ROUTES */
+
+      if (
+        path === "/api/market" ||
+        path === "/api/candles"
+      ) {
+        return await handleMarket(request, env, url);
+      }
+
+      /* UNKNOWN API ROUTES */
+
+      if (path.startsWith("/api/")) {
+        return json({
+          ok: false,
+          error: "API route not found"
+        }, 404);
+      }
+
+      /* REACT FRONTEND ASSETS */
+
+      return await env.ASSETS.fetch(request);
+
+    } catch (error) {
+      console.error("WORKER ERROR:", {
+        message: error.message,
+        path
+      });
+
+      return json({
+        ok: false,
+        error: "Internal server error"
+      }, 500);
+    }
+  }
+};
