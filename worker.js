@@ -965,23 +965,15 @@ async function handleDeriv(request, env, url) {
       selectedAccount.account_type || ""
     ).toLowerCase();
 
-    // Demo accounts are permitted by default.
     if (accountType === "demo") {
       console.log("Deriv demo account authorised:", accountId);
-    }
-
-    // Real accounts require BOTH a server-side setting
-    // and explicit confirmation in the request.
-    else if (
+    } else if (
       accountType === "real" &&
       env.DERIV_ALLOW_REAL_TRADING === "true" &&
       body.confirm_real_trading === true
     ) {
       console.log("Deriv real account explicitly authorised:", accountId);
-    }
-
-    // Reject all other account types and unauthorised real accounts.
-    else {
+    } else {
       return json({
         ok: false,
         connected: true,
@@ -989,7 +981,8 @@ async function handleDeriv(request, env, url) {
         error: accountType === "real"
           ? "Real-account access is disabled. Demo trading is permitted."
           : "Unrecognised account type. Access denied."
-      }, 403);  
+      }, 403);
+    }
       /* =========================================
        STRICT DERIV ACCOUNT AUTHORISATION
     ========================================= */
