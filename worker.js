@@ -776,16 +776,16 @@ async function handleMarket(request, env, url) {
 ========================================= */
 
 async function handleDeriv(request, env, url) {
-  /* Require an authenticated TradeLab session */
+
   const user = await getAuthenticatedUser(request, env);
 
   if (!user) {
     return json({
+      ok: false,
       error: "Authentication required"
     }, 401);
   }
 
-  /* Normalize both email addresses before comparison */
   const adminEmail = String(env.ADMIN_EMAIL || "")
     .trim()
     .toLowerCase();
@@ -794,28 +794,28 @@ async function handleDeriv(request, env, url) {
     .trim()
     .toLowerCase();
 
-  console.log("ADMIN DIAGNOSTICS:", {
-    adminEmailConfigured: Boolean(adminEmail),
-    loggedInEmailPresent: Boolean(loggedInEmail),
-    emailMatch: Boolean(
-      adminEmail && loggedInEmail && loggedInEmail === adminEmail
-    )
-  });
-
-  if (!adminEmail || !loggedInEmail || loggedInEmail !== adminEmail) {
+  if (
+    !adminEmail ||
+    !loggedInEmail ||
+    loggedInEmail !== adminEmail
+  ) {
     return json({
+      ok: false,
       error: "Administrator access required"
     }, 403);
   }
 
-  /* Check Cloudflare credentials */
   if (!env.DERIV_API_TOKEN || !env.DERIV_APP_ID) {
     return json({
+      ok: false,
+      connected: false,
       error: "Deriv credentials are not configured"
     }, 500);
   }
 
-  const isOtpRoute = url.pathname === "/api/deriv/otp";
+  const isOtpRoute =
+    url.pathname === "/api/deriv/otp";
+
   const isReadRoute =
     url.pathname === "/api/deriv/test" ||
     url.pathname === "/api/deriv/accounts";
@@ -826,19 +826,19 @@ async function handleDeriv(request, env, url) {
     }, 404);
   }
 
-  if (isOtpRoute && request.method !== "POST") {
+  if (
+    (isOtpRoute && request.method !== "POST") ||
+    (isReadRoute && request.method !== "GET")
+  ) {
     return json({
       error: "Method not allowed"
-    }, 405, { "Allow": "POST" });
+    }, 405);
   }
 
-  if (isReadRoute && request.method !== "GET") {
-    return json({
-      error: "Method not allowed"
-    }, 405, { "Allow": "GET" });
-  }
-
-  if (request.method === "POST" && !validOrigin(request, url)) {
+  if (
+    request.method === "POST" &&
+    !validOrigin(request, url)
+  ) {
     return json({
       error: "Request origin rejected"
     }, 403);
@@ -850,8 +850,35 @@ async function handleDeriv(request, env, url) {
     "Accept": "application/json"
   };
 
+  /* Safely handle JSON and plain-text responses */
+
+  async function parseDerivResponse(response) {
+
+    const rawText = await response.text();
+
+    let data;
+
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = {
+        raw_response: rawText.slice(0, 1000)
+      };
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data
+    };
+  }
+
   try {
-    /* Retrieve the Options accounts associated with the PAT. */
+
+    /* =====================================
+       GET DERIV ACCOUNTS
+    ===================================== */
+
     const accountsResponse = await fetch(
       "https://api.derivws.com/trading/v1/options/accounts",
       {
@@ -861,29 +888,48 @@ async function handleDeriv(request, env, url) {
       }
     );
 
-    const accountsData = await accountsResponse.json();
+    const result = await parseDerivResponse(
+      accountsResponse
+    );
 
-    if (!accountsResponse.ok) {
-      console.error(
-        "Deriv accounts request failed:",
-        accountsResponse.status
-      );
+    if (!result.ok) {
+
+      console.error("DERIV API FAILURE:", {
+        status: result.status,
+        response: result.data
+      });
 
       return json({
         ok: false,
         connected: false,
-        error: "Deriv authentication or account retrieval failed",
-        status: accountsResponse.status
+        provider: "Deriv",
+        error: "Deriv rejected the account request",
+        status: result.status,
+        details: result.data
       }, 502);
     }
 
-    const accounts = Array.isArray(accountsData.data)
-      ? accountsData.data
-      : accountsData.data
-        ? [accountsData.data]
+    const accounts = Array.isArray(result.data.data)
+      ? result.data.data
+      : result.data.data
+        ? [result.data.data]
         : [];
 
+    if (!accounts.length) {
+      return json({
+        ok: false,
+        connected: false,
+        provider: "Deriv",
+        error: "No Deriv accounts were returned"
+      }, 404);
+    }
+
+    /* =====================================
+       CONNECTION VERIFICATION
+    ===================================== */
+
     if (url.pathname === "/api/deriv/test") {
+
       return json({
         ok: true,
         connected: true,
@@ -894,7 +940,12 @@ async function handleDeriv(request, env, url) {
       });
     }
 
+    /* =====================================
+       ACCOUNT INFORMATION
+    ===================================== */
+
     if (url.pathname === "/api/deriv/accounts") {
+
       return json({
         ok: true,
         connected: true,
@@ -904,7 +955,10 @@ async function handleDeriv(request, env, url) {
       });
     }
 
-    /* Generate a short-lived, single-use WebSocket URL for a selected account. */
+    /* =====================================
+       GENERATE WEBSOCKET OTP
+    ===================================== */
+
     let body;
 
     try {
@@ -915,7 +969,9 @@ async function handleDeriv(request, env, url) {
       }, 400);
     }
 
-    const accountId = String(body.account_id || "").trim();
+    const accountId = String(
+      body.account_id || ""
+    ).trim();
 
     if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
       return json({
@@ -924,12 +980,13 @@ async function handleDeriv(request, env, url) {
     }
 
     const selectedAccount = accounts.find(
-      account => String(account.account_id || "") === accountId
+      account =>
+        String(account.account_id || "") === accountId
     );
 
     if (!selectedAccount) {
       return json({
-        error: "Deriv account not found for this API token"
+        error: "Deriv account not found"
       }, 404);
     }
 
@@ -942,43 +999,50 @@ async function handleDeriv(request, env, url) {
       }
     );
 
-    const otpData = await otpResponse.json();
+    const otpResult = await parseDerivResponse(
+      otpResponse
+    );
 
-    if (!otpResponse.ok || !otpData.data || !otpData.data.url) {
-      console.error(
-        "Deriv OTP request failed:",
-        otpResponse.status
-      );
+    if (
+      !otpResult.ok ||
+      !otpResult.data.data ||
+      !otpResult.data.data.url
+    ) {
+
+      console.error("DERIV OTP FAILURE:", {
+        status: otpResult.status,
+        response: otpResult.data
+      });
 
       return json({
         ok: false,
         connected: false,
         error: "Unable to generate Deriv WebSocket authentication URL",
-        status: otpResponse.status
+        status: otpResult.status,
+        details: otpResult.data
       }, 502);
     }
 
-    const websocketUrl = String(otpData.data.url);
+    const websocketUrl = String(
+      otpResult.data.data.url
+    );
 
-    /* Only accept the official Deriv secure WebSocket host. */
-    let parsedWebSocketUrl;
+    let parsedUrl;
 
     try {
-      parsedWebSocketUrl = new URL(websocketUrl);
+      parsedUrl = new URL(websocketUrl);
     } catch {
       return json({
-        ok: false,
-        error: "Deriv returned an invalid WebSocket URL"
+        error: "Invalid Deriv WebSocket URL"
       }, 502);
     }
 
     if (
-      parsedWebSocketUrl.protocol !== "wss:" ||
-      parsedWebSocketUrl.hostname !== "api.derivws.com"
+      parsedUrl.protocol !== "wss:" ||
+      parsedUrl.hostname !== "api.derivws.com"
     ) {
       return json({
-        ok: false,
-        error: "Deriv returned an unexpected WebSocket URL"
+        error: "Unexpected Deriv WebSocket URL"
       }, 502);
     }
 
@@ -989,138 +1053,25 @@ async function handleDeriv(request, env, url) {
       account_id: accountId,
       account_type: selectedAccount.account_type || null,
       websocket_url: websocketUrl,
-      message: "Authenticated WebSocket URL generated. Connect immediately; it expires after 120 seconds and can be used once.",
+      message: "Deriv WebSocket authentication URL generated",
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error(
-      "Deriv connection error:",
-      error.message
-    );
+
+    console.error("DERIV CONNECTION ERROR:", {
+      message: error.message,
+      name: error.name
+    });
 
     return json({
       ok: false,
       connected: false,
-      error: "Unable to connect to Deriv"
+      provider: "Deriv",
+      error: "Unable to connect to Deriv",
+      details: error.name === "TimeoutError"
+        ? "Deriv request timed out"
+        : error.message
     }, 502);
   }
 }
-
-/* =========================================
-   MAIN CLOUDFLARE WORKER
-========================================= */
-
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-
-    try {
-
-      /* Health check */
-
-      if (url.pathname === "/api/health") {
-        return json({
-          ok: true,
-          service: "TradeLab AI",
-          status: "running",
-          authentication: "enabled",
-          derivIntegration: "configured"
-        });
-      }
-
-      /* Authentication */
-
-      if (
-        url.pathname.startsWith("/api/auth/")
-      ) {
-        return await handleAuth(
-          request,
-          env,
-          url
-        );
-      }
-
-      /* Deriv administrator routes */
-
-      if (
-        url.pathname.startsWith("/api/deriv/")
-      ) {
-        return await handleDeriv(
-          request,
-          env,
-          url
-        );
-      }
-
-      /* Protect market endpoints */
-
-      if (
-        url.pathname === "/api/market" ||
-        url.pathname === "/api/candles"
-      ) {
-        const user = await getAuthenticatedUser(
-          request,
-          env
-        );
-
-        if (!user) {
-          return json({
-            error: "Authentication required"
-          }, 401);
-        }
-      }
-
-      /* Market data */
-
-      const marketResponse = await handleMarket(
-        request,
-        env,
-        url
-      );
-
-      if (marketResponse) {
-        return marketResponse;
-      }
-
-      /* Static frontend assets */
-
-      const response = await env.ASSETS.fetch(
-        request
-      );
-
-      const headers = new Headers(
-        response.headers
-      );
-
-      headers.set(
-        "X-Content-Type-Options",
-        "nosniff"
-      );
-
-      headers.set(
-        "Referrer-Policy",
-        "strict-origin-when-cross-origin"
-      );
-
-      return new Response(
-        response.body,
-        {
-          status: response.status,
-          statusText: response.statusText,
-          headers
-        }
-      );
-
-    } catch (error) {
-      console.error(
-        "Worker error:",
-        error.message
-      );
-
-      return json({
-        error: "Internal server error"
-      }, 500);
-    }
-  }
-};
