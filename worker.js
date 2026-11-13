@@ -534,8 +534,21 @@ function bytesToBase64Url(bytes) {
 }
 
 function base64ToBytes(value) {
-  const binary = atob(value);
-  return Uint8Array.from(binary, character => character.charCodeAt(0));
+  const normalized = String(value)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  const padded = normalized.padEnd(
+    Math.ceil(normalized.length / 4) * 4,
+    "="
+  );
+
+  const binary = atob(padded);
+
+  return Uint8Array.from(
+    binary,
+    character => character.charCodeAt(0)
+  );
 }
 
 async function sha256Bytes(value) {
