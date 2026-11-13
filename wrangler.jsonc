@@ -1,4 +1,7 @@
-{
+,
+  "vars": {
+    "ADMIN_EMAIL": "balancesilence11@gmail.com"
+  }{
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tradelabai2",
   "main": "worker.js",
