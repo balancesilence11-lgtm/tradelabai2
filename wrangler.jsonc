@@ -3,9 +3,13 @@
 
   "name": "tradelabai2",
 
-  "main": "worker.js",
+  "main": "./worker.js",
 
   "compatibility_date": "2026-11-07",
+
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
 
   "assets": {
     "directory": "./dist",
@@ -31,9 +35,6 @@
   "observability": {
     "enabled": true,
     "logs": {
-      "enabled": true
-    },
-    "traces": {
       "enabled": true
     }
   }
