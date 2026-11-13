@@ -989,6 +989,29 @@ async function handleDeriv(request, env, url) {
         error: accountType === "real"
           ? "Real-account access is disabled. Demo trading is permitted."
           : "Unrecognised account type. Access denied."
+      }, 403);  
+      /* =========================================
+       STRICT DERIV ACCOUNT AUTHORISATION
+    ========================================= */
+
+    const accountType = String(
+      selectedAccount.account_type || ""
+    ).toLowerCase();
+
+    if (accountType === "demo") {
+      // Demo execution permitted.
+    } else if (
+      accountType === "real" &&
+      env.DERIV_ALLOW_REAL_TRADING === "true" &&
+      body.confirm_real_trading === true
+    ) {
+      // Real execution requires server permission
+      // and explicit user confirmation.
+    } else {
+      return json({
+        ok: false,
+        authorised: false,
+        error: "Account execution blocked by TradeLab AI security policy."
       }, 403);
     }
     const otpResponse = await derivApiFetch(
