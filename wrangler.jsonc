@@ -1,16 +1,40 @@
 {
+  "$schema": "node_modules/wrangler/config-schema.json",
+
   "name": "tradelabai2",
+
   "main": "worker.js",
+
   "compatibility_date": "2026-11-07",
 
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": [
+      "/api/*"
+    ]
   },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tradelab-ai-db",
+      "database_id": "a83ed9da-0af2-465c-9508-d2f18190826f"
+    }
+  ],
 
   "vars": {
     "ADMIN_EMAIL": "balancesilence11@gmail.com"
+  },
+
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true
+    },
+    "traces": {
+      "enabled": true
+    }
   }
 }
