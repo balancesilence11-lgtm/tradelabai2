@@ -137,19 +137,19 @@ export class DerivClient {
         reject(new Error("Deriv connection timed out"));
       }, CONNECTION_TIMEOUT);
 
-    socket.onopen = () => {
+   socket.onopen = () => {
   clearTimeout(timeout);
 
   this.connected = true;
   this.authorised = true;
 
-        this.emit("connected", {
-          accountId,
-          accountType: this.accountType
-        });
+  this.emit("connected", {
+    accountId,
+    accountType: this.accountType
+  });
 
-        resolve(true);
-      };
+  resolve(true);
+};
 
       socket.onmessage = event => {
         this.handleMessage(event);
