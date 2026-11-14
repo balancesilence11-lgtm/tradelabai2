@@ -113,8 +113,8 @@ export default function DerivLivePanel() {
       const positions = await client.getPortfolio();
       setPortfolio(positions);
 
-      const transactions = await client.getStatement(100);
-      setHistory(transactions);
+     const transactions = await client.getProfitTable(100);
+setHistory(transactions);
 
       const symbolsResponse = await client.send({
         active_symbols: "brief"
@@ -168,8 +168,7 @@ export default function DerivLivePanel() {
       setBalance(updatedBalance);
 
       setPortfolio(await client.getPortfolio());
-      setHistory(await client.getStatement(100));
-
+     setHistory(await client.getProfitTable(100));
     } catch (err) {
       setError(err.message);
     } finally {
