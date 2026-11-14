@@ -2161,15 +2161,17 @@ function PerformanceAnalyticsPage() {
   const net=closed.reduce((a,t)=>a+Number(t.pnl||0),0), grossWin=wins.reduce((a,t)=>a+Number(t.pnl),0), grossLoss=Math.abs(losses.reduce((a,t)=>a+Number(t.pnl),0));
   const winRate=closed.length?wins.length/closed.length*100:0, pf=grossLoss?grossWin/grossLoss:(grossWin?Infinity:0), avg=closed.length?net/closed.length:0;
   const avgWin=wins.length?grossWin/wins.length:0, avgLoss=losses.length?grossLoss/losses.length:0;
-  const expectancy=avg, best=closed.length?Math.max(...closed.map(t=>Number(t.pnl))):0, worst=closed.length?Math.min(...closed.map(t=>Number(t.pnl))):0;
+  const best=closed.length?Math.max(...closed.map(t=>Number(t.pnl))):0, worst=closed.length?Math.min(...closed.map(t=>Number(t.pnl))):0;
   const ordered=closed.slice().sort((a,b)=>new Date(a.closedAt||a.openedAt)-new Date(b.closedAt||b.openedAt));
-  let running=0, peak=0, maxDD=0;
-  const curve=ordered.map(t=>{running+=Number(t.pnl||0);peak=Math.max(peak,running);maxDD=Math.max(maxDD,peak-running);return running;});
+  let running=0, peak=0, maxDD=0, currentWinStreak=0, currentLossStreak=0, maxWinStreak=0, maxLossStreak=0;
+  const curve=ordered.map(t=>{const pnl=Number(t.pnl||0);running+=pnl;peak=Math.max(peak,running);maxDD=Math.max(maxDD,peak-running);if(pnl>0){currentWinStreak++;currentLossStreak=0;}else if(pnl<0){currentLossStreak++;currentWinStreak=0;}else{currentWinStreak=0;currentLossStreak=0;}maxWinStreak=Math.max(maxWinStreak,currentWinStreak);maxLossStreak=Math.max(maxLossStreak,currentLossStreak);return running;});
   const minEq=Math.min(0,...curve),maxEq=Math.max(0,...curve),span=maxEq-minEq||1;
   const points=curve.map((v,i)=>`${curve.length<2?300:12+i/(curve.length-1)*576},${150-((v-minEq)/span)*130}`).join(' ');
   const money=v=>`${v<0?'-':''}$${Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-  const bySymbol=Object.entries(closed.reduce((a,t)=>{const k=t.symbol||'Unknown';a[k]=(a[k]||0)+Number(t.pnl||0);return a;},{})).sort((a,b)=>b[1]-a[1]);
+  const groupStats=(keyFn)=>Object.entries(closed.reduce((acc,t)=>{const key=keyFn(t)||'Unspecified';(acc[key] ||= []).push(t);return acc;},{})).map(([name,items])=>{const pnl=items.reduce((a,t)=>a+Number(t.pnl||0),0),w=items.filter(t=>Number(t.pnl)>0),l=items.filter(t=>Number(t.pnl)<0),gw=w.reduce((a,t)=>a+Number(t.pnl),0),gl=Math.abs(l.reduce((a,t)=>a+Number(t.pnl),0));return {name,count:items.length,pnl,winRate:items.length?w.length/items.length*100:0,pf:gl?gw/gl:(gw?Infinity:0),average:pnl/items.length};}).sort((a,b)=>b.pnl-a.pnl);
+  const bySymbol=groupStats(t=>t.symbol||'Unknown'), bySetup=groupStats(t=>t.setup||'Unspecified'), byDirection=groupStats(t=>t.direction||'Unknown');
   const stat=(label,value,sub,cls='')=><div className="card"><div className="stat-label">{label}</div><div className={`stat-value ${cls}`}>{value}</div><div className="muted">{sub}</div></div>;
+  const breakdownTable=(title,rows)=> <div className="card"><div className="card-heading"><h3>{title}</h3><span className="muted">{rows.length} groups</span></div>{rows.length===0?<div className="empty">No closed-trade results yet.</div>:<div className="table-wrap"><table><thead><tr><th>Name</th><th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Net P/L</th><th>Avg P/L</th></tr></thead><tbody>{rows.map(r=><tr key={r.name}><td><strong>{r.name}</strong></td><td>{r.count}</td><td>{r.winRate.toFixed(1)}%</td><td>{r.pf===Infinity?'∞':r.pf.toFixed(2)}</td><td className={r.pnl>=0?'positive':'negative'}>{money(r.pnl)}</td><td className={r.average>=0?'positive':'negative'}>{money(r.average)}</td></tr>)}</tbody></table></div>}</div>;
   return <>
     <div className="welcome"><div><h1>Performance Analytics</h1><div className="muted">Performance is calculated from closed trades saved in your local Trade Journal.</div></div><span className="demo-badge">● JOURNAL-BASED ANALYTICS</span></div>
     <div className="card"><div className="card-heading"><div><h3>Reporting period</h3><div className="muted">Change the period to filter all metrics below.</div></div><select value={period} onChange={e=>setPeriod(e.target.value)} style={{background:'#0b1728',color:'#fff',border:'1px solid #33445e',padding:9,borderRadius:6}}><option value="ALL">All time</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last 12 months</option></select></div></div>
@@ -2178,10 +2180,16 @@ function PerformanceAnalyticsPage() {
       {stat('Win rate',`${winRate.toFixed(1)}%`,`${wins.length} wins · ${losses.length} losses`)}
       {stat('Profit factor',pf===Infinity?'∞':pf.toFixed(2),'Gross profit ÷ gross loss')}
       {stat('Maximum drawdown',money(maxDD),'Peak-to-trough realised P/L',maxDD>0?'negative':'')}
-      {stat('Trade expectancy',money(expectancy),'Average P/L per closed trade',expectancy>=0?'positive':'negative')}
+      {stat('Trade expectancy',money(avg),'Average P/L per closed trade',avg>=0?'positive':'negative')}
       {stat('Average winner',money(avgWin),`${wins.length} winning trades`,'positive')}
       {stat('Average loser',money(-avgLoss),`${losses.length} losing trades`,'negative')}
       {stat('Best / worst trade',`${money(best)} / ${money(worst)}`,`${flats.length} breakeven trades`)}
+    </div>
+    <div className="stats-grid" style={{marginTop:12}}>
+      {stat('Longest win streak',maxWinStreak,'Consecutive winning trades')}
+      {stat('Longest loss streak',maxLossStreak,'Consecutive losing trades',maxLossStreak?'negative':'')}
+      {stat('Open journal trades',entries.filter(t=>t.status==='OPEN').length,'Not included in realised metrics')}
+      {stat('Trades in selected period',closed.length,`${closedAll.length} closed trades overall`)}
     </div>
     <div className="dashboard-grid" style={{gridTemplateColumns:'minmax(0,1.5fr) minmax(250px,0.8fr)',marginTop:18}}>
       <div className="card"><div className="card-heading"><h3>Realised equity curve</h3><span className="muted">Cumulative journal P/L · USD</span></div>
@@ -2189,12 +2197,16 @@ function PerformanceAnalyticsPage() {
         <div className="muted" style={{fontSize:10}}>This curve uses realised P/L only; open positions and unrealised P/L are excluded.</div>
       </div>
       <div className="card"><div className="card-heading"><h3>Performance by instrument</h3></div>
-        {bySymbol.length===0?<div className="empty">No instrument results yet.</div>:bySymbol.map(([symbol,pnl])=><div className="signal" key={symbol}><span>{symbol}</span><strong className={pnl>=0?'positive':'negative'}>{money(pnl)}</strong></div>)}
+        {bySymbol.length===0?<div className="empty">No instrument results yet.</div>:bySymbol.map(r=><div className="signal" key={r.name}><span>{r.name}</span><strong className={r.pnl>=0?'positive':'negative'}>{money(r.pnl)}</strong></div>)}
       </div>
+    </div>
+    <div className="dashboard-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',marginTop:18}}>
+      {breakdownTable('Performance by setup / strategy',bySetup)}
+      {breakdownTable('Performance by trade direction',byDirection)}
     </div>
     <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Trade statistics</h3><span className="tag">PAPER / JOURNAL DATA</span></div>
       <div className="stats-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))'}}>
-        {stat('Closed trades',closed.length,'Selected period')}{stat('Gross profit',money(grossWin),'Winning trades only','positive')}{stat('Gross loss',money(-grossLoss),'Losing trades only','negative')}{stat('Average trades / outcome',`${wins.length}W · ${losses.length}L`,`${flats.length} breakeven`)}
+        {stat('Closed trades',closed.length,'Selected period')}{stat('Gross profit',money(grossWin),'Winning trades only','positive')}{stat('Gross loss',money(-grossLoss),'Losing trades only','negative')}{stat('Breakeven trades',flats.length,'Zero P/L outcomes')}
       </div>
       <p className="muted" style={{fontSize:11,lineHeight:1.7,marginTop:12}}>Important: Trade Journal P/L is currently an illustrative price-difference × units estimate. It may not match broker statements because pip/tick values, contract sizes, quote-currency conversion, commissions, swaps, spread and slippage are not fully modelled. These analytics are for review, not a verified account statement or a prediction of future results.</p>
     </div>
