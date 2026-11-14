@@ -13,6 +13,8 @@ const SYMBOLS = {
   EURJPY: "EUR/JPY",
   GBPJPY: "GBP/JPY",
   AUDJPY: "AUD/JPY",
+  EURAUD: "EUR/AUD",
+  GBPAUD: "GBP/AUD",
 
   // Commodities
   XAUUSD: "XAU/USD",
@@ -22,6 +24,7 @@ const SYMBOLS = {
 };
 
 const ALLOWED_INTERVALS = ["1min", "5min", "15min", "30min", "1h", "4h", "1day"];
+const MARKET_REQUEST_TIMEOUT_MS = 12000;
 const SESSION_COOKIE = "__Host-tl_session";
 const SESSION_DAYS = 7;
 const PASSWORD_ITERATIONS = 100000;
@@ -426,10 +429,13 @@ async function handleMarket(request, env, url) {
     apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
 
     try {
-      const response = await fetch(apiUrl.toString());
+      const response = await fetch(apiUrl.toString(), {
+        signal: AbortSignal.timeout(MARKET_REQUEST_TIMEOUT_MS)
+      });
       const data = await response.json();
+      const price = Number(data.price);
 
-      if (!response.ok || !data.price) {
+      if (!response.ok || !Number.isFinite(price) || price <= 0) {
         return json({
           error: "Twelve Data rejected the request",
           details: data.message || "No price returned"
@@ -440,14 +446,21 @@ async function handleMarket(request, env, url) {
         ok: true,
         symbol,
         providerSymbol,
-        price: Number(data.price),
+        price,
+        status: "LIVE",
         source: "Twelve Data",
         timestamp: new Date().toISOString()
       });
 
     } catch (error) {
       console.error("Market data error:", error.message);
-      return json({ error: "Unable to retrieve market data" }, 502);
+      return json({
+        ok: false,
+        status: "ERROR",
+        error: error.name === "TimeoutError"
+          ? "Market data request timed out"
+          : "Unable to retrieve market data"
+      }, 502);
     }
   }
 
@@ -475,7 +488,9 @@ async function handleMarket(request, env, url) {
     apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
 
     try {
-      const response = await fetch(apiUrl.toString());
+      const response = await fetch(apiUrl.toString(), {
+        signal: AbortSignal.timeout(MARKET_REQUEST_TIMEOUT_MS)
+      });
       const data = await response.json();
 
       if (!response.ok || !Array.isArray(data.values)) {
@@ -494,14 +509,28 @@ async function handleMarket(request, env, url) {
           close: Number(item.close),
           volume: Number(item.volume || 0)
         }))
-        .filter(candle =>
-          candle.time &&
-          Number.isFinite(candle.open) &&
-          Number.isFinite(candle.high) &&
-          Number.isFinite(candle.low) &&
-          Number.isFinite(candle.close)
-        )
-        .reverse();
+        .filter(candle => {
+          const timeIsValid = Boolean(candle.time) &&
+            Number.isFinite(Date.parse(candle.time));
+          const pricesAreValid =
+            Number.isFinite(candle.open) && candle.open > 0 &&
+            Number.isFinite(candle.high) && candle.high > 0 &&
+            Number.isFinite(candle.low) && candle.low > 0 &&
+            Number.isFinite(candle.close) && candle.close > 0;
+          const rangeIsValid =
+            candle.high >= Math.max(candle.open, candle.close, candle.low) &&
+            candle.low <= Math.min(candle.open, candle.close, candle.high);
+          return timeIsValid && pricesAreValid && rangeIsValid;
+        })
+        .sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+
+      if (!candles.length) {
+        return json({
+          ok: false,
+          status: "ERROR",
+          error: "No valid historical candles were returned"
+        }, 502);
+      }
 
       return json({
         ok: true,
@@ -510,13 +539,21 @@ async function handleMarket(request, env, url) {
         interval,
         count: candles.length,
         candles,
+        latestCandleAt: candles[candles.length - 1].time,
+        status: "LIVE",
         source: "Twelve Data",
         timestamp: new Date().toISOString()
       });
 
     } catch (error) {
       console.error("Candlestick data error:", error.message);
-      return json({ error: "Unable to retrieve candlestick data" }, 502);
+      return json({
+        ok: false,
+        status: "ERROR",
+        error: error.name === "TimeoutError"
+          ? "Historical candle request timed out"
+          : "Unable to retrieve candlestick data"
+      }, 502);
     }
   }
 
