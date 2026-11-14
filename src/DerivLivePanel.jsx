@@ -22,8 +22,8 @@ export default function DerivLivePanel() {
   const [tick, setTick] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const clientRef = useRef(derivClient);
 
+  const clientRef = useRef(derivClient);
   const client = clientRef.current;
 
   useEffect(() => {
@@ -31,9 +31,12 @@ export default function DerivLivePanel() {
       client.on("balance", data => setBalance(data)),
       client.on("portfolio", data => setPortfolio(data || [])),
       client.on("statement", data => setHistory(data || [])),
+      client.on("profit_table", data => setHistory(data || [])),
       client.on("tick", data => setTick(data)),
       client.on("disconnected", () => setStatus("Disconnected")),
-      client.on("error", data => setError(data.message || "Deriv connection error"))
+      client.on("error", data =>
+        setError(data.message || "Deriv connection error")
+      )
     ];
 
     loadAccounts();
@@ -60,13 +63,19 @@ export default function DerivLivePanel() {
       const retrieved = await client.getAccounts();
       setAccounts(retrieved);
 
-      const saved = retrieved.find(a => a.account_id === accountId);
-      const demo = retrieved.find(a => a.account_type === "demo");
+      const saved = retrieved.find(
+        account => account.account_id === accountId
+      );
+
+      const demo = retrieved.find(
+        account => account.account_type === "demo"
+      );
 
       const selected = saved || demo;
 
       if (selected) {
         setAccountId(selected.account_id);
+
         localStorage.setItem(
           "tradelab_deriv_selected_account",
           selected.account_id
@@ -88,16 +97,19 @@ export default function DerivLivePanel() {
       return;
     }
 
-    const selected = accounts.find(a => a.account_id === accountId);
+    const selected = accounts.find(
+      account => account.account_id === accountId
+    );
 
     if (!selected || selected.account_type !== "demo") {
-      setError("Only demo accounts are enabled in this integration.");
+      setError("Only demo accounts are enabled.");
       return;
     }
 
     try {
       setLoading(true);
       setError("");
+
       setBalance(null);
       setPortfolio([]);
       setHistory([]);
@@ -113,8 +125,8 @@ export default function DerivLivePanel() {
       const positions = await client.getPortfolio();
       setPortfolio(positions);
 
-     const transactions = await client.getProfitTable(100);
-setHistory(transactions);
+      const transactions = await client.getProfitTable(100);
+      setHistory(transactions);
 
       const symbolsResponse = await client.send({
         active_symbols: "brief"
@@ -168,7 +180,8 @@ setHistory(transactions);
       setBalance(updatedBalance);
 
       setPortfolio(await client.getPortfolio());
-     setHistory(await client.getProfitTable(100));
+      setHistory(await client.getProfitTable(100));
+
     } catch (err) {
       setError(err.message);
     } finally {
@@ -183,10 +196,12 @@ setHistory(transactions);
     setPortfolio([]);
     setHistory([]);
     setTick(null);
+
     setStatus("Disconnected");
   }
 
   const currency = balance?.currency || "USD";
+
   const openProfit = portfolio.reduce(
     (total, item) => total + Number(item.profit || 0),
     0
@@ -203,7 +218,7 @@ setHistory(transactions);
         <div>
           <h1>Deriv Live Account</h1>
           <div className="muted">
-            Live account synchronisation and market monitoring.
+            Account synchronisation and market monitoring
           </div>
         </div>
 
@@ -213,7 +228,10 @@ setHistory(transactions);
       </div>
 
       {error && (
-        <div className="card" style={{ marginBottom: 15, color: "#fb7185" }}>
+        <div
+          className="card"
+          style={{ marginBottom: 15, color: "#fb7185" }}
+        >
           {error}
         </div>
       )}
@@ -231,6 +249,7 @@ setHistory(transactions);
             value={accountId}
             onChange={event => {
               setAccountId(event.target.value);
+
               localStorage.setItem(
                 "tradelab_deriv_selected_account",
                 event.target.value
@@ -258,7 +277,7 @@ setHistory(transactions);
             onClick={connectAccount}
             disabled={loading || !accountId}
           >
-            {loading ? "Connecting..." : "Connect Live Account"}
+            {loading ? "Connecting..." : "Connect Demo Account"}
           </button>
 
           <button
@@ -324,6 +343,7 @@ setHistory(transactions);
         <div className="card">
           <div className="card-heading">
             <h3>Live Market Stream</h3>
+
             <span className="tag">
               {tick ? "STREAMING" : "WAITING"}
             </span>
@@ -388,7 +408,9 @@ setHistory(transactions);
       <div className="card" style={{ marginTop: 18 }}>
         <div className="card-heading">
           <h3>Open Positions</h3>
-          <span className="muted">{portfolio.length} positions</span>
+          <span className="muted">
+            {portfolio.length} positions
+          </span>
         </div>
 
         <div style={{ overflowX: "auto" }}>
@@ -428,9 +450,10 @@ setHistory(transactions);
 
       <div className="card" style={{ marginTop: 18 }}>
         <div className="card-heading">
-          <h3>Trade History</h3>
+          <h3>Closed Trade History</h3>
+
           <span className="muted">
-            Latest {history.length} transactions
+            Latest {history.length} trades
           </span>
         </div>
 
@@ -438,10 +461,11 @@ setHistory(transactions);
           <table>
             <thead>
               <tr>
-                <th>Transaction</th>
-                <th>Contract</th>
+                <th>Contract ID</th>
+                <th>Purchase Time</th>
                 <th>Buy Price</th>
                 <th>Sell Price</th>
+                <th>Payout</th>
                 <th>Profit / Loss</th>
               </tr>
             </thead>
@@ -449,18 +473,52 @@ setHistory(transactions);
             <tbody>
               {history.length === 0 ? (
                 <tr>
-                  <td colSpan="5" className="empty">
-                    No transaction history available.
+                  <td colSpan="6" className="empty">
+                    No closed trades available.
                   </td>
                 </tr>
               ) : (
                 history.map((item, index) => (
-                  <tr key={item.transaction_id || index}>
-                    <td>{item.transaction_id || "—"}</td>
-                    <td>{item.longcode || item.action_type || "—"}</td>
-                    <td>{money(item.buy_price, currency)}</td>
-                    <td>{money(item.sell_price, currency)}</td>
-                    <td>{money(item.amount, currency)}</td>
+                  <tr
+                    key={
+                      item.contract_id ||
+                      item.transaction_id ||
+                      index
+                    }
+                  >
+                    <td>
+                      {item.contract_id ||
+                        item.transaction_id ||
+                        "—"}
+                    </td>
+
+                    <td>
+                      {item.purchase_time
+                        ? new Date(
+                            item.purchase_time * 1000
+                          ).toLocaleString()
+                        : "—"}
+                    </td>
+
+                    <td>
+                      {money(item.buy_price, currency)}
+                    </td>
+
+                    <td>
+                      {money(item.sell_price, currency)}
+                    </td>
+
+                    <td>
+                      {money(item.payout, currency)}
+                    </td>
+
+                    <td>
+                      {money(
+                        Number(item.sell_price || 0) -
+                          Number(item.buy_price || 0),
+                        currency
+                      )}
+                    </td>
                   </tr>
                 ))
               )}
