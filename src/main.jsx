@@ -12,12 +12,40 @@ const initialMarkets = [
   { symbol: 'EURUSD', name: 'Euro / US Dollar', price: '—' },
   { symbol: 'GBPUSD', name: 'British Pound / US Dollar', price: '—' },
   { symbol: 'USDJPY', name: 'US Dollar / Japanese Yen', price: '—' },
+  { symbol: 'USDCHF', name: 'US Dollar / Swiss Franc', price: '—' },
+  { symbol: 'USDCAD', name: 'US Dollar / Canadian Dollar', price: '—' },
+  { symbol: 'AUDUSD', name: 'Australian Dollar / US Dollar', price: '—' },
+  { symbol: 'NZDUSD', name: 'New Zealand Dollar / US Dollar', price: '—' },
+
+  { symbol: 'EURGBP', name: 'Euro / British Pound', price: '—' },
+  { symbol: 'EURJPY', name: 'Euro / Japanese Yen', price: '—' },
+  { symbol: 'GBPJPY', name: 'British Pound / Japanese Yen', price: '—' },
+  { symbol: 'AUDJPY', name: 'Australian Dollar / Japanese Yen', price: '—' },
+  { symbol: 'EURAUD', name: 'Euro / Australian Dollar', price: '—' },
+  { symbol: 'GBPAUD', name: 'British Pound / Australian Dollar', price: '—' },
+
   { symbol: 'XAUUSD', name: 'Gold / US Dollar', price: '—' },
-  { symbol: 'US30', name: 'Dow Jones Industrial Average', price: '—' },
-  { symbol: 'BTCUSD', name: 'Bitcoin / US Dollar', price: '—' }
+  { symbol: 'BTCUSD', name: 'Bitcoin / US Dollar', price: '—' },
+  { symbol: 'US30', name: 'Dow Jones Industrial Average', price: '—' }
 ];
 
-const supportedSymbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSD'];
+const supportedSymbols = [
+  'EURUSD',
+  'GBPUSD',
+  'USDJPY',
+  'USDCHF',
+  'USDCAD',
+  'AUDUSD',
+  'NZDUSD',
+  'EURGBP',
+  'EURJPY',
+  'GBPJPY',
+  'AUDJPY',
+  'EURAUD',
+  'GBPAUD',
+  'XAUUSD',
+  'BTCUSD'
+];
 
 const navigation = [
   { name: 'Dashboard', icon: LayoutDashboard },
