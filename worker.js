@@ -1,8 +1,23 @@
 const SYMBOLS = {
+  // Major forex pairs
   EURUSD: "EUR/USD",
   GBPUSD: "GBP/USD",
   USDJPY: "USD/JPY",
+  USDCHF: "USD/CHF",
+  USDCAD: "USD/CAD",
+  AUDUSD: "AUD/USD",
+  NZDUSD: "NZD/USD",
+
+  // Minor forex pairs
+  EURGBP: "EUR/GBP",
+  EURJPY: "EUR/JPY",
+  GBPJPY: "GBP/JPY",
+  AUDJPY: "AUD/JPY",
+
+  // Commodities
   XAUUSD: "XAU/USD",
+
+  // Cryptocurrencies
   BTCUSD: "BTC/USD"
 };
 
