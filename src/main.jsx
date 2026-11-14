@@ -47,6 +47,11 @@ const supportedSymbols = [
   'BTCUSD'
 ];
 
+const TIMEFRAME_OPTIONS = [
+  ['1min', '1m'], ['5min', '5m'], ['15min', '15m'],
+  ['30min', '30m'], ['1h', '1h'], ['4h', '4h'], ['1day', '1D']
+];
+
 const navigation = [
   { name: 'Dashboard', icon: LayoutDashboard },
   { name: 'Market Analysis', icon: BarChart3 },
@@ -1194,7 +1199,7 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
 
 
 function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTimeframeChange }) {
-  const symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSD'];
+  const symbols = supportedSymbols;
   const [results, setResults] = useState([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState('');
@@ -1213,7 +1218,11 @@ function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTi
         const symbol = symbols[index];
         setScanProgress(`Scanning ${symbol} (${index + 1}/${symbols.length})…`);
         try {
-          const response = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&outputsize=180`);
+          const scanController = new AbortController();
+          const scanTimeout = setTimeout(() => scanController.abort(), 15000);
+          let response;
+          try { response = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&outputsize=180`, { signal: scanController.signal }); }
+          finally { clearTimeout(scanTimeout); }
           const data = await response.json();
           if (!response.ok || !data.ok || !Array.isArray(data.candles)) throw new Error(data.details || data.error || 'Candle data unavailable');
           const candles = data.candles;
@@ -2289,7 +2298,7 @@ function PortfolioRiskPage() {
 }
 
 
-const TIMEFRAME_MS = { '1min':60000, '5min':300000, '15min':900000, '30min':1800000, '1h':3600000, '4h':14400000 };
+const TIMEFRAME_MS = { '1min':60000, '5min':300000, '15min':900000, '30min':1800000, '1h':3600000, '4h':14400000, '1day':86400000 };
 function validateMarketCandles(input, timeframe) {
   if (!Array.isArray(input) || input.length < 60) return { ok:false, message:'At least 60 candles are required for reliable analysis.', count:Array.isArray(input)?input.length:0 };
   const clean=[]; let invalid=0, duplicates=0, outOfOrder=0, gaps=0; const seen=new Set(); let previousTime=null;
@@ -2649,44 +2658,54 @@ function App() {
 
   const currentMarket = markets.find(m => m.symbol === selectedMarket);
 
-  // Latest quote polling. This is periodic HTTP refresh, not tick streaming.
+  // Latest quote polling. HTTP polling is not tick-by-tick streaming.
+  // Requests are serialized, have a timeout, and are cancelled on selection changes.
   useEffect(() => {
     let active = true;
+    let timer = null;
+    let controller = null;
     if (!supportedSymbols.includes(selectedMarket)) {
       setMarketStatus('Not supported');
       setLastUpdated(null);
       return () => { active = false; };
     }
     const fetchPrice = async () => {
+      controller = new AbortController();
+      const timeout = setTimeout(() => controller?.abort(), 12000);
       try {
         setMarketStatus('Updating…');
-        const response = await fetch(`/api/market?symbol=${encodeURIComponent(selectedMarket)}`);
+        const response = await fetch(`/api/market?symbol=${encodeURIComponent(selectedMarket)}`, { signal: controller.signal });
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.error || data.details || 'Market data unavailable');
-        const quote=Number(data.price);
-        if (!Number.isFinite(quote) || quote<=0) throw new Error('Provider returned an invalid or empty market price.');
+        const quote = Number(data.price);
+        if (!Number.isFinite(quote) || quote <= 0) throw new Error('Provider returned an invalid or empty market price.');
         if (!active) return;
-        const receivedAt=new Date();
+        const receivedAt = new Date();
         setMarkets(previous => previous.map(m => m.symbol === selectedMarket
           ? { ...m, price: String(quote), live: true } : m));
         setMarketStatus('LIVE');
         setLastUpdated(data.timestamp ? new Date(data.timestamp) : receivedAt);
-        setMarketDataHealth(previous=>({...previous,status:'CHECKING',message:'Quote received; validating historical candles…',checkedAt:receivedAt,source:'Market API',quoteAgeMs:0}));
+        setMarketDataHealth(previous => ({ ...previous, status:'CHECKING', message:'Quote received; validating historical candles…', checkedAt:receivedAt, source:'Market API', quoteAgeMs:0 }));
       } catch (error) {
         if (!active) return;
+        const message = error.name === 'AbortError' ? 'Market quote request timed out after 12 seconds.' : error.message;
         setMarketStatus('Connection error');
-        setMarketDataHealth(previous=>({...previous,status:'ERROR',message:`Market quote unavailable: ${error.message}`,checkedAt:new Date(),source:'Market API'}));
+        setMarketDataHealth(previous => ({ ...previous, status:'ERROR', message:`Market quote unavailable: ${message}`, checkedAt:new Date(), source:'Market API' }));
         console.error('Market data error:', error);
+      } finally {
+        clearTimeout(timeout);
+        if (active) timer = setTimeout(fetchPrice, 60000);
       }
     };
     fetchPrice();
-    const timer = setInterval(fetchPrice, 60000);
-    return () => { active = false; clearInterval(timer); };
+    return () => { active = false; clearTimeout(timer); controller?.abort(); };
   }, [selectedMarket]);
 
-  // Historical candles polling.
+  // Historical candle polling uses the same selected symbol/timeframe as analysis.
   useEffect(() => {
     let active = true;
+    let timer = null;
+    let controller = null;
     if (!supportedSymbols.includes(selectedMarket)) {
       setCandles([]);
       setCandleError('Historical data is not supported for this instrument (US30 is not connected).');
@@ -2694,35 +2713,41 @@ function App() {
       return () => { active = false; };
     }
     const fetchCandles = async () => {
+      controller = new AbortController();
+      const timeout = setTimeout(() => controller?.abort(), 15000);
       try {
         setCandleLoading(true);
         setCandleError('');
-        const response = await fetch(`/api/candles?symbol=${encodeURIComponent(selectedMarket)}&interval=${encodeURIComponent(period)}&outputsize=300`);
+        const response = await fetch(`/api/candles?symbol=${encodeURIComponent(selectedMarket)}&interval=${encodeURIComponent(period)}&outputsize=300`, { signal: controller.signal });
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.details || data.error || 'Unable to load historical candles.');
         if (!active) return;
-        const quality=validateMarketCandles(data.candles,period);
+        const quality = validateMarketCandles(data.candles, period);
         if (!quality.ok) {
           setCandleError(quality.message);
-          setMarketDataHealth(previous=>({...previous,status:'WARNING',message:quality.message,checkedAt:new Date(),source:'Historical candle API',invalid:quality.invalid||0,duplicates:quality.duplicates||0,gaps:quality.gaps||0}));
+          setMarketDataHealth(previous => ({ ...previous, status:'WARNING', message:quality.message, checkedAt:new Date(), source:'Historical candle API', invalid:quality.invalid||0, duplicates:quality.duplicates||0, gaps:quality.gaps||0 }));
           return;
         }
         setCandles(quality.candles);
         setCandleError('');
         setLastCandleUpdated(new Date());
-        setMarketDataHealth(previous=>({...previous,status:quality.stale?'STALE':quality.gaps?'WARNING':'HEALTHY',message:quality.message,checkedAt:new Date(),source:'Market + candle API',candleAgeMs:quality.ageMs,gaps:quality.gaps,invalid:quality.invalid,duplicates:quality.duplicates,latestCandleTime:quality.latestTime}));
+        setMarketDataHealth(previous => ({ ...previous, status:quality.stale?'STALE':quality.gaps?'WARNING':'HEALTHY', message:quality.message, checkedAt:new Date(), source:'Market + candle API', candleAgeMs:quality.ageMs, gaps:quality.gaps, invalid:quality.invalid, duplicates:quality.duplicates, latestCandleTime:quality.latestTime }));
       } catch (error) {
         if (!active) return;
-        setCandleError(error.message);
-        setMarketDataHealth(previous=>({...previous,status:'ERROR',message:`Historical candle request failed: ${error.message}`,checkedAt:new Date(),source:'Historical candle API'}));
+        const message = error.name === 'AbortError' ? 'Historical candle request timed out after 15 seconds.' : error.message;
+        setCandleError(message);
+        setMarketDataHealth(previous => ({ ...previous, status:'ERROR', message:`Historical candle request failed: ${message}`, checkedAt:new Date(), source:'Historical candle API' }));
         console.error('Candlestick error:', error);
       } finally {
-        if (active) setCandleLoading(false);
+        clearTimeout(timeout);
+        if (active) {
+          setCandleLoading(false);
+          timer = setTimeout(fetchCandles, 60000);
+        }
       }
     };
     fetchCandles();
-    const timer = setInterval(fetchCandles, 60000);
-    return () => { active = false; clearInterval(timer); };
+    return () => { active = false; clearTimeout(timer); controller?.abort(); };
   }, [selectedMarket, period]);
 
   function placeDemoOrder() {
@@ -2859,7 +2884,7 @@ function App() {
                     <div className="muted">{currentMarket?.live ? 'Latest market quote · Twelve Data' : 'Waiting for live quote'}</div>
                   </div>
                   <div className="periods">
-                    {[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([value,label]) =>
+                    {TIMEFRAME_OPTIONS.map(([value,label]) =>
                       <button key={value} onClick={() => setPeriod(value)} className={`period-btn ${period === value ? 'active' : ''}`}>{label}</button>
                     )}
                   </div>
@@ -2927,7 +2952,7 @@ function App() {
             </div>
           </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Trade Planner' ? <TradePlannerPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
-            <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
+            <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{TIMEFRAME_OPTIONS.map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
             <MarketIntelligencePanel candles={candles} symbol={selectedMarket} timeframe={period}/>
           </> : activePage === 'Technical Indicators' ? <>
@@ -2937,7 +2962,7 @@ function App() {
           </> : activePage === 'AI Analysis' ? <>
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
-            <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
+            <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{TIMEFRAME_OPTIONS.map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
           </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <BrokerConnectionsPage/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
