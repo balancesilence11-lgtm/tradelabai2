@@ -1197,7 +1197,7 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
 }
 
 
-function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTimeframeChange }) {
+function SmartScanner({ selectedMarket, onSelectMarket, onSendToPlanner, timeframe = '5min', onTimeframeChange }) {
   const symbols = supportedSymbols;
   const [results, setResults] = useState([]);
   const [scanning, setScanning] = useState(false);
@@ -1229,9 +1229,9 @@ function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTi
           const closes = candles.map(c => Number(c.close));
           if (candles.length < 60 || closes.some(v => !Number.isFinite(v) || v <= 0)) throw new Error('Insufficient clean candle history');
           const ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50);
-          const rsiSeries = calcRSI(closes, 14), macd = calcMACD(closes), adxSeries = calcADX(candles, 14);
+          const rsiSeries = calcRSI(closes, 14), macd = calcMACD(closes), adxSeries = calcADX(candles, 14), atrSeries = calcATR(candles, 14);
           const i = closes.length - 1, price = closes[i], e20 = ema20[i], e50 = ema50[i];
-          const rsi = rsiSeries[i], macdHist = macd.histogram[i], adx = adxSeries[i];
+          const rsi = rsiSeries[i], macdHist = macd.histogram[i], adx = adxSeries[i], atr = atrSeries[i];
           if ([e20, e50, rsi, macdHist].some(v => v == null || !Number.isFinite(v))) throw new Error('Indicators need more candle history');
           let score = 0; const reasons = [];
           if (e20 > e50) { score += 2; reasons.push('EMA 20 above EMA 50'); }
@@ -1261,7 +1261,7 @@ function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTi
             : Math.abs(score) >= 4 && adx >= 25 ? 'HIGH' : 'MODERATE';
           found.push({
             symbol, price, rsi, adx: Number.isFinite(adx) ? adx : null,
-            macdHist, ema20: e20, ema50: e50, score, signal,
+            macdHist, ema20: e20, ema50: e50, atr: Number.isFinite(atr) ? atr : null, score, signal,
             signalQuality, trendConfirmed, reasons, candles: candles.length,
             scannedAt: new Date().toISOString()
           });
@@ -1312,7 +1312,7 @@ function SmartScanner({ selectedMarket, onSelectMarket, timeframe = '5min', onTi
     </div>
     <div className="card" style={{ marginBottom: 16 }}>
       <div className="card-heading" style={{ flexWrap: 'wrap' }}><h3>Scan results</h3><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><select style={inputStyle} value={filter} onChange={e => setFilter(e.target.value)}><option value="ALL">All results</option><option value="ACTIONABLE">Actionable only</option><option value="HIGH QUALITY">High quality only</option><option value="STRONG BUY">Strong buy</option><option value="BUY">Buy</option><option value="NEUTRAL">Neutral</option><option value="SELL">Sell</option><option value="STRONG SELL">Strong sell</option><option value="NO DATA">No data</option></select><select style={inputStyle} value={sortBy} onChange={e => setSortBy(e.target.value)}><option value="quality">Sort by signal quality</option><option value="score">Sort by signal strength</option><option value="symbol">Sort by symbol</option><option value="price">Sort by price</option></select></div></div>
-      {!results.length ? <div className="empty">Run a market scan to populate the results table.</div> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Last candle close</th><th>Signal</th><th>Quality</th><th>Score</th><th>RSI 14</th><th>ADX 14</th><th>MACD histogram</th><th>Action</th></tr></thead><tbody>{sorted.map(r => <tr key={r.symbol}><td><strong>{r.symbol}</strong><div className="muted">{r.candles ? `${r.candles} candles` : r.error}</div></td><td>{fmt(r.price, r.symbol)}</td><td style={{ color: signalColor(r.signal), fontWeight: 700 }}>{r.signal}</td><td style={{ color: qualityColor(r.signalQuality), fontWeight: 700 }}>{r.signalQuality || '—'}</td><td>{r.signal === 'NO DATA' ? '—' : `${r.score > 0 ? '+' : ''}${r.score}`}</td><td>{r.rsi == null ? '—' : r.rsi.toFixed(1)}</td><td>{r.adx == null ? '—' : r.adx.toFixed(1)}</td><td>{r.macdHist == null ? '—' : r.macdHist.toPrecision(4)}</td><td><button className="period-btn" disabled={r.signal === 'NO DATA'} onClick={() => onSelectMarket(r.symbol)}>Open market</button></td></tr>)}</tbody></table></div>}
+      {!results.length ? <div className="empty">Run a market scan to populate the results table.</div> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Last candle close</th><th>Signal</th><th>Quality</th><th>Score</th><th>RSI 14</th><th>ADX 14</th><th>MACD histogram</th><th>Action</th></tr></thead><tbody>{sorted.map(r => <tr key={r.symbol}><td><strong>{r.symbol}</strong><div className="muted">{r.candles ? `${r.candles} candles` : r.error}</div></td><td>{fmt(r.price, r.symbol)}</td><td style={{ color: signalColor(r.signal), fontWeight: 700 }}>{r.signal}</td><td style={{ color: qualityColor(r.signalQuality), fontWeight: 700 }}>{r.signalQuality || '—'}</td><td>{r.signal === 'NO DATA' ? '—' : `${r.score > 0 ? '+' : ''}${r.score}`}</td><td>{r.rsi == null ? '—' : r.rsi.toFixed(1)}</td><td>{r.adx == null ? '—' : r.adx.toFixed(1)}</td><td>{r.macdHist == null ? '—' : r.macdHist.toPrecision(4)}</td><td style={{display:'flex',gap:6,flexWrap:'wrap'}}><button className="period-btn" disabled={r.signal === 'NO DATA'} onClick={() => onSelectMarket(r.symbol)}>Open market</button><button className="period-btn" disabled={!['BUY','STRONG BUY','SELL','STRONG SELL'].includes(r.signal) || !r.atr || !onSendToPlanner} onClick={() => onSendToPlanner(r)}>Plan trade</button></td></tr>)}</tbody></table></div>}
     </div>
     {results.length > 0 && <div className="card"><div className="card-heading"><h3>Signal reasoning</h3><span className="muted">Rule-based indicator checks · quality is a heuristic, not a probability</span></div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10 }}>{results.filter(r => r.signal !== 'NO DATA').map(r => <div key={r.symbol} style={cardStyle}><div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}><strong>{r.symbol}</strong><span style={{ textAlign: 'right' }}><strong style={{ color: signalColor(r.signal), display: 'block' }}>{r.signal}</strong><small style={{ color: qualityColor(r.signalQuality) }}>{r.signalQuality} QUALITY</small></span></div><div className="muted" style={{ lineHeight: 1.8 }}>{r.reasons.map((reason, i) => <div key={i}>• {reason}</div>)}</div></div>)}</div></div>}
     <div className="card" style={{ marginTop: 16, borderColor: '#5b4520' }}><p className="muted" style={{ fontSize: 11, lineHeight: 1.7, margin: 0 }}><strong style={{ color: '#fbbf24' }}>Important:</strong> Scanner scores are transparent technical rules, not machine-learning predictions or guaranteed trade signals. Quality labels are heuristic rankings, not win probabilities. A BUY/SELL label is not a recommendation to enter automatically. Confirm spread, session, news, higher-timeframe context and your risk limits before considering any trade. US30 is listed elsewhere in the app but is not included because its market-data feed is not connected.</p></div>
@@ -2625,6 +2625,26 @@ function TradePlannerPage({ selectedMarket }) {
   const [tickValue, setTickValue] = useState('10');
   const [contractSize, setContractSize] = useState('100000');
   const [plans, setPlans] = useState(() => { try { const v=JSON.parse(localStorage.getItem(KEY)||'[]'); return Array.isArray(v)?v:[]; } catch { return []; } });
+  const [scannerDraft, setScannerDraft] = useState(null);
+  useEffect(() => {
+    const loadDraft = () => {
+      try {
+        const draft = JSON.parse(localStorage.getItem('tradelab_scanner_plan_draft_v1') || 'null');
+        if (!draft || !draft.symbol || !Number.isFinite(Number(draft.entry)) || !Number.isFinite(Number(draft.atr))) return;
+        const side = String(draft.signal || '').includes('SELL') ? 'SELL' : 'BUY';
+        const entryPrice = Number(draft.entry), atrValue = Number(draft.atr);
+        const stopPrice = side === 'BUY' ? entryPrice - 1.5 * atrValue : entryPrice + 1.5 * atrValue;
+        const targetPrice = side === 'BUY' ? entryPrice + 3 * atrValue : entryPrice - 3 * atrValue;
+        setSymbol(draft.symbol); setDirection(side); setEntry(String(entryPrice)); setStop(String(stopPrice)); setTarget(String(targetPrice));
+        setScannerDraft({ ...draft, stop: stopPrice, target: targetPrice, loadedAt: new Date().toISOString() });
+        localStorage.removeItem('tradelab_scanner_plan_draft_v1');
+      } catch {}
+    };
+    loadDraft();
+    window.addEventListener('storage', loadDraft);
+    window.addEventListener('tradelab-scanner-plan', loadDraft);
+    return () => { window.removeEventListener('storage', loadDraft); window.removeEventListener('tradelab-scanner-plan', loadDraft); };
+  }, []);
   useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(plans)); } catch {} }, [plans]);
   const n = v => Number(v);
   const valid = [balance,riskPct,entry,stop,target,tickSize,tickValue,contractSize].every(v=>v!==''&&Number.isFinite(n(v))) && n(balance)>0 && n(riskPct)>0 && n(riskPct)<=100 && n(tickSize)>0 && n(tickValue)>0 && n(contractSize)>0 && n(entry)!==n(stop);
@@ -2640,6 +2660,7 @@ function TradePlannerPage({ selectedMarket }) {
   ];
   return <>
     <div className="welcome"><div><h1>Trade Planner & Position Sizing</h1><div className="muted">Calculate risk-based position size, stop distance and reward-to-risk before placing a trade.</div></div><div className="demo-badge">● PLANNING TOOL · NO ORDERS</div></div>
+    {scannerDraft && <div className="card" style={{marginBottom:16,borderColor:'#20d6a1'}}><strong style={{color:'#20d6a1'}}>Scanner setup imported: {scannerDraft.symbol} · {scannerDraft.signal}</strong><p className="muted" style={{margin:'7px 0 0',lineHeight:1.6}}>Entry is the latest scanned candle close. Suggested stop is 1.5 × ATR and target is 3 × ATR (2R). These are editable planning levels, not validated broker prices. Confirm the current quote, spread and instrument specifications before saving.</p></div>}
     <div className="card" style={{marginBottom:18}}><div className="card-heading"><h3>Trade parameters</h3><span className="muted">Use instrument-specific contract and tick specifications from your broker.</span></div>
       <div className="form-grid"><div className="field"><label>Instrument</label><select value={symbol} onChange={e=>setSymbol(e.target.value)}>{['EURUSD','GBPUSD','USDJPY','XAUUSD','US30','BTCUSD','AUDUSD','USDCAD','NZDUSD'].map(v=><option key={v}>{v}</option>)}</select></div><div className="field"><label>Direction</label><select value={direction} onChange={e=>setDirection(e.target.value)}><option>BUY</option><option>SELL</option></select></div>
       {fields.map(([label,value,setter])=><div className="field" key={label}><label>{label}</label><input type="number" step="any" min="0" value={value} onChange={e=>setter(e.target.value)} placeholder="Enter value"/></div>)}</div>
@@ -2970,7 +2991,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <BrokerConnectionsPage/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <BrokerConnectionsPage/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
