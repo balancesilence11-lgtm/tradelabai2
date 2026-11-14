@@ -630,3 +630,21 @@ export class DerivClient {
 const derivClient = new DerivClient();
 
 export default derivClient;
+async getProfitTable(limit = 100) {
+  if (!this.connected || !this.authorised) {
+    throw new Error("Deriv account is not connected.");
+  }
+
+  const response = await this.send({
+    profit_table: 1,
+    description: 1,
+    limit: Math.min(Math.max(Number(limit) || 100, 1), 500),
+    sort: "DESC"
+  });
+
+  if (response.error) {
+    throw new Error(response.error.message || "Unable to retrieve trade history.");
+  }
+
+  return response.profit_table?.transactions || [];
+}
