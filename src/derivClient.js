@@ -626,10 +626,6 @@ export class DerivClient {
 /* =========================================
    SHARED CLIENT INSTANCE
 ========================================= */
-
-const derivClient = new DerivClient();
-
-export default derivClient;
 async getProfitTable(limit = 100) {
   if (!this.connected || !this.authorised) {
     throw new Error("Deriv account is not connected.");
@@ -643,8 +639,13 @@ async getProfitTable(limit = 100) {
   });
 
   if (response.error) {
-    throw new Error(response.error.message || "Unable to retrieve trade history.");
+    throw new Error(
+      response.error.message || "Unable to retrieve trade history."
+    );
   }
 
   return response.profit_table?.transactions || [];
 }
+
+
+export default derivClient;
