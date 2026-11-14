@@ -5,14 +5,17 @@
 ========================================= */
 
 const API_BASE = "/api/deriv";
+
 const MAX_DEMO_STAKE = 10;
 const CONNECTION_TIMEOUT = 15000;
+const REQUEST_TIMEOUT = 15000;
 
 export class DerivClient {
   constructor() {
     this.socket = null;
     this.connected = false;
     this.authorised = false;
+
     this.accountId = null;
     this.accountType = null;
     this.currency = null;
@@ -21,7 +24,11 @@ export class DerivClient {
     this.subscriptions = new Map();
     this.pendingRequests = new Map();
     this.requestId = 0;
+
     this.listeners = new Map();
+
+    // Prevent duplicate purchases using the same proposal.
+    this.usedProposalIds = new Set();
   }
 
   /* =====================================
@@ -75,7 +82,7 @@ export class DerivClient {
     try {
       data = await response.json();
     } catch {
-      throw new Error("Invalid response from TradeLab server.");
+      throw new Error("Invalid response from TradeLab server");
     }
 
     if (!response.ok) {
@@ -106,10 +113,14 @@ export class DerivClient {
   ===================================== */
 
   async connect(accountId) {
+    if (!accountId) {
+      throw new Error("A Deriv account must be selected");
+    }
+
     if (
       this.connected &&
       this.accountId === accountId &&
-      this.socket?.readyState === WebSocket.OPEN
+      this.accountType === "demo"
     ) {
       return true;
     }
@@ -134,15 +145,31 @@ export class DerivClient {
       throw new Error("Only demo accounts are permitted");
     }
 
+    // Validate the returned WebSocket address.
+    let wsUrl;
+
+    try {
+      wsUrl = new URL(result.websocket_url);
+    } catch {
+      throw new Error("Invalid Deriv WebSocket URL");
+    }
+
+    if (
+      wsUrl.protocol !== "wss:" ||
+      wsUrl.hostname !== "api.derivws.com"
+    ) {
+      throw new Error("Untrusted Deriv WebSocket address");
+    }
+
     this.accountId = accountId;
-    this.accountType = result.account_type;
+    this.accountType = "demo";
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+
       const socket = new WebSocket(result.websocket_url);
 
       this.socket = socket;
-
-      let settled = false;
 
       const timeout = setTimeout(() => {
         if (settled) return;
@@ -154,9 +181,13 @@ export class DerivClient {
       }, CONNECTION_TIMEOUT);
 
       socket.onopen = () => {
+        if (settled) return;
+
         clearTimeout(timeout);
 
         this.connected = true;
+
+        // The OTP URL establishes the authenticated session.
         this.authorised = true;
 
         settled = true;
@@ -174,14 +205,14 @@ export class DerivClient {
       };
 
       socket.onerror = () => {
-        clearTimeout(timeout);
-
         this.emit("error", {
           message: "Deriv WebSocket connection error"
         });
 
         if (!settled) {
+          clearTimeout(timeout);
           settled = true;
+
           reject(new Error("Unable to connect to Deriv"));
         }
       };
@@ -221,10 +252,14 @@ export class DerivClient {
         message.error.message || "Deriv API error"
       );
 
-      const pending = this.pendingRequests.get(message.req_id);
+      const pending = this.pendingRequests.get(
+        message.req_id
+      );
 
       if (pending) {
+        clearTimeout(pending.timeout);
         pending.reject(error);
+
         this.pendingRequests.delete(message.req_id);
       }
 
@@ -236,11 +271,16 @@ export class DerivClient {
       return;
     }
 
+    // Resolve request-response calls.
     if (message.req_id) {
-      const pending = this.pendingRequests.get(message.req_id);
+      const pending = this.pendingRequests.get(
+        message.req_id
+      );
 
       if (pending) {
+        clearTimeout(pending.timeout);
         pending.resolve(message);
+
         this.pendingRequests.delete(message.req_id);
       }
     }
@@ -248,11 +288,11 @@ export class DerivClient {
     if (message.msg_type === "authorize") {
       this.authorised = true;
 
-      this.currency = message.authorize?.currency || null;
+      this.currency =
+        message.authorize?.currency || this.currency;
 
-      this.balance = Number(
-        message.authorize?.balance ?? 0
-      );
+      this.balance =
+        Number(message.authorize?.balance ?? this.balance ?? 0);
 
       this.emit("authorised", message.authorize);
     }
@@ -261,7 +301,9 @@ export class DerivClient {
       const balance = message.balance;
 
       this.balance = Number(balance?.balance ?? 0);
-      this.currency = balance?.currency || this.currency;
+
+      this.currency =
+        balance?.currency || this.currency;
 
       this.emit("balance", balance);
     }
@@ -329,9 +371,22 @@ export class DerivClient {
     const reqId = ++this.requestId;
 
     return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingRequests.get(reqId);
+
+        if (pending) {
+          this.pendingRequests.delete(reqId);
+
+          pending.reject(
+            new Error("Deriv request timed out")
+          );
+        }
+      }, REQUEST_TIMEOUT);
+
       this.pendingRequests.set(reqId, {
         resolve,
-        reject
+        reject,
+        timeout
       });
 
       try {
@@ -342,27 +397,16 @@ export class DerivClient {
           })
         );
       } catch (error) {
+        clearTimeout(timeout);
         this.pendingRequests.delete(reqId);
         reject(error);
-        return;
       }
-
-      setTimeout(() => {
-        const pending = this.pendingRequests.get(reqId);
-
-        if (pending) {
-          this.pendingRequests.delete(reqId);
-
-          pending.reject(
-            new Error("Deriv request timed out")
-          );
-        }
-      }, CONNECTION_TIMEOUT);
     });
   }
 
   rejectPending(error) {
     for (const pending of this.pendingRequests.values()) {
+      clearTimeout(pending.timeout);
       pending.reject(error);
     }
 
@@ -376,26 +420,11 @@ export class DerivClient {
   async authorise() {
     this.requireConnected();
 
-    if (this.authorised) {
-      return {
-        account: this.accountId,
-        currency: this.currency
-      };
-    }
-
-    const result = await this.send({
-      authorize: 1
-    });
-
-    if (!result.authorize) {
-      throw new Error("Deriv authorisation failed");
-    }
-
+    // OTP authentication is already established
+    // when the authenticated WebSocket opens.
     this.authorised = true;
 
-    this.currency = result.authorize.currency || null;
-
-    return result.authorize;
+    return true;
   }
 
   /* =====================================
@@ -410,7 +439,12 @@ export class DerivClient {
       subscribe: subscribe ? 1 : 0
     });
 
-    return result.balance;
+    const balance = result.balance;
+
+    this.balance = Number(balance?.balance ?? 0);
+    this.currency = balance?.currency || this.currency;
+
+    return balance;
   }
 
   /* =====================================
@@ -428,7 +462,7 @@ export class DerivClient {
   }
 
   /* =====================================
-     ACCOUNT TRANSACTION STATEMENT
+     TRADE HISTORY
   ===================================== */
 
   async getStatement(limit = 100) {
@@ -437,18 +471,11 @@ export class DerivClient {
     const result = await this.send({
       statement: 1,
       description: 1,
-      limit: Math.min(
-        500,
-        Math.max(1, Number(limit) || 100)
-      )
+      limit: Math.min(500, Math.max(1, Number(limit) || 100))
     });
 
     return result.statement?.transactions || [];
   }
-
-  /* =====================================
-     CLOSED TRADE HISTORY
-  ===================================== */
 
   async getProfitTable(limit = 100) {
     this.requireAuthorised();
@@ -456,10 +483,7 @@ export class DerivClient {
     const result = await this.send({
       profit_table: 1,
       description: 1,
-      limit: Math.min(
-        500,
-        Math.max(1, Number(limit) || 100)
-      ),
+      limit: Math.min(500, Math.max(1, Number(limit) || 100)),
       sort: "DESC"
     });
 
@@ -473,8 +497,8 @@ export class DerivClient {
   async subscribeTicks(symbol) {
     this.requireConnected();
 
-    if (!symbol) {
-      throw new Error("Market symbol is required");
+    if (!/^[A-Za-z0-9_]+$/.test(symbol)) {
+      throw new Error("Invalid Deriv market symbol");
     }
 
     const result = await this.send({
@@ -483,6 +507,20 @@ export class DerivClient {
     });
 
     return result.tick;
+  }
+
+  /* =====================================
+     ACTIVE MARKET SYMBOLS
+  ===================================== */
+
+  async getActiveSymbols() {
+    this.requireConnected();
+
+    const result = await this.send({
+      active_symbols: "brief"
+    });
+
+    return result.active_symbols || [];
   }
 
   /* =====================================
@@ -510,10 +548,7 @@ export class DerivClient {
       );
     }
 
-    const allowedContracts = [
-      "CALL",
-      "PUT"
-    ];
+    const allowedContracts = ["CALL", "PUT"];
 
     if (!allowedContracts.includes(contractType)) {
       throw new Error("Unsupported contract type");
@@ -523,16 +558,43 @@ export class DerivClient {
       throw new Error("Invalid market symbol");
     }
 
+    const validUnits = ["s", "m", "h", "d", "t"];
+
+    if (!validUnits.includes(durationUnit)) {
+      throw new Error("Invalid contract duration unit");
+    }
+
+    const durationValue = Number(duration);
+
+    if (
+      !Number.isInteger(durationValue) ||
+      durationValue < 1
+    ) {
+      throw new Error("Invalid contract duration");
+    }
+
+    if (!this.currency) {
+      throw new Error(
+        "Account currency is unavailable. Refresh account balance first."
+      );
+    }
+
     const result = await this.send({
       proposal: 1,
       amount,
       basis: "stake",
       contract_type: contractType,
       currency: this.currency,
-      duration,
+      duration: durationValue,
       duration_unit: durationUnit,
+
+      // Deriv requires underlying_symbol.
       underlying_symbol: symbol
     });
+
+    if (!result.proposal?.id) {
+      throw new Error("Deriv did not return a valid proposal");
+    }
 
     return result.proposal;
   }
@@ -558,22 +620,48 @@ export class DerivClient {
       throw new Error("Valid proposal ID required");
     }
 
-    const amount = Number(price);
-
-    if (
-      !Number.isFinite(amount) ||
-      amount <= 0 ||
-      amount > MAX_DEMO_STAKE
-    ) {
-      throw new Error("Invalid demo purchase amount");
+    if (this.usedProposalIds.has(String(proposalId))) {
+      throw new Error(
+        "This proposal has already been used. Request a new proposal."
+      );
     }
 
-    const result = await this.send({
-      buy: proposalId,
-      price: amount
-    });
+    const maximumPrice = Number(price);
 
-    return result.buy;
+    if (
+      !Number.isFinite(maximumPrice) ||
+      maximumPrice <= 0 ||
+      maximumPrice > MAX_DEMO_STAKE
+    ) {
+      throw new Error(
+        `Maximum demo purchase price is ${MAX_DEMO_STAKE}`
+      );
+    }
+
+    // Lock the proposal before sending the purchase request.
+    // This prevents accidental repeat purchases.
+    this.usedProposalIds.add(String(proposalId));
+
+    try {
+      const result = await this.send({
+        buy: String(proposalId),
+        price: maximumPrice
+      });
+
+      if (!result.buy?.contract_id) {
+        throw new Error(
+          "Deriv did not confirm the contract purchase"
+        );
+      }
+
+      this.emit("buy", result.buy);
+
+      return result.buy;
+    } catch (error) {
+      // Do not unlock the proposal automatically.
+      // A timeout can occur after Deriv has processed an order.
+      throw error;
+    }
   }
 
   /* =====================================
@@ -601,7 +689,9 @@ export class DerivClient {
   async forgetSubscription(subscriptionId) {
     this.requireConnected();
 
-    if (!subscriptionId) return false;
+    if (!subscriptionId) {
+      return false;
+    }
 
     await this.send({
       forget: subscriptionId
@@ -662,13 +752,12 @@ export class DerivClient {
   ===================================== */
 
   disconnect() {
-    if (this.socket) {
-      this.socket.close();
-    }
+    const socket = this.socket;
 
     this.socket = null;
     this.connected = false;
     this.authorised = false;
+
     this.accountId = null;
     this.accountType = null;
     this.currency = null;
@@ -679,6 +768,14 @@ export class DerivClient {
     this.rejectPending(
       new Error("Deriv client disconnected")
     );
+
+    if (
+      socket &&
+      socket.readyState !== WebSocket.CLOSED &&
+      socket.readyState !== WebSocket.CLOSING
+    ) {
+      socket.close();
+    }
 
     this.emit("disconnected", {});
   }
