@@ -1,16 +1,95 @@
 import React, { useEffect, useRef, useState } from "react";
-import derivClient from "./derivClient";
+import DerivClient from "./derivClient";
 
 const MAX_STAKE = 10;
 
-const money = (value, currency = "USD") =>
-  `${Number(value || 0).toLocaleString(undefined, {
+const SYMBOLS = [
+  { value: "frxEURUSD", label: "EUR/USD" },
+  { value: "frxGBPUSD", label: "GBP/USD" },
+  { value: "frxUSDJPY", label: "USD/JPY" },
+  { value: "frxUSDCHF", label: "USD/CHF" },
+  { value: "frxUSDCAD", label: "USD/CAD" },
+  { value: "frxAUDUSD", label: "AUD/USD" },
+  { value: "frxNZDUSD", label: "NZD/USD" },
+  { value: "frxEURGBP", label: "EUR/GBP" },
+  { value: "frxEURJPY", label: "EUR/JPY" },
+  { value: "frxGBPJPY", label: "GBP/JPY" },
+  { value: "R_10", label: "Volatility 10" },
+  { value: "R_25", label: "Volatility 25" },
+  { value: "R_50", label: "Volatility 50" },
+  { value: "R_75", label: "Volatility 75" },
+  { value: "R_100", label: "Volatility 100" }
+];
+
+const panelStyle = {
+  color: "#e7edf7",
+  width: "100%",
+  display: "grid",
+  gap: 18
+};
+
+const cardStyle = {
+  background: "#111c2d",
+  border: "1px solid #26364d",
+  borderRadius: 14,
+  padding: 18
+};
+
+const inputStyle = {
+  width: "100%",
+  background: "#0b1422",
+  color: "#e7edf7",
+  border: "1px solid #34445c",
+  borderRadius: 8,
+  padding: "11px 12px",
+  outline: "none",
+  boxSizing: "border-box"
+};
+
+const buttonStyle = {
+  border: 0,
+  borderRadius: 8,
+  padding: "11px 16px",
+  fontWeight: 700,
+  cursor: "pointer"
+};
+
+const money = (value, currency = "USD") => {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) return "—";
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
-  })} ${currency}`;
+  }).format(number);
+};
 
-export default function DerivLivePanel() {
-  const [status, setStatus] = useState("Checking connection");
+function getAccountId(account) {
+  return (
+    account?.account_id ||
+    account?.id ||
+    account?.loginid ||
+    ""
+  );
+}
+
+function getAccountLabel(account) {
+  const id = getAccountId(account);
+
+  return [
+    id,
+    account?.currency || "USD",
+    "DEMO"
+  ].filter(Boolean).join(" · ");
+}
+
+function DerivLivePanel() {
+  const clientRef = useRef(null);
+
+  const [status, setStatus] = useState("disconnected");
   const [accounts, setAccounts] = useState([]);
   const [accountId, setAccountId] = useState(
     () => localStorage.getItem("tradelab_deriv_selected_account") || ""
@@ -19,589 +98,635 @@ export default function DerivLivePanel() {
   const [balance, setBalance] = useState(null);
   const [portfolio, setPortfolio] = useState([]);
   const [history, setHistory] = useState([]);
-  const [markets, setMarkets] = useState([]);
-  const [symbol, setSymbol] = useState("");
+
+  const [symbol, setSymbol] = useState("frxEURUSD");
   const [tick, setTick] = useState(null);
 
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  // Demo execution state
   const [stake, setStake] = useState("1");
-  const [duration, setDuration] = useState("5");
   const [contractType, setContractType] = useState("CALL");
+  const [duration, setDuration] = useState("5");
+  const [durationUnit, setDurationUnit] = useState("m");
+
   const [proposal, setProposal] = useState(null);
-  const [orderLoading, setOrderLoading] = useState(false);
   const [lastOrder, setLastOrder] = useState(null);
   const [monitoredContract, setMonitoredContract] = useState(null);
 
-  const clientRef = useRef(derivClient);
-  const client = clientRef.current;
+  const [loading, setLoading] = useState(false);
+  const [proposalLoading, setProposalLoading] = useState(false);
+  const [orderLoading, setOrderLoading] = useState(false);
+
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const connected = status === "connected";
+
+  const currency =
+    accounts.find(a => getAccountId(a) === accountId)?.currency ||
+    balance?.currency ||
+    "USD";
+
+  /* ======================================================
+     CLIENT INITIALIZATION
+     ====================================================== */
 
   useEffect(() => {
-    const unsubscribers = [
-      client.on("balance", data => setBalance(data)),
-      client.on("portfolio", data => setPortfolio(data || [])),
-      client.on("statement", data => setHistory(data || [])),
-      client.on("profit_table", data => setHistory(data || [])),
-      client.on("tick", data => setTick(data)),
-      client.on("contract", data => {
-        setMonitoredContract(data || null);
+    const client = new DerivClient({
+      onStatus: event => {
+        setStatus(event.state || "disconnected");
 
-        if (data?.is_sold) {
-          refreshAccount();
+        if (event.state === "error") {
+          setError(event.error || "Deriv connection error.");
         }
-      }),
-      client.on("buy", data => setLastOrder(data)),
-      client.on("disconnected", () => {
-        setStatus("Disconnected");
-        setProposal(null);
-      }),
-      client.on("error", data =>
-        setError(data.message || "Deriv connection error")
-      )
-    ];
+
+        if (event.state === "disconnected") {
+          setBalance(null);
+          setPortfolio([]);
+          setTick(null);
+          setProposal(null);
+        }
+      },
+
+      onMessage: data => {
+        if (data.msg_type === "balance" && data.balance) {
+          setBalance(data.balance);
+        }
+
+        if (data.msg_type === "portfolio" && data.portfolio) {
+          setPortfolio(data.portfolio.contracts || []);
+        }
+
+        if (data.msg_type === "tick" && data.tick) {
+          setTick(data.tick);
+        }
+
+        if (
+          data.msg_type === "proposal_open_contract" &&
+          data.proposal_open_contract
+        ) {
+          const contract = data.proposal_open_contract;
+
+          setMonitoredContract(contract);
+
+          if (contract.is_sold) {
+            setNotice(
+              `Contract ${contract.contract_id} has settled.`
+            );
+
+            client.refreshAccount()
+              .then(snapshot => {
+                setBalance(snapshot.balance);
+                setPortfolio(snapshot.portfolio);
+              })
+              .catch(err => {
+                console.warn("Account refresh failed:", err);
+              });
+          }
+        }
+
+        if (data.error) {
+          setError(data.error.message || "Deriv API error.");
+        }
+      }
+    });
+
+    clientRef.current = client;
 
     loadAccounts();
 
     return () => {
-      unsubscribers.forEach(unsubscribe => unsubscribe());
       client.disconnect();
+      clientRef.current = null;
     };
   }, []);
 
+  /* ======================================================
+     ACCOUNT LOADING
+     ====================================================== */
+
   async function loadAccounts() {
+    setLoading(true);
+    setError("");
+
     try {
-      setLoading(true);
-      setError("");
+      const list = await clientRef.current.getAccounts();
 
-      const result = await client.getStatus();
+      const demoAccounts = list.filter(account => {
+        const type = String(
+          account.account_type ||
+          account.type ||
+          ""
+        ).toLowerCase();
 
-      if (!result.connected) {
-        setStatus("Deriv not connected");
-        setAccounts([]);
-        return;
-      }
-
-      const retrieved = await client.getAccounts();
-      setAccounts(retrieved);
-
-      const saved = retrieved.find(
-        account => account.account_id === accountId
-      );
-
-      const demo = retrieved.find(
-        account => account.account_type === "demo"
-      );
-
-      const selected = saved || demo;
-
-      if (selected) {
-        setAccountId(selected.account_id);
-
-        localStorage.setItem(
-          "tradelab_deriv_selected_account",
-          selected.account_id
+        return (
+          type === "demo" ||
+          type === "virtual" ||
+          account.is_virtual === 1 ||
+          account.is_virtual === true
         );
-      }
+      });
 
-      setStatus("OAuth connected");
+      setAccounts(demoAccounts);
+
+      if (
+        accountId &&
+        !demoAccounts.some(a => getAccountId(a) === accountId)
+      ) {
+        setAccountId("");
+        localStorage.removeItem("tradelab_deriv_selected_account");
+      }
     } catch (err) {
-      setError(err.message);
-      setStatus("Connection error");
+      setError(err.message || "Unable to load Deriv accounts.");
     } finally {
       setLoading(false);
     }
   }
+
+  /* ======================================================
+     CONNECT ACCOUNT
+     ====================================================== */
 
   async function connectAccount() {
     if (!accountId) {
-      setError("Select a Deriv demo account first.");
+      setError("Select a demo account first.");
       return;
     }
 
-    const selected = accounts.find(
-      account => account.account_id === accountId
-    );
-
-    if (!selected || selected.account_type !== "demo") {
-      setError("Only demo accounts are enabled.");
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError("");
-
-      setBalance(null);
-      setPortfolio([]);
-      setHistory([]);
-      setTick(null);
-      setProposal(null);
-      setLastOrder(null);
-      setMonitoredContract(null);
-
-      await client.connect(accountId);
-
-      setStatus("Connected to Deriv demo");
-
-      const balanceData = await client.getBalance(true);
-      setBalance(balanceData);
-
-      setPortfolio(await client.getPortfolio());
-      setHistory(await client.getProfitTable(100));
-
-      const available = await client.getActiveSymbols();
-
-      setMarkets(available);
-
-      const preferred = available.find(item =>
-        /EUR\/USD|EURUSD/i.test(
-          `${item.display_name || ""} ${item.symbol || ""}`
-        )
-      );
-
-      if (preferred) {
-        setSymbol(preferred.symbol);
-        await client.subscribeTicks(preferred.symbol);
-      }
-    } catch (err) {
-      setStatus("Connection failed");
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function changeMarket(value) {
-    setSymbol(value);
-    setTick(null);
+    setLoading(true);
+    setError("");
+    setNotice("");
     setProposal(null);
 
     try {
-      if (client.connected) {
-        await client.subscribeTicks(value);
-      }
+      const result = await clientRef.current.connect(accountId);
+
+      setBalance(result.balance);
+      setPortfolio(result.portfolio || []);
+
+      localStorage.setItem(
+        "tradelab_deriv_selected_account",
+        accountId
+      );
+
+      await loadHistory();
+
+      setNotice("Deriv demo account connected successfully.");
     } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function refreshAccount() {
-    if (!client.connected) {
-      await connectAccount();
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError("");
-
-      const updatedBalance = await client.getBalance(true);
-      setBalance(updatedBalance);
-
-      setPortfolio(await client.getPortfolio());
-      setHistory(await client.getProfitTable(100));
-    } catch (err) {
-      setError(err.message);
+      setError(err.message || "Unable to connect Deriv account.");
     } finally {
       setLoading(false);
     }
   }
 
+  /* ======================================================
+     DISCONNECT
+     ====================================================== */
+
   function disconnectAccount() {
-    client.disconnect();
+    clientRef.current?.disconnect();
 
     setBalance(null);
     setPortfolio([]);
     setHistory([]);
     setTick(null);
     setProposal(null);
-    setLastOrder(null);
     setMonitoredContract(null);
+    setLastOrder(null);
 
-    setStatus("Disconnected");
+    setNotice("Deriv account disconnected.");
+    setError("");
   }
 
-  /* =====================================
-     CREATE TRADE PROPOSAL
-  ===================================== */
+  /* ======================================================
+     MARKET SUBSCRIPTION
+     ====================================================== */
 
-  async function requestProposal() {
+  async function changeMarket(nextSymbol) {
+    setSymbol(nextSymbol);
+    setTick(null);
+    setProposal(null);
+
+    if (!connected) return;
+
     try {
-      setError("");
-      setProposal(null);
-
-      if (!client.connected) {
-        throw new Error("Connect your demo account first.");
-      }
-
-      if (!symbol) {
-        throw new Error("Select a Deriv market first.");
-      }
-
-      const amount = Number(stake);
-
-      if (
-        !Number.isFinite(amount) ||
-        amount <= 0 ||
-        amount > MAX_STAKE
-      ) {
-        throw new Error(
-          `Demo stake must be between 0 and ${MAX_STAKE}.`
-        );
-      }
-
-      setOrderLoading(true);
-
-      const result = await client.createProposal({
-        symbol,
-        contractType,
-        stake: amount,
-        duration: Number(duration),
-        durationUnit: "m"
-      });
-
-      setProposal(result);
+      await clientRef.current.subscribeTicks(nextSymbol);
     } catch (err) {
       setError(err.message);
-    } finally {
-      setOrderLoading(false);
     }
   }
 
-  /* =====================================
-     EXPLICIT DEMO PURCHASE
-  ===================================== */
+  useEffect(() => {
+    if (!connected) return;
 
-  async function confirmDemoPurchase() {
-    if (!proposal?.id) {
-      setError("Request a valid proposal first.");
-      return;
-    }
+    changeMarket(symbol);
 
-    const askPrice = Number(proposal.ask_price);
+    // Existing subscriptions are cleared when disconnected.
+    // Market changes create a new tick subscription.
+  }, [connected]);
 
-    if (!Number.isFinite(askPrice) || askPrice <= 0) {
-      setError("Invalid proposal purchase price.");
-      return;
-    }
+  /* ======================================================
+     ACCOUNT REFRESH
+     ====================================================== */
 
-    const confirmation = window.confirm(
-      `CONFIRM DEMO TRADE\n\n` +
-      `Market: ${symbol}\n` +
-      `Direction: ${contractType}\n` +
-      `Stake: ${money(stake, balance?.currency || "USD")}\n` +
-      `Purchase price: ${money(askPrice, balance?.currency || "USD")}\n` +
-      `Duration: ${duration} minutes\n\n` +
-      `This is a DEMO account order. Continue?`
-    );
+  async function refreshAccount() {
+    if (!connected) return;
 
-    if (!confirmation) return;
+    setLoading(true);
+    setError("");
 
     try {
-      setOrderLoading(true);
-      setError("");
+      const snapshot = await clientRef.current.refreshAccount();
 
-      const result = await client.buyDemoContract(
+      setBalance(snapshot.balance);
+      setPortfolio(snapshot.portfolio);
+
+      await loadHistory();
+
+      setNotice("Account information refreshed.");
+    } catch (err) {
+      setError(err.message || "Account refresh failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /* ======================================================
+     TRADE HISTORY
+     ====================================================== */
+
+  async function loadHistory() {
+    if (!clientRef.current?.connected) return;
+
+    try {
+      const result = await clientRef.current.getProfitTable({
+        limit: 50,
+        offset: 0
+      });
+
+      const transactions =
+        result.transactions ||
+        result.profit_table ||
+        [];
+
+      setHistory(
+        Array.isArray(transactions) ? transactions : []
+      );
+    } catch (err) {
+      console.warn("Profit table unavailable:", err.message);
+    }
+  }
+
+  /* ======================================================
+     REQUEST PROPOSAL
+     ====================================================== */
+
+  async function requestProposal() {
+    if (!connected) {
+      setError("Connect your demo account first.");
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setProposal(null);
+
+    const amount = Number(stake);
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      amount > MAX_STAKE
+    ) {
+      setError(`Stake must be between 0 and ${MAX_STAKE}.`);
+      return;
+    }
+
+    setProposalLoading(true);
+
+    try {
+      const quote = await clientRef.current.getProposal({
+        symbol,
+        contractType,
+        amount,
+        currency,
+        duration: Number(duration),
+        durationUnit
+      });
+
+      setProposal(quote);
+
+      setNotice("Proposal received. Review the quote before confirming.");
+    } catch (err) {
+      setError(err.message || "Unable to obtain proposal.");
+    } finally {
+      setProposalLoading(false);
+    }
+  }
+
+  /* ======================================================
+     CONFIRM AND BUY DEMO CONTRACT
+     ====================================================== */
+
+  async function executeDemoTrade() {
+    if (!proposal) {
+      setError("Request a proposal before placing an order.");
+      return;
+    }
+
+    if (!connected) {
+      setError("Demo account is not connected.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      [
+        "CONFIRM DEMO TRADE",
+        "",
+        `Market: ${symbol}`,
+        `Direction: ${contractType === "CALL" ? "RISE" : "FALL"}`,
+        `Stake: ${money(proposal.amount, currency)}`,
+        `Potential payout: ${money(proposal.payout, currency)}`,
+        `Duration: ${duration} ${durationUnit}`,
+        "",
+        "This will place a DEMO trade on Deriv.",
+        "Do you want to continue?"
+      ].join("\n")
+    );
+
+    if (!confirmed) return;
+
+    setOrderLoading(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const result = await clientRef.current.buyDemoProposal(
         proposal.id,
-        askPrice,
-        true
+        proposal.ask_price,
+        { confirmed: true }
       );
 
       setLastOrder(result);
       setProposal(null);
 
       if (result.contract_id) {
-        try {
-          await client.monitorContract(result.contract_id);
-        } catch (monitorError) {
-          console.warn(
-            "Contract monitoring could not start:",
-            monitorError.message
-          );
-        }
+        setMonitoredContract({
+          contract_id: result.contract_id,
+          status: "Monitoring",
+          is_sold: 0
+        });
+
+        await clientRef.current.monitorContract(
+          result.contract_id
+        );
       }
 
-      setError("");
+      if (result.accountSnapshot) {
+        setBalance(result.accountSnapshot.balance);
+        setPortfolio(result.accountSnapshot.portfolio);
+      }
 
-      await refreshAccount();
+      await loadHistory();
+
+      setNotice(
+        `Demo order successfully placed. Contract ID: ${result.contract_id}`
+      );
     } catch (err) {
-      setError(err.message);
+      setError(err.message || "Demo order failed.");
     } finally {
       setOrderLoading(false);
     }
   }
 
-  const currency = balance?.currency || "USD";
-
-  const openProfit = portfolio.reduce(
-    (total, item) => total + Number(item.profit || 0),
-    0
-  );
-
-  const estimatedEquity =
-    balance?.balance != null
-      ? Number(balance.balance) + openProfit
-      : null;
-
-  const inputStyle = {
-    width: "100%",
-    padding: "11px",
-    borderRadius: "8px",
-    border: "1px solid #334155",
-    background: "#0f172a",
-    color: "#fff",
-    marginTop: "7px"
-  };
+  /* ======================================================
+     RENDER
+     ====================================================== */
 
   return (
-    <div>
-      <div className="welcome">
+    <div style={panelStyle}>
+
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 12
+      }}>
         <div>
-          <h1>Deriv Live Account</h1>
-          <div className="muted">
-            Account synchronisation, live market monitoring and demo execution
-          </div>
+          <h2 style={{ margin: 0 }}>Deriv Live Trading</h2>
+          <p style={{ color: "#91a3bc", margin: "6px 0 0" }}>
+            Authenticated demo account · Market data · Rise/Fall execution
+          </p>
         </div>
 
-        <span className="demo-badge">
-          {status.toUpperCase()}
+        <span style={{
+          padding: "8px 12px",
+          borderRadius: 20,
+          background: connected ? "#103d32" : "#342b1b",
+          color: connected ? "#35d6a2" : "#f0bb65",
+          fontSize: 12,
+          fontWeight: 800
+        }}>
+          ● {connected ? "CONNECTED — DEMO" : status.toUpperCase()}
         </span>
       </div>
 
       {error && (
-        <div
-          className="card"
-          style={{ marginBottom: 15, color: "#fb7185" }}
-        >
+        <div role="alert" style={{
+          ...cardStyle,
+          borderColor: "#a94353",
+          color: "#ff8997"
+        }}>
           {error}
+        </div>
+      )}
+
+      {notice && (
+        <div role="status" style={{
+          ...cardStyle,
+          borderColor: "#1d8c70",
+          color: "#50d6aa"
+        }}>
+          {notice}
         </div>
       )}
 
       {/* ACCOUNT CONNECTION */}
 
-      <div className="card" style={{ marginBottom: 18 }}>
-        <div className="card-heading">
-          <h3>Account Connection</h3>
-          <span className="tag">DEMO ONLY</span>
-        </div>
+      <section style={cardStyle}>
+        <h3 style={{ marginTop: 0 }}>Demo Account Connection</h3>
 
-        <div className="field">
-          <label>Select Deriv Demo Account</label>
-
-          <select
-            style={inputStyle}
-            value={accountId}
-            onChange={event => {
-              setAccountId(event.target.value);
-
-              localStorage.setItem(
-                "tradelab_deriv_selected_account",
-                event.target.value
-              );
-            }}
-          >
-            <option value="">Select account</option>
-
-            {accounts
-              .filter(account => account.account_type === "demo")
-              .map(account => (
-                <option
-                  key={account.account_id}
-                  value={account.account_id}
-                >
-                  {account.account_id}
-                </option>
-              ))}
-          </select>
-        </div>
-
-        <div className="trade-buttons">
-          <button
-            className="execute-btn"
-            onClick={connectAccount}
-            disabled={loading || !accountId}
-          >
-            {loading ? "Connecting..." : "Connect Demo Account"}
-          </button>
-
-          <button
-            className="period-btn"
-            onClick={refreshAccount}
-            disabled={loading}
-          >
-            Refresh Account
-          </button>
-
-          <button
-            className="period-btn"
-            onClick={loadAccounts}
-            disabled={loading}
-          >
-            Refresh Account List
-          </button>
-
-          <button
-            className="period-btn"
-            onClick={disconnectAccount}
-          >
-            Disconnect
-          </button>
-        </div>
-      </div>
-
-      {/* ACCOUNT STATISTICS */}
-
-      <div className="stats-grid">
-        <div className="card">
-          <div className="stat-label">Account Balance</div>
-          <div className="stat-value">
-            {balance ? money(balance.balance, currency) : "—"}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="stat-label">Estimated Equity</div>
-          <div className="stat-value">
-            {estimatedEquity != null
-              ? money(estimatedEquity, currency)
-              : "—"}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="stat-label">Open Positions</div>
-          <div className="stat-value">{portfolio.length}</div>
-        </div>
-
-        <div className="card">
-          <div className="stat-label">Open Position P/L</div>
-          <div className="stat-value">
-            {money(openProfit, currency)}
-          </div>
-        </div>
-      </div>
-
-      {/* MARKET STREAM */}
-
-      <div className="dashboard-grid" style={{ marginTop: 18 }}>
-        <div className="card">
-          <div className="card-heading">
-            <h3>Live Market Stream</h3>
-
-            <span className="tag">
-              {tick ? "STREAMING" : "WAITING"}
-            </span>
-          </div>
-
-          <div className="field">
-            <label>Deriv Market</label>
+        <div style={{
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          alignItems: "end"
+        }}>
+          <div style={{ flex: "1 1 250px" }}>
+            <label style={{ display: "block", marginBottom: 8 }}>
+              Select Deriv demo account
+            </label>
 
             <select
               style={inputStyle}
-              value={symbol}
-              onChange={event => changeMarket(event.target.value)}
-              disabled={!markets.length || !client.connected}
+              value={accountId}
+              disabled={connected || loading}
+              onChange={event => setAccountId(event.target.value)}
             >
-              <option value="">Select market</option>
+              <option value="">Select demo account</option>
 
-              {markets.map(item => (
-                <option key={item.symbol} value={item.symbol}>
-                  {item.display_name || item.symbol}
+              {accounts.map(account => (
+                <option
+                  key={getAccountId(account)}
+                  value={getAccountId(account)}
+                >
+                  {getAccountLabel(account)}
                 </option>
               ))}
             </select>
           </div>
 
-          <div className="stat-value" style={{ marginTop: 15 }}>
-            {tick?.quote != null
-              ? Number(tick.quote).toLocaleString()
-              : "Waiting for market price"}
-          </div>
+          {!connected ? (
+            <button
+              style={{
+                ...buttonStyle,
+                background: "#087d69",
+                color: "#fff"
+              }}
+              disabled={loading || !accountId}
+              onClick={connectAccount}
+            >
+              {loading ? "Connecting..." : "Connect Demo Account"}
+            </button>
+          ) : (
+            <>
+              <button
+                style={{
+                  ...buttonStyle,
+                  background: "#263b55",
+                  color: "#fff"
+                }}
+                disabled={loading}
+                onClick={refreshAccount}
+              >
+                Refresh Account
+              </button>
 
-          <div className="muted">
-            {tick?.symbol || symbol || "No market selected"}
-          </div>
+              <button
+                style={{
+                  ...buttonStyle,
+                  background: "#92384b",
+                  color: "#fff"
+                }}
+                onClick={disconnectAccount}
+              >
+                Disconnect
+              </button>
+            </>
+          )}
+
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#263b55",
+              color: "#fff"
+            }}
+            onClick={loadAccounts}
+            disabled={loading || connected}
+          >
+            Reload Accounts
+          </button>
         </div>
 
-        <div className="card">
-          <div className="card-heading">
-            <h3>Connection Monitor</h3>
-          </div>
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 12,
+          marginBottom: 0
+        }}>
+          Only Deriv demo accounts are permitted. Real-money execution is disabled.
+        </p>
+      </section>
 
-          <div className="signal">
-            <span>OAuth connection</span>
-            <strong>{status}</strong>
-          </div>
+      {/* ACCOUNT SUMMARY */}
 
-          <div className="signal">
-            <span>WebSocket</span>
-            <strong>
-              {client.connected ? "Connected" : "Disconnected"}
-            </strong>
-          </div>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+        gap: 12
+      }}>
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>Account Balance</div>
+          <h2 style={{ marginBottom: 0 }}>
+            {balance
+              ? money(balance.balance, balance.currency)
+              : "—"}
+          </h2>
+        </div>
 
-          <div className="signal">
-            <span>Account type</span>
-            <strong>DEMO</strong>
-          </div>
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>Open Positions</div>
+          <h2 style={{ marginBottom: 0 }}>{portfolio.length}</h2>
+        </div>
 
-          <div className="signal">
-            <span>Real-money execution</span>
-            <strong>DISABLED</strong>
-          </div>
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>Current Market</div>
+          <h2 style={{ marginBottom: 0 }}>
+            {SYMBOLS.find(s => s.value === symbol)?.label || symbol}
+          </h2>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>Live Price</div>
+          <h2 style={{ marginBottom: 0 }}>
+            {tick?.quote !== undefined
+              ? Number(tick.quote).toFixed(5)
+              : "—"}
+          </h2>
         </div>
       </div>
 
-      {/* DEMO TRADING TERMINAL */}
+      {/* TRADE CONFIGURATION */}
 
-      <div className="card" style={{ marginTop: 18 }}>
-        <div className="card-heading">
-          <h3>Demo Trading Terminal</h3>
-          <span className="tag">MAX STAKE: $10</span>
-        </div>
+      <section style={cardStyle}>
+        <h3 style={{ marginTop: 0 }}>Trade Configuration</h3>
 
-        <div className="muted" style={{ marginBottom: 15 }}>
-          Request a price proposal, review the terms and explicitly confirm
-          before placing a demo order.
-        </div>
-
-        <div className="dashboard-grid">
-          <div className="field">
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
+          gap: 14
+        }}>
+          <div>
             <label>Market</label>
             <select
               style={inputStyle}
               value={symbol}
-              onChange={event => changeMarket(event.target.value)}
-              disabled={!client.connected}
+              disabled={!connected}
+              onChange={e => changeMarket(e.target.value)}
             >
-              <option value="">Select market</option>
-
-              {markets.map(item => (
-                <option key={item.symbol} value={item.symbol}>
-                  {item.display_name || item.symbol}
+              {SYMBOLS.map(item => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
                 </option>
               ))}
             </select>
           </div>
 
-          <div className="field">
-            <label>Trade Direction</label>
+          <div>
+            <label>Direction</label>
             <select
               style={inputStyle}
               value={contractType}
-              onChange={event => {
-                setContractType(event.target.value);
+              disabled={!connected}
+              onChange={e => {
+                setContractType(e.target.value);
                 setProposal(null);
               }}
             >
-              <option value="CALL">CALL / UP</option>
-              <option value="PUT">PUT / DOWN</option>
+              <option value="CALL">RISE</option>
+              <option value="PUT">FALL</option>
             </select>
           </div>
 
-          <div className="field">
+          <div>
             <label>Stake ({currency})</label>
             <input
               style={inputStyle}
@@ -610,301 +735,407 @@ export default function DerivLivePanel() {
               max={MAX_STAKE}
               step="0.01"
               value={stake}
-              onChange={event => {
-                setStake(event.target.value);
+              disabled={!connected}
+              onChange={e => {
+                setStake(e.target.value);
                 setProposal(null);
               }}
             />
           </div>
 
-          <div className="field">
+          <div>
             <label>Duration</label>
+            <input
+              style={inputStyle}
+              type="number"
+              min="1"
+              max="1440"
+              value={duration}
+              disabled={!connected}
+              onChange={e => {
+                setDuration(e.target.value);
+                setProposal(null);
+              }}
+            />
+          </div>
+
+          <div>
+            <label>Duration Unit</label>
             <select
               style={inputStyle}
-              value={duration}
-              onChange={event => {
-                setDuration(event.target.value);
+              value={durationUnit}
+              disabled={!connected}
+              onChange={e => {
+                setDurationUnit(e.target.value);
                 setProposal(null);
               }}
             >
-              <option value="1">1 minute</option>
-              <option value="2">2 minutes</option>
-              <option value="5">5 minutes</option>
-              <option value="10">10 minutes</option>
-              <option value="15">15 minutes</option>
-              <option value="30">30 minutes</option>
+              <option value="s">Seconds</option>
+              <option value="m">Minutes</option>
+              <option value="h">Hours</option>
+              <option value="d">Days</option>
             </select>
           </div>
         </div>
 
-        <div className="trade-buttons" style={{ marginTop: 15 }}>
-          <button
-            className="execute-btn"
-            onClick={requestProposal}
-            disabled={!client.connected || orderLoading || !symbol}
-          >
-            {orderLoading ? "Processing..." : "Get Price Proposal"}
-          </button>
+        <p style={{
+          color: "#f0bb65",
+          fontSize: 12
+        }}>
+          Maximum permitted demo stake: {money(MAX_STAKE, currency)} per proposal.
+        </p>
+
+        <button
+          style={{
+            ...buttonStyle,
+            background: "#087d69",
+            color: "#fff"
+          }}
+          disabled={!connected || proposalLoading}
+          onClick={requestProposal}
+        >
+          {proposalLoading ? "Requesting Quote..." : "Get Trade Proposal"}
+        </button>
+      </section>
+
+      {/* PROPOSAL PREVIEW */}
+
+      {proposal && (
+        <section style={{
+          ...cardStyle,
+          borderColor: "#087d69"
+        }}>
+          <h3 style={{ marginTop: 0 }}>Trade Proposal Preview</h3>
+
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
+            gap: 14
+          }}>
+            <div>
+              <small style={{ color: "#91a3bc" }}>Market</small>
+              <h3>{symbol}</h3>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Direction</small>
+              <h3>
+                {contractType === "CALL" ? "RISE" : "FALL"}
+              </h3>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Stake</small>
+              <h3>{money(proposal.amount, currency)}</h3>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Potential Payout</small>
+              <h3>{money(proposal.payout, currency)}</h3>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Potential Profit</small>
+              <h3 style={{ color: "#35d6a2" }}>
+                {money(
+                  Number(proposal.payout) - Number(proposal.amount),
+                  currency
+                )}
+              </h3>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Purchase Price</small>
+              <h3>{money(proposal.ask_price, currency)}</h3>
+            </div>
+          </div>
+
+          {proposal.longcode && (
+            <p style={{
+              color: "#91a3bc",
+              lineHeight: 1.6
+            }}>
+              {proposal.longcode}
+            </p>
+          )}
 
           <button
-            className="period-btn"
-            onClick={() => setProposal(null)}
-            disabled={!proposal || orderLoading}
-          >
-            Clear Proposal
-          </button>
-        </div>
-
-        {proposal && (
-          <div
-            className="card"
             style={{
-              marginTop: 18,
-              border: "1px solid #22c55e"
+              ...buttonStyle,
+              background: "#087d69",
+              color: "#fff"
             }}
+            disabled={orderLoading || !connected}
+            onClick={executeDemoTrade}
           >
-            <div className="card-heading">
-              <h3>Trade Proposal Preview</h3>
-              <span className="tag">REVIEW REQUIRED</span>
-            </div>
+            {orderLoading
+              ? "Placing Demo Order..."
+              : "Confirm & Place Demo Trade"}
+          </button>
 
-            <div className="signal">
-              <span>Market</span>
-              <strong>{symbol}</strong>
-            </div>
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#34445c",
+              color: "#fff",
+              marginLeft: 10
+            }}
+            onClick={() => setProposal(null)}
+          >
+            Cancel Proposal
+          </button>
+        </section>
+      )}
 
-            <div className="signal">
-              <span>Direction</span>
-              <strong>{contractType}</strong>
-            </div>
+      {/* LAST ORDER */}
 
-            <div className="signal">
-              <span>Stake</span>
-              <strong>{money(stake, currency)}</strong>
-            </div>
+      {lastOrder && (
+        <section style={cardStyle}>
+          <h3 style={{ marginTop: 0 }}>Latest Demo Order</h3>
 
-            <div className="signal">
-              <span>Purchase price</span>
-              <strong>
-                {money(proposal.ask_price, currency)}
-              </strong>
-            </div>
-
-            <div className="signal">
-              <span>Potential payout</span>
-              <strong>
-                {money(proposal.payout, currency)}
-              </strong>
-            </div>
-
-            <div className="signal">
-              <span>Duration</span>
-              <strong>{duration} minutes</strong>
-            </div>
-
-            <div className="signal">
-              <span>Proposal ID</span>
-              <strong>{proposal.id}</strong>
-            </div>
-
-            <button
-              className="execute-btn"
-              style={{
-                width: "100%",
-                marginTop: 18,
-                background: "#15803d"
-              }}
-              onClick={confirmDemoPurchase}
-              disabled={orderLoading}
-            >
-              {orderLoading
-                ? "Submitting..."
-                : "Confirm & Buy DEMO Contract"}
-            </button>
-
-            <div className="muted" style={{ marginTop: 10 }}>
-              No order is placed until you press the confirmation button
-              and approve the browser confirmation.
-            </div>
+          <div className="signal">
+            <span>Contract ID</span>
+            <strong>{lastOrder.contract_id}</strong>
           </div>
-        )}
 
-        {lastOrder && (
-          <div className="card" style={{ marginTop: 18 }}>
-            <h3>Last Demo Order</h3>
-
-            <div className="signal">
-              <span>Contract ID</span>
-              <strong>{lastOrder.contract_id || "—"}</strong>
-            </div>
-
-            <div className="signal">
-              <span>Purchase price</span>
-              <strong>
-                {money(lastOrder.buy_price, currency)}
-              </strong>
-            </div>
-
-            <div className="signal">
-              <span>Status</span>
-              <strong>Purchase acknowledged</strong>
-            </div>
+          <div className="signal">
+            <span>Purchase Price</span>
+            <strong>{money(lastOrder.buy_price, currency)}</strong>
           </div>
-        )}
 
-        {monitoredContract && (
-          <div className="card" style={{ marginTop: 18 }}>
-            <h3>Contract Monitor</h3>
+          <div className="signal">
+            <span>Potential Payout</span>
+            <strong>{money(lastOrder.payout, currency)}</strong>
+          </div>
+        </section>
+      )}
 
-            <div className="signal">
-              <span>Contract ID</span>
-              <strong>
-                {monitoredContract.contract_id || "—"}
-              </strong>
-            </div>
+      {/* CONTRACT MONITORING */}
 
-            <div className="signal">
-              <span>Current value</span>
-              <strong>
-                {money(monitoredContract.bid_price, currency)}
-              </strong>
-            </div>
+      {monitoredContract && (
+        <section style={cardStyle}>
+          <h3 style={{ marginTop: 0 }}>Contract Monitoring</h3>
 
+          <div className="signal">
+            <span>Contract ID</span>
+            <strong>{monitoredContract.contract_id}</strong>
+          </div>
+
+          <div className="signal">
+            <span>Status</span>
+            <strong>
+              {monitoredContract.is_sold
+                ? "SETTLED"
+                : "OPEN / MONITORING"}
+            </strong>
+          </div>
+
+          {monitoredContract.profit !== undefined && (
             <div className="signal">
               <span>Profit / Loss</span>
-              <strong>
+              <strong style={{
+                color: Number(monitoredContract.profit) >= 0
+                  ? "#35d6a2"
+                  : "#ff8997"
+              }}>
                 {money(monitoredContract.profit, currency)}
               </strong>
             </div>
+          )}
 
+          {monitoredContract.exit_tick !== undefined && (
             <div className="signal">
-              <span>Contract status</span>
-              <strong>
-                {monitoredContract.is_sold ? "CLOSED" : "OPEN"}
-              </strong>
+              <span>Exit Price</span>
+              <strong>{monitoredContract.exit_tick}</strong>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </section>
+      )}
 
       {/* OPEN POSITIONS */}
 
-      <div className="card" style={{ marginTop: 18 }}>
-        <div className="card-heading">
+      <section style={cardStyle}>
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center"
+        }}>
           <h3>Open Positions</h3>
 
-          <span className="muted">
-            {portfolio.length} positions
-          </span>
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#263b55",
+              color: "#fff"
+            }}
+            disabled={!connected || loading}
+            onClick={refreshAccount}
+          >
+            Refresh
+          </button>
         </div>
 
-        <div style={{ overflowX: "auto" }}>
-          <table>
-            <thead>
-              <tr>
-                <th>Contract</th>
-                <th>Type</th>
-                <th>Buy Price</th>
-                <th>Current Value</th>
-                <th>Profit / Loss</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {portfolio.length === 0 ? (
+        {portfolio.length === 0 ? (
+          <p style={{ color: "#91a3bc" }}>
+            No open positions returned by Deriv.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 550
+            }}>
+              <thead>
                 <tr>
-                  <td colSpan="5" className="empty">
-                    No open Deriv positions.
-                  </td>
+                  {["Contract", "Market", "Buy Price", "Current Value", "Profit"].map(label => (
+                    <th key={label} style={{
+                      textAlign: "left",
+                      padding: 10,
+                      borderBottom: "1px solid #34445c"
+                    }}>
+                      {label}
+                    </th>
+                  ))}
                 </tr>
-              ) : (
-                portfolio.map((item, index) => (
+              </thead>
+
+              <tbody>
+                {portfolio.map((item, index) => (
                   <tr key={item.contract_id || index}>
-                    <td>{item.contract_id || "—"}</td>
-                    <td>{item.contract_type || "—"}</td>
-                    <td>{money(item.buy_price, currency)}</td>
-                    <td>{money(item.bid_price, currency)}</td>
-                    <td>{money(item.profit, currency)}</td>
+                    <td style={{ padding: 10 }}>
+                      {item.contract_id}
+                    </td>
+
+                    <td style={{ padding: 10 }}>
+                      {item.underlying || item.symbol || "—"}
+                    </td>
+
+                    <td style={{ padding: 10 }}>
+                      {money(item.buy_price, currency)}
+                    </td>
+
+                    <td style={{ padding: 10 }}>
+                      {money(item.bid_price, currency)}
+                    </td>
+
+                    <td style={{
+                      padding: 10,
+                      color: Number(item.profit) >= 0
+                        ? "#35d6a2"
+                        : "#ff8997"
+                    }}>
+                      {money(item.profit, currency)}
+                    </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* TRADE HISTORY */}
+
+      <section style={cardStyle}>
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center"
+        }}>
+          <h3>Trade History</h3>
+
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#263b55",
+              color: "#fff"
+            }}
+            disabled={!connected}
+            onClick={loadHistory}
+          >
+            Refresh History
+          </button>
         </div>
-      </div>
 
-      {/* CLOSED TRADE HISTORY */}
-
-      <div className="card" style={{ marginTop: 18 }}>
-        <div className="card-heading">
-          <h3>Closed Trade History</h3>
-
-          <span className="muted">
-            Latest {history.length} trades
-          </span>
-        </div>
-
-        <div style={{ overflowX: "auto" }}>
-          <table>
-            <thead>
-              <tr>
-                <th>Contract ID</th>
-                <th>Purchase Time</th>
-                <th>Buy Price</th>
-                <th>Sell Price</th>
-                <th>Payout</th>
-                <th>Profit / Loss</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {history.length === 0 ? (
+        {history.length === 0 ? (
+          <p style={{ color: "#91a3bc" }}>
+            No completed trades returned yet.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 550
+            }}>
+              <thead>
                 <tr>
-                  <td colSpan="6" className="empty">
-                    No closed trades available.
-                  </td>
+                  {["Contract", "Market", "Buy Price", "Sell Price", "Profit"].map(label => (
+                    <th key={label} style={{
+                      textAlign: "left",
+                      padding: 10,
+                      borderBottom: "1px solid #34445c"
+                    }}>
+                      {label}
+                    </th>
+                  ))}
                 </tr>
-              ) : (
-                history.map((item, index) => (
-                  <tr
-                    key={
-                      item.contract_id ||
-                      item.transaction_id ||
-                      index
-                    }
-                  >
-                    <td>
-                      {item.contract_id ||
-                        item.transaction_id ||
-                        "—"}
+              </thead>
+
+              <tbody>
+                {history.map((item, index) => (
+                  <tr key={item.contract_id || index}>
+                    <td style={{ padding: 10 }}>
+                      {item.contract_id || "—"}
                     </td>
 
-                    <td>
-                      {item.purchase_time
-                        ? new Date(
-                            item.purchase_time * 1000
-                          ).toLocaleString()
-                        : "—"}
+                    <td style={{ padding: 10 }}>
+                      {item.underlying || item.symbol || "—"}
                     </td>
 
-                    <td>{money(item.buy_price, currency)}</td>
-                    <td>{money(item.sell_price, currency)}</td>
-                    <td>{money(item.payout, currency)}</td>
+                    <td style={{ padding: 10 }}>
+                      {money(item.buy_price, currency)}
+                    </td>
 
-                    <td>
-                      {money(
-                        Number(item.sell_price || 0) -
-                          Number(item.buy_price || 0),
-                        currency
-                      )}
+                    <td style={{ padding: 10 }}>
+                      {money(item.sell_price, currency)}
+                    </td>
+
+                    <td style={{
+                      padding: 10,
+                      color: Number(item.profit) >= 0
+                        ? "#35d6a2"
+                        : "#ff8997"
+                    }}>
+                      {money(item.profit, currency)}
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <div style={{
+        ...cardStyle,
+        borderColor: "#755c2b",
+        color: "#f0bb65",
+        fontSize: 12,
+        lineHeight: 1.7
+      }}>
+        <strong>Demo trading safeguards</strong>
+        <p style={{ marginBottom: 0 }}>
+          TradeLab currently restricts this interface to demo accounts
+          and a maximum $10 stake. Client-side controls are not a
+          substitute for server-side execution enforcement. Real-money
+          trading remains disabled.
+        </p>
       </div>
+
     </div>
   );
 }
+
+export default DerivLivePanel;
