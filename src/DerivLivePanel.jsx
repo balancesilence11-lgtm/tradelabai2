@@ -112,6 +112,8 @@ function DerivLivePanel() {
 
   const [symbol, setSymbol] = useState("frxEURUSD");
   const [tick, setTick] = useState(null);
+  const [availableContracts, setAvailableContracts] = useState([]);
+  const [contractsLoading, setContractsLoading] = useState(false);
 
   const [stake, setStake] = useState("1");
   const [contractType, setContractType] = useState("CALL");
@@ -270,8 +272,9 @@ function DerivLivePanel() {
     try {
       const result = await clientRef.current.connect(accountId);
 
-      setBalance(result.balance);
+      setBalance(result.balance || null);
       setPortfolio(result.portfolio || []);
+      await loadAvailableContracts(symbol);
 
       localStorage.setItem(
         "tradelab_deriv_selected_account",
@@ -315,13 +318,34 @@ function DerivLivePanel() {
     setSymbol(nextSymbol);
     setTick(null);
     setProposal(null);
+    setAvailableContracts([]);
 
     if (!connected) return;
 
     try {
       await clientRef.current.subscribeTicks(nextSymbol);
+      await loadAvailableContracts(nextSymbol);
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  async function loadAvailableContracts(market = symbol, force = false) {
+    if (!clientRef.current?.connected) return;
+    setContractsLoading(true);
+    try {
+      const list = await clientRef.current.getAvailableContracts(market, { force });
+      setAvailableContracts(list);
+      const types = list.map(item => String(item.contract_type || '').toUpperCase());
+      if (types.length && !types.includes(contractType)) {
+        setContractType(types.includes('CALL') ? 'CALL' : types[0]);
+        setProposal(null);
+      }
+    } catch (err) {
+      setAvailableContracts([]);
+      setError(err.message || 'Unable to load available options.');
+    } finally {
+      setContractsLoading(false);
     }
   }
 
@@ -733,15 +757,21 @@ function DerivLivePanel() {
             <select
               style={inputStyle}
               value={contractType}
-              disabled={!connected}
+              disabled={!connected || contractsLoading || availableContracts.length === 0}
               onChange={e => {
                 setContractType(e.target.value);
                 setProposal(null);
               }}
             >
-              <option value="CALL">RISE</option>
-              <option value="PUT">FALL</option>
+              {availableContracts.map(item => (
+                <option key={item.contract_type} value={item.contract_type}>
+                  {({ CALL: 'RISE', PUT: 'FALL' })[item.contract_type] || item.contract_type.replaceAll('_', ' ')}
+                </option>
+              ))}
             </select>
+            <small style={{ display: 'block', color: '#91a3bc', marginTop: 6 }}>
+              {contractsLoading ? 'Loading market options…' : `${availableContracts.length} contract types available for this market`}
+            </small>
           </div>
 
           <div>
