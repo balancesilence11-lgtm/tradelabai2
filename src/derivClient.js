@@ -178,7 +178,7 @@ export class DerivClient {
     return this.send({ ticks: symbol, subscribe: 1 });
   }
 
-  async getProposal({ symbol, contractType, amount, currency, duration, durationUnit = 'm' }) {
+  async getProposal({ symbol, contractType, amount, currency, duration, durationUnit = 'm', barrier }) {
     if (!this.account || this.account.type !== 'demo') throw new Error('Demo account required.');
     const stake = Number(amount);
     if (!Number.isFinite(stake) || stake <= 0 || stake > MAX_STAKE) {
@@ -202,7 +202,8 @@ export class DerivClient {
       currency: String(currency || 'USD'),
       duration: Number(duration),
       duration_unit: durationUnit,
-      underlying_symbol: symbol
+      underlying_symbol: symbol,
+      ...(barrier !== undefined ? { barrier: Number(barrier) } : {})
     });
     if (!result.proposal?.id) throw new Error('Deriv did not return a valid proposal.');
     return result.proposal;
