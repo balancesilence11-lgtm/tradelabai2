@@ -1,4 +1,4 @@
-import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import React, { useEffect, useMemo, useState } from 'react';
+import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import TradingViewChart from "./TradingViewChart";import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
@@ -3006,6 +3006,7 @@ function App() {
           </> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Trade Planner' ? <TradePlannerPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
+            <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>TradingView Advanced Chart · {selectedMarket}</h3><span className="muted">External chart · Analysis only</span></div><TradingViewChart symbol={selectedMarket} timeframe={period}/></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
             <MarketIntelligencePanel candles={candles} symbol={selectedMarket} timeframe={period}/>
           </> : activePage === 'Technical Indicators' ? <>
