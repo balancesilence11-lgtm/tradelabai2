@@ -1,4 +1,5 @@
 const SYMBOLS = {
+  // Major forex pairs
   EURUSD: "EUR/USD",
   GBPUSD: "GBP/USD",
   USDJPY: "USD/JPY",
@@ -6,13 +7,19 @@ const SYMBOLS = {
   USDCAD: "USD/CAD",
   AUDUSD: "AUD/USD",
   NZDUSD: "NZD/USD",
+
+  // Minor forex pairs
   EURGBP: "EUR/GBP",
   EURJPY: "EUR/JPY",
   GBPJPY: "GBP/JPY",
   AUDJPY: "AUD/JPY",
   EURAUD: "EUR/AUD",
   GBPAUD: "GBP/AUD",
+
+  // Commodities
   XAUUSD: "XAU/USD",
+
+  // Cryptocurrencies
   BTCUSD: "BTC/USD"
 };
 
@@ -35,6 +42,8 @@ function json(data, status = 200, extraHeaders = {}) {
     headers: {
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Cross-Origin-Resource-Policy": "same-origin",
       ...extraHeaders
     }
   });
@@ -95,9 +104,11 @@ function clearSessionCookie() {
 }
 
 function validOrigin(request, url) {
+  // These endpoints are browser-session endpoints. Missing Origin is rejected
+  // rather than treated as same-origin; this prevents cross-site socket use.
   const origin = request.headers.get("Origin");
   const fetchSite = request.headers.get("Sec-Fetch-Site");
-  if (origin && origin !== url.origin) return false;
+  if (!origin || origin !== url.origin) return false;
   if (fetchSite === "cross-site") return false;
   return true;
 }
@@ -554,7 +565,7 @@ async function handleMarket(request, env, url) {
 }
 
 /* =========================================
-   DERIV OAUTH CONNECTION
+   DERIV OAUTH CONNECTION (AUTHORIZATION CODE + PKCE)
 ========================================= */
 
 const DERIV_REDIRECT_URI =
@@ -703,8 +714,13 @@ async function derivApiFetch(token, path, options = {}) {
   });
 }
 
+
 /* =========================================
    SECURE DERIV DEMO WEBSOCKET PROXY
+   - Deriv OTP and upstream socket stay server-side.
+   - Browser connects only to this Worker.
+   - Only demo accounts are permitted.
+   - Rise/Fall proposals and purchases are capped at USD 10.
 ========================================= */
 
 const DERIV_MAX_STAKE_USD = 10;
@@ -720,119 +736,123 @@ function wsError(socket, code, message, echoReq = undefined) {
   } catch {}
 }
 
-function validateDerivClientMessage(raw, proposalIds) {
-  let payload;
+const DERIV_MAX_WS_MESSAGE_BYTES = 4096;
+const DERIV_MAX_PROPOSALS = 100;
+const DERIV_PROPOSAL_TTL_MS = 60_000;
+const DERIV_ALLOWED_WS_ACTIONS = new Set([
+  "balance", "portfolio", "statement", "ticks", "proposal", "buy",
+  "proposal_open_contract", "forget"
+]);
 
+function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests) {
+  let payload;
   try {
-    payload = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+    const rawText = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+    if (new TextEncoder().encode(rawText).byteLength > DERIV_MAX_WS_MESSAGE_BYTES) {
+      return { ok: false, code: "MessageTooLarge", message: "Request exceeds the permitted size." };
+    }
+    payload = JSON.parse(rawText);
   } catch {
-    return { ok: false, code: "InvalidJSON", message: "Invalid JSON request." };
+    return { ok: false, code: "InvalidJSON", message: "Invalid or oversized JSON request." };
   }
 
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, code: "InvalidRequest", message: "Invalid request format." };
   }
 
-  if (Object.prototype.hasOwnProperty.call(payload, "proposal")) {
-    if (Object.prototype.hasOwnProperty.call(payload, "buy")) {
-      return {
-        ok: false,
-        code: "InvalidTradeRequest",
-        message: "A request cannot contain both proposal and buy instructions.",
-        echoReq: payload
-      };
-    }
+  const actions = [...DERIV_ALLOWED_WS_ACTIONS].filter(key =>
+    Object.prototype.hasOwnProperty.call(payload, key)
+  );
+  const allowedKeys = new Set([
+    "req_id", "subscribe", "balance", "portfolio", "statement", "description",
+    "limit", "offset", "ticks", "proposal", "amount", "basis", "contract_type",
+    "currency", "duration", "duration_unit", "underlying_symbol", "buy", "price",
+    "proposal_open_contract", "contract_id", "forget"
+  ]);
+  if (actions.length !== 1 || Object.keys(payload).some(key => !allowedKeys.has(key))) {
+    return { ok: false, code: "ActionDenied", message: "This Deriv request is not permitted.", echoReq: payload };
+  }
+  if (payload.req_id !== undefined && (!Number.isSafeInteger(payload.req_id) || payload.req_id < 1)) {
+    return { ok: false, code: "InvalidRequestId", message: "Invalid request identifier.", echoReq: payload };
+  }
 
+  const action = actions[0];
+  if (action === "proposal") {
     const amount = Number(payload.amount);
     const contractType = String(payload.contract_type || "").toUpperCase();
     const basis = String(payload.basis || "").toLowerCase();
     const currency = String(payload.currency || "").toUpperCase();
-
-    if (payload.proposal !== 1) {
-      return {
-        ok: false,
-        code: "ProposalDenied",
-        message: "Unsupported proposal request.",
-        echoReq: payload
-      };
+    const symbol = String(payload.underlying_symbol || "");
+    const duration = Number(payload.duration);
+    const unit = String(payload.duration_unit || "");
+    const unitLimits = { s: 86400, m: 1440, h: 24, d: 365 };
+    if (payload.proposal !== 1 || !DERIV_ALLOWED_CONTRACTS.has(contractType)) {
+      return { ok: false, code: "ContractDenied", message: "Only Rise/Fall CALL and PUT proposals are permitted.", echoReq: payload };
     }
-
-    if (!DERIV_ALLOWED_CONTRACTS.has(contractType)) {
-      return {
-        ok: false,
-        code: "ContractDenied",
-        message: "Only Rise/Fall CALL and PUT contracts are permitted.",
-        echoReq: payload
-      };
+    if (basis !== "stake" || !Number.isFinite(amount) || amount <= 0 || amount > DERIV_MAX_STAKE_USD || currency !== "USD") {
+      return { ok: false, code: "StakeLimitExceeded", message: "Demo stake must be greater than zero and no more than USD 10.", echoReq: payload };
     }
-
-    if (
-      basis !== "stake" ||
-      !Number.isFinite(amount) ||
-      amount <= 0 ||
-      amount > DERIV_MAX_STAKE_USD
-    ) {
-      return {
-        ok: false,
-        code: "StakeLimitExceeded",
-        message: "Demo stake must be greater than zero and no more than USD 10.",
-        echoReq: payload
-      };
+    if (!/^[A-Za-z0-9_]{2,32}$/.test(symbol) || !unitLimits[unit] || !Number.isInteger(duration) || duration < 1 || duration > unitLimits[unit]) {
+      return { ok: false, code: "ProposalParametersDenied", message: "Invalid market symbol or contract duration.", echoReq: payload };
     }
-
-    if (currency !== "USD") {
-      return {
-        ok: false,
-        code: "CurrencyDenied",
-        message: "Only USD demo stakes are permitted.",
-        echoReq: payload
-      };
+    if (!Number.isSafeInteger(payload.req_id)) {
+      return { ok: false, code: "RequestIdRequired", message: "A valid request identifier is required.", echoReq: payload };
     }
-
-    return { ok: true, payload, kind: "proposal" };
+    if (pendingProposalRequests.size >= DERIV_MAX_PROPOSALS) {
+      return { ok: false, code: "ProposalLimitReached", message: "Too many outstanding proposals. Wait and try again.", echoReq: payload };
+    }
+    pendingProposalRequests.set(payload.req_id, {
+      amount, contractType, currency, symbol, createdAt: Date.now()
+    });
+    return { ok: true, payload };
   }
 
-  if (Object.prototype.hasOwnProperty.call(payload, "buy")) {
+  if (action === "buy") {
     const proposalId = String(payload.buy || "");
     const price = Number(payload.price);
-
-    if (!proposalId || proposalId === "1" || !proposalIds.has(proposalId)) {
-      return {
-        ok: false,
-        code: "ProposalNotAuthorised",
-        message: "This purchase does not reference a valid proposal created on this secure session.",
-        echoReq: payload
-      };
+    const record = proposalIds.get(proposalId);
+    if (!record || record.expiresAt < Date.now()) {
+      proposalIds.delete(proposalId);
+      return { ok: false, code: "ProposalNotAuthorised", message: "Proposal is missing, expired or already used. Request a fresh quote.", echoReq: payload };
     }
-
-    if (
-      !Number.isFinite(price) ||
-      price <= 0 ||
-      price > DERIV_MAX_STAKE_USD
-    ) {
-      return {
-        ok: false,
-        code: "PurchaseLimitExceeded",
-        message: "Purchase price must be greater than zero and no more than USD 10.",
-        echoReq: payload
-      };
+    if (!Number.isFinite(price) || price <= 0 || price > DERIV_MAX_STAKE_USD || price > record.askPrice + 0.0000001) {
+      return { ok: false, code: "PurchaseLimitExceeded", message: "Purchase price exceeds the authorised proposal price or USD 10 limit.", echoReq: payload };
     }
-
-    proposalIds.delete(proposalId);
-    return { ok: true, payload, kind: "buy" };
+    proposalIds.delete(proposalId); // consume before forwarding to prevent replay
+    return { ok: true, payload };
   }
 
-  return { ok: true, payload, kind: "other" };
+  if (action === "ticks") {
+    if (typeof payload.ticks !== "string" || !/^[A-Za-z0-9_]{2,32}$/.test(payload.ticks) || ![0, 1].includes(payload.subscribe)) {
+      return { ok: false, code: "InvalidSubscription", message: "Invalid tick subscription.", echoReq: payload };
+    }
+  } else if (action === "balance") {
+    if (payload.balance !== 1 || (payload.subscribe !== undefined && ![0, 1].includes(payload.subscribe))) {
+      return { ok: false, code: "InvalidRequest", message: "Invalid balance request.", echoReq: payload };
+    }
+  } else if (action === "portfolio") {
+    if (payload.portfolio !== 1) return { ok: false, code: "InvalidRequest", message: "Invalid portfolio request.", echoReq: payload };
+  } else if (action === "statement") {
+    const limit = Number(payload.limit ?? 50), offset = Number(payload.offset ?? 0);
+    if (payload.statement !== 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 10000) {
+      return { ok: false, code: "InvalidStatementRequest", message: "Statement request is outside permitted limits.", echoReq: payload };
+    }
+  } else if (action === "proposal_open_contract") {
+    if (payload.proposal_open_contract !== 1 || !/^\d{1,24}$/.test(String(payload.contract_id || "")) || ![0, 1].includes(payload.subscribe)) {
+      return { ok: false, code: "InvalidContractRequest", message: "Invalid contract monitoring request.", echoReq: payload };
+    }
+  } else if (action === "forget") {
+    if (typeof payload.forget !== "string" || payload.forget.length > 128) {
+      return { ok: false, code: "InvalidSubscription", message: "Invalid subscription identifier.", echoReq: payload };
+    }
+  }
+
+  return { ok: true, payload };
 }
 
 async function handleDerivSocket(request, env, url, user) {
-  if (
-    request.method !== "GET" ||
-    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
-  ) {
-    return json({ error: "WebSocket upgrade required" }, 426, {
-      Upgrade: "websocket"
-    });
+  if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return json({ error: "WebSocket upgrade required" }, 426, { Upgrade: "websocket" });
   }
 
   if (!validOrigin(request, url)) {
@@ -840,34 +860,24 @@ async function handleDerivSocket(request, env, url, user) {
   }
 
   const accountId = String(url.searchParams.get("account_id") || "").trim();
-
   if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
     return json({ error: "Invalid Deriv account ID" }, 400);
   }
 
   let token;
-
   try {
     token = await getDerivAccessToken(env, user.id);
   } catch (error) {
     console.error("Unable to decrypt Deriv token for socket:", error.message);
-    return json({
-      error: "Deriv connection could not be read. Please reconnect."
-    }, 500);
+    return json({ error: "Deriv connection could not be read. Please reconnect." }, 500);
   }
 
   if (!token) {
-    return json({
-      error: "Deriv is not connected or authorization has expired."
-    }, 401);
+    return json({ error: "Deriv is not connected or authorization has expired." }, 401);
   }
 
   try {
-    const accountsResponse = await derivApiFetch(
-      token,
-      "/trading/v1/options/accounts"
-    );
-
+    const accountsResponse = await derivApiFetch(token, "/trading/v1/options/accounts");
     const accountsData = await accountsResponse.json();
 
     if (!accountsResponse.ok) {
@@ -877,96 +887,81 @@ async function handleDerivSocket(request, env, url, user) {
     const accounts = Array.isArray(accountsData.data)
       ? accountsData.data
       : (accountsData.data ? [accountsData.data] : []);
+    const account = accounts.find(item => String(item.account_id || "") === accountId);
 
-    const account = accounts.find(
-      item => String(item.account_id || "") === accountId
-    );
-
-    if (!account) {
-      return json({ error: "Deriv account not found." }, 404);
-    }
-
+    if (!account) return json({ error: "Deriv account not found." }, 404);
     if (String(account.account_type || "").toLowerCase() !== "demo") {
-      return json({
-        error: "Real accounts are disabled. Only demo accounts may connect."
-      }, 403);
+      return json({ error: "Real accounts are disabled. Only demo accounts may connect." }, 403);
     }
 
+    // Obtain the short-lived OTP on the server. It is never returned to the browser.
     const otpResponse = await derivApiFetch(
       token,
       `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
       { method: "POST" }
     );
-
     const otpData = await otpResponse.json();
     const upstreamUrl = otpData.data?.url;
 
     if (!otpResponse.ok || !upstreamUrl) {
-      return json({
-        error: "Unable to establish Deriv demo session."
-      }, 502);
+      return json({ error: "Unable to establish Deriv demo session." }, 502);
     }
 
     const parsed = new URL(upstreamUrl);
-
     if (
       parsed.protocol !== "wss:" ||
       parsed.hostname !== "api.derivws.com" ||
       !parsed.pathname.endsWith("/trading/v1/options/ws/demo")
     ) {
-      return json({
-        error: "Deriv returned an unexpected demo WebSocket URL."
-      }, 502);
+      return json({ error: "Deriv returned an unexpected demo WebSocket URL." }, 502);
     }
 
+    // Cloudflare Workers supports outbound WebSocket upgrades through fetch().
     const upstreamResponse = await fetch(
       upstreamUrl.replace(/^wss:/i, "https:"),
       { headers: { Upgrade: "websocket" } }
     );
-
     const upstream = upstreamResponse.webSocket;
 
     if (!upstream) {
-      console.error(
-        "Deriv WebSocket handshake failed:",
-        upstreamResponse.status
-      );
-      return json({
-        error: "Deriv demo WebSocket handshake failed."
-      }, 502);
+      console.error("Deriv WebSocket handshake failed:", upstreamResponse.status);
+      return json({ error: "Deriv demo WebSocket handshake failed." }, 502);
     }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    const proposalIds = new Set();
+    const proposalIds = new Map();
+    const pendingProposalRequests = new Map();
+    let messageWindowStart = Date.now();
+    let messageCount = 0;
 
     upstream.accept({ allowHalfOpen: true });
     server.accept({ allowHalfOpen: true });
 
     server.addEventListener("message", event => {
-      const checked = validateDerivClientMessage(
-        event.data,
-        proposalIds
-      );
+      const now = Date.now();
+      if (now - messageWindowStart >= 1000) {
+        messageWindowStart = now;
+        messageCount = 0;
+      }
+      messageCount += 1;
+      if (messageCount > 30) {
+        wsError(server, "RateLimitExceeded", "Too many requests. Slow down.");
+        closeBoth(1008, "Rate limit exceeded");
+        return;
+      }
+
+      const checked = validateDerivClientMessage(event.data, proposalIds, pendingProposalRequests);
 
       if (!checked.ok) {
-        wsError(
-          server,
-          checked.code,
-          checked.message,
-          checked.echoReq
-        );
+        wsError(server, checked.code, checked.message, checked.echoReq);
         return;
       }
 
       try {
         upstream.send(JSON.stringify(checked.payload));
       } catch {
-        wsError(
-          server,
-          "UpstreamUnavailable",
-          "Deriv connection is unavailable."
-        );
+        wsError(server, "UpstreamUnavailable", "Deriv connection is unavailable.");
       }
     });
 
@@ -975,64 +970,56 @@ async function handleDerivSocket(request, env, url, user) {
 
       try {
         message = JSON.parse(
-          typeof event.data === "string"
-            ? event.data
-            : new TextDecoder().decode(event.data)
+          typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data)
         );
       } catch {
-        try {
-          server.send(event.data);
-        } catch {}
+        try { server.send(event.data); } catch {}
         return;
       }
 
+      // Only proposals issued after a validated <= USD 10 stake request
+      // can be used for a purchase on this socket.
       const proposal = message?.proposal;
-
-      if (proposal?.id) {
-        const askPrice = Number(proposal.ask_price);
-
-        if (
-          Number.isFinite(askPrice) &&
-          askPrice > 0 &&
-          askPrice <= DERIV_MAX_STAKE_USD
-        ) {
-          proposalIds.add(String(proposal.id));
+      const requestId = message?.echo_req?.req_id ?? message?.req_id;
+      const requested = requestId !== undefined ? pendingProposalRequests.get(requestId) : null;
+      if (requested) {
+        pendingProposalRequests.delete(requestId);
+        if (proposal?.id && Date.now() - requested.createdAt <= DERIV_PROPOSAL_TTL_MS) {
+          const askPrice = Number(proposal.ask_price);
+          if (Number.isFinite(askPrice) && askPrice > 0 && askPrice <= DERIV_MAX_STAKE_USD && proposal.currency === "USD") {
+            if (proposalIds.size >= DERIV_MAX_PROPOSALS) {
+              const oldest = proposalIds.keys().next().value;
+              if (oldest) proposalIds.delete(oldest);
+            }
+            proposalIds.set(String(proposal.id), {
+              askPrice,
+              expiresAt: Date.now() + DERIV_PROPOSAL_TTL_MS,
+              requestedStake: requested.amount,
+              symbol: requested.symbol,
+              contractType: requested.contractType
+            });
+          }
         }
       }
+
+      // Expire old proposal authorisations and abandoned proposal requests.
+      for (const [id, item] of proposalIds) if (item.expiresAt <= Date.now()) proposalIds.delete(id);
+      for (const [id, item] of pendingProposalRequests) if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingProposalRequests.delete(id);
 
       try {
         server.send(JSON.stringify(message));
       } catch {}
     });
 
-    const closeBoth = (
-      code = 1000,
-      reason = "Connection closed"
-    ) => {
-      try {
-        if (server.readyState < 2) server.close(code, reason);
-      } catch {}
-
-      try {
-        if (upstream.readyState < 2) upstream.close(code, reason);
-      } catch {}
+    const closeBoth = (code = 1000, reason = "Connection closed") => {
+      try { if (server.readyState < 2) server.close(code, reason); } catch {}
+      try { if (upstream.readyState < 2) upstream.close(code, reason); } catch {}
     };
 
-    server.addEventListener("close", event =>
-      closeBoth(event.code || 1000, event.reason || "Client disconnected")
-    );
-
-    upstream.addEventListener("close", event =>
-      closeBoth(event.code || 1000, event.reason || "Deriv disconnected")
-    );
-
-    server.addEventListener("error", () =>
-      closeBoth(1011, "Client socket error")
-    );
-
-    upstream.addEventListener("error", () =>
-      closeBoth(1011, "Deriv socket error")
-    );
+    server.addEventListener("close", event => closeBoth(event.code || 1000, event.reason || "Client disconnected"));
+    upstream.addEventListener("close", event => closeBoth(event.code || 1000, event.reason || "Deriv disconnected"));
+    server.addEventListener("error", () => closeBoth(1011, "Client socket error"));
+    upstream.addEventListener("error", () => closeBoth(1011, "Deriv socket error"));
 
     return new Response(null, {
       status: 101,
@@ -1041,15 +1028,9 @@ async function handleDerivSocket(request, env, url, user) {
 
   } catch (error) {
     console.error("Secure Deriv socket error:", error.message);
-    return json({
-      error: "Unable to establish secure Deriv demo connection."
-    }, 502);
+    return json({ error: "Unable to establish secure Deriv demo connection." }, 502);
   }
 }
-
-/* =========================================
-   DERIV ROUTES
-========================================= */
 
 async function handleDeriv(request, env, url) {
   const path = url.pathname;
@@ -1064,18 +1045,13 @@ async function handleDeriv(request, env, url) {
 
   if (path === "/api/deriv/socket") {
     if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
-      return json({
-        error: "Deriv encryption is not configured"
-      }, 500);
+      return json({ error: "Deriv encryption is not configured" }, 500);
     }
-
     return handleDerivSocket(request, env, url, user);
   }
 
   if (!env.DERIV_CLIENT_ID || !env.DERIV_TOKEN_ENCRYPTION_KEY) {
-    return json({
-      error: "Deriv OAuth is not fully configured"
-    }, 500);
+    return json({ error: "Deriv OAuth is not fully configured" }, 500);
   }
 
   /* START OAUTH CONNECTION */
@@ -1105,13 +1081,7 @@ async function handleDeriv(request, env, url) {
         token_expires_at = NULL,
         created_at = excluded.created_at,
         updated_at = excluded.updated_at
-    `).bind(
-      user.id,
-      stateHash,
-      verifier,
-      now,
-      now
-    ).run();
+    `).bind(user.id, stateHash, verifier, now, now).run();
 
     const authUrl = new URL(DERIV_AUTH_URL);
 
@@ -1131,16 +1101,12 @@ async function handleDeriv(request, env, url) {
   if (path === "/api/deriv/callback" && request.method === "GET") {
     const oauthError = url.searchParams.get("error");
 
-    if (oauthError) {
-      return redirectToApp("authorization_denied");
-    }
+    if (oauthError) return redirectToApp("authorization_denied");
 
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
 
-    if (!code || !state) {
-      return redirectToApp("invalid_callback");
-    }
+    if (!code || !state) return redirectToApp("invalid_callback");
 
     const pending = await env.DB.prepare(`
       SELECT state_hash, code_verifier, created_at
@@ -1195,10 +1161,7 @@ async function handleDeriv(request, env, url) {
       return redirectToApp("token_exchange_failed");
     }
 
-    const encryptedToken = await encryptDerivToken(
-      env,
-      accessToken
-    );
+    const encryptedToken = await encryptDerivToken(env, accessToken);
 
     const expiresIn = Number(
       tokenData.expires_in ||
@@ -1221,12 +1184,7 @@ async function handleDeriv(request, env, url) {
         code_verifier = NULL,
         updated_at = ?
       WHERE user_id = ?
-    `).bind(
-      encryptedToken,
-      expiresAt,
-      now,
-      user.id
-    ).run();
+    `).bind(encryptedToken, expiresAt, now, user.id).run();
 
     return redirectToApp("connected");
   }
@@ -1258,9 +1216,7 @@ async function handleDeriv(request, env, url) {
 
   if (path === "/api/deriv/disconnect" && request.method === "POST") {
     if (!validOrigin(request, url)) {
-      return json({
-        error: "Request origin rejected"
-      }, 403);
+      return json({ error: "Request origin rejected" }, 403);
     }
 
     await env.DB.prepare("DELETE FROM deriv_oauth WHERE user_id = ?")
@@ -1274,9 +1230,7 @@ async function handleDeriv(request, env, url) {
   }
 
   if (request.method === "POST" && !validOrigin(request, url)) {
-    return json({
-      error: "Request origin rejected"
-    }, 403);
+    return json({ error: "Request origin rejected" }, 403);
   }
 
   if (![
@@ -1284,25 +1238,15 @@ async function handleDeriv(request, env, url) {
     "/api/deriv/accounts",
     "/api/deriv/otp"
   ].includes(path)) {
-    return json({
-      error: "Deriv route not found"
-    }, 404);
+    return json({ error: "Deriv route not found" }, 404);
   }
 
   if (path === "/api/deriv/otp" && request.method !== "POST") {
-    return json({
-      error: "Method not allowed"
-    }, 405, {
-      Allow: "POST"
-    });
+    return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
   }
 
   if (path !== "/api/deriv/otp" && request.method !== "GET") {
-    return json({
-      error: "Method not allowed"
-    }, 405, {
-      Allow: "GET"
-    });
+    return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
   }
 
   let token;
@@ -1376,17 +1320,13 @@ async function handleDeriv(request, env, url) {
     try {
       body = await readJson(request);
     } catch {
-      return json({
-        error: "Invalid request body"
-      }, 400);
+      return json({ error: "Invalid request body" }, 400);
     }
 
     const accountId = String(body.account_id || "").trim();
 
     if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
-      return json({
-        error: "Invalid Deriv account ID"
-      }, 400);
+      return json({ error: "Invalid Deriv account ID" }, 400);
     }
 
     const selectedAccount = accounts.find(
@@ -1394,12 +1334,12 @@ async function handleDeriv(request, env, url) {
     );
 
     if (!selectedAccount) {
-      return json({
-        error: "Deriv account not found"
-      }, 404);
+      return json({ error: "Deriv account not found" }, 404);
     }
 
-    /* STRICT DEMO-ONLY ACCOUNT SECURITY */
+    /* =========================================
+       STRICT DEMO-ONLY ACCOUNT SECURITY
+    ========================================= */
 
     const accountType = String(
       selectedAccount.account_type || ""
@@ -1414,11 +1354,9 @@ async function handleDeriv(request, env, url) {
       }, 403);
     }
 
-    const socketUrl = new URL(
-      "/api/deriv/socket",
-      url.origin
-    );
-
+    // Return a same-origin Worker WebSocket URL, never Deriv's OTP URL.
+    // The Worker obtains the one-time OTP and holds the upstream socket.
+    const socketUrl = new URL("/api/deriv/socket", url.origin);
     socketUrl.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     socketUrl.searchParams.set("account_id", accountId);
 
@@ -1457,13 +1395,19 @@ export default {
     const path = url.pathname;
 
     try {
+      /* AUTHENTICATION ROUTES */
+
       if (path.startsWith("/api/auth/")) {
         return await handleAuth(request, env, url);
       }
 
+      /* DERIV OAUTH ROUTES */
+
       if (path.startsWith("/api/deriv/")) {
         return await handleDeriv(request, env, url);
       }
+
+      /* MARKET DATA ROUTES */
 
       if (path === "/api/market" || path === "/api/candles") {
         const user = await getAuthenticatedUser(request, env);
@@ -1480,12 +1424,16 @@ export default {
         if (marketResponse) return marketResponse;
       }
 
+      /* UNKNOWN API ROUTES */
+
       if (path.startsWith("/api/")) {
         return json({
           ok: false,
           error: "API route not found"
         }, 404);
       }
+
+      /* REACT FRONTEND ASSETS */
 
       const response = await env.ASSETS.fetch(request);
       const headers = new Headers(response.headers);
