@@ -1,5 +1,4 @@
 const SYMBOLS = {
-  // Major forex pairs
   EURUSD: "EUR/USD",
   GBPUSD: "GBP/USD",
   USDJPY: "USD/JPY",
@@ -7,19 +6,13 @@ const SYMBOLS = {
   USDCAD: "USD/CAD",
   AUDUSD: "AUD/USD",
   NZDUSD: "NZD/USD",
-
-  // Minor forex pairs
   EURGBP: "EUR/GBP",
   EURJPY: "EUR/JPY",
   GBPJPY: "GBP/JPY",
   AUDJPY: "AUD/JPY",
   EURAUD: "EUR/AUD",
   GBPAUD: "GBP/AUD",
-
-  // Commodities
   XAUUSD: "XAU/USD",
-
-  // Cryptocurrencies
   BTCUSD: "BTC/USD"
 };
 
@@ -561,7 +554,7 @@ async function handleMarket(request, env, url) {
 }
 
 /* =========================================
-   DERIV OAUTH CONNECTION (AUTHORIZATION CODE + PKCE)
+   DERIV OAUTH CONNECTION
 ========================================= */
 
 const DERIV_REDIRECT_URI =
@@ -710,6 +703,354 @@ async function derivApiFetch(token, path, options = {}) {
   });
 }
 
+/* =========================================
+   SECURE DERIV DEMO WEBSOCKET PROXY
+========================================= */
+
+const DERIV_MAX_STAKE_USD = 10;
+const DERIV_ALLOWED_CONTRACTS = new Set(["CALL", "PUT"]);
+
+function wsError(socket, code, message, echoReq = undefined) {
+  try {
+    socket.send(JSON.stringify({
+      msg_type: "error",
+      error: { code, message },
+      ...(echoReq ? { echo_req: echoReq } : {})
+    }));
+  } catch {}
+}
+
+function validateDerivClientMessage(raw, proposalIds) {
+  let payload;
+
+  try {
+    payload = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+  } catch {
+    return { ok: false, code: "InvalidJSON", message: "Invalid JSON request." };
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { ok: false, code: "InvalidRequest", message: "Invalid request format." };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "proposal")) {
+    if (Object.prototype.hasOwnProperty.call(payload, "buy")) {
+      return {
+        ok: false,
+        code: "InvalidTradeRequest",
+        message: "A request cannot contain both proposal and buy instructions.",
+        echoReq: payload
+      };
+    }
+
+    const amount = Number(payload.amount);
+    const contractType = String(payload.contract_type || "").toUpperCase();
+    const basis = String(payload.basis || "").toLowerCase();
+    const currency = String(payload.currency || "").toUpperCase();
+
+    if (payload.proposal !== 1) {
+      return {
+        ok: false,
+        code: "ProposalDenied",
+        message: "Unsupported proposal request.",
+        echoReq: payload
+      };
+    }
+
+    if (!DERIV_ALLOWED_CONTRACTS.has(contractType)) {
+      return {
+        ok: false,
+        code: "ContractDenied",
+        message: "Only Rise/Fall CALL and PUT contracts are permitted.",
+        echoReq: payload
+      };
+    }
+
+    if (
+      basis !== "stake" ||
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      amount > DERIV_MAX_STAKE_USD
+    ) {
+      return {
+        ok: false,
+        code: "StakeLimitExceeded",
+        message: "Demo stake must be greater than zero and no more than USD 10.",
+        echoReq: payload
+      };
+    }
+
+    if (currency !== "USD") {
+      return {
+        ok: false,
+        code: "CurrencyDenied",
+        message: "Only USD demo stakes are permitted.",
+        echoReq: payload
+      };
+    }
+
+    return { ok: true, payload, kind: "proposal" };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "buy")) {
+    const proposalId = String(payload.buy || "");
+    const price = Number(payload.price);
+
+    if (!proposalId || proposalId === "1" || !proposalIds.has(proposalId)) {
+      return {
+        ok: false,
+        code: "ProposalNotAuthorised",
+        message: "This purchase does not reference a valid proposal created on this secure session.",
+        echoReq: payload
+      };
+    }
+
+    if (
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      price > DERIV_MAX_STAKE_USD
+    ) {
+      return {
+        ok: false,
+        code: "PurchaseLimitExceeded",
+        message: "Purchase price must be greater than zero and no more than USD 10.",
+        echoReq: payload
+      };
+    }
+
+    proposalIds.delete(proposalId);
+    return { ok: true, payload, kind: "buy" };
+  }
+
+  return { ok: true, payload, kind: "other" };
+}
+
+async function handleDerivSocket(request, env, url, user) {
+  if (
+    request.method !== "GET" ||
+    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+  ) {
+    return json({ error: "WebSocket upgrade required" }, 426, {
+      Upgrade: "websocket"
+    });
+  }
+
+  if (!validOrigin(request, url)) {
+    return json({ error: "Request origin rejected" }, 403);
+  }
+
+  const accountId = String(url.searchParams.get("account_id") || "").trim();
+
+  if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
+    return json({ error: "Invalid Deriv account ID" }, 400);
+  }
+
+  let token;
+
+  try {
+    token = await getDerivAccessToken(env, user.id);
+  } catch (error) {
+    console.error("Unable to decrypt Deriv token for socket:", error.message);
+    return json({
+      error: "Deriv connection could not be read. Please reconnect."
+    }, 500);
+  }
+
+  if (!token) {
+    return json({
+      error: "Deriv is not connected or authorization has expired."
+    }, 401);
+  }
+
+  try {
+    const accountsResponse = await derivApiFetch(
+      token,
+      "/trading/v1/options/accounts"
+    );
+
+    const accountsData = await accountsResponse.json();
+
+    if (!accountsResponse.ok) {
+      return json({ error: "Unable to verify Deriv account." }, 502);
+    }
+
+    const accounts = Array.isArray(accountsData.data)
+      ? accountsData.data
+      : (accountsData.data ? [accountsData.data] : []);
+
+    const account = accounts.find(
+      item => String(item.account_id || "") === accountId
+    );
+
+    if (!account) {
+      return json({ error: "Deriv account not found." }, 404);
+    }
+
+    if (String(account.account_type || "").toLowerCase() !== "demo") {
+      return json({
+        error: "Real accounts are disabled. Only demo accounts may connect."
+      }, 403);
+    }
+
+    const otpResponse = await derivApiFetch(
+      token,
+      `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+      { method: "POST" }
+    );
+
+    const otpData = await otpResponse.json();
+    const upstreamUrl = otpData.data?.url;
+
+    if (!otpResponse.ok || !upstreamUrl) {
+      return json({
+        error: "Unable to establish Deriv demo session."
+      }, 502);
+    }
+
+    const parsed = new URL(upstreamUrl);
+
+    if (
+      parsed.protocol !== "wss:" ||
+      parsed.hostname !== "api.derivws.com" ||
+      !parsed.pathname.endsWith("/trading/v1/options/ws/demo")
+    ) {
+      return json({
+        error: "Deriv returned an unexpected demo WebSocket URL."
+      }, 502);
+    }
+
+    const upstreamResponse = await fetch(
+      upstreamUrl.replace(/^wss:/i, "https:"),
+      { headers: { Upgrade: "websocket" } }
+    );
+
+    const upstream = upstreamResponse.webSocket;
+
+    if (!upstream) {
+      console.error(
+        "Deriv WebSocket handshake failed:",
+        upstreamResponse.status
+      );
+      return json({
+        error: "Deriv demo WebSocket handshake failed."
+      }, 502);
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    const proposalIds = new Set();
+
+    upstream.accept({ allowHalfOpen: true });
+    server.accept({ allowHalfOpen: true });
+
+    server.addEventListener("message", event => {
+      const checked = validateDerivClientMessage(
+        event.data,
+        proposalIds
+      );
+
+      if (!checked.ok) {
+        wsError(
+          server,
+          checked.code,
+          checked.message,
+          checked.echoReq
+        );
+        return;
+      }
+
+      try {
+        upstream.send(JSON.stringify(checked.payload));
+      } catch {
+        wsError(
+          server,
+          "UpstreamUnavailable",
+          "Deriv connection is unavailable."
+        );
+      }
+    });
+
+    upstream.addEventListener("message", event => {
+      let message = null;
+
+      try {
+        message = JSON.parse(
+          typeof event.data === "string"
+            ? event.data
+            : new TextDecoder().decode(event.data)
+        );
+      } catch {
+        try {
+          server.send(event.data);
+        } catch {}
+        return;
+      }
+
+      const proposal = message?.proposal;
+
+      if (proposal?.id) {
+        const askPrice = Number(proposal.ask_price);
+
+        if (
+          Number.isFinite(askPrice) &&
+          askPrice > 0 &&
+          askPrice <= DERIV_MAX_STAKE_USD
+        ) {
+          proposalIds.add(String(proposal.id));
+        }
+      }
+
+      try {
+        server.send(JSON.stringify(message));
+      } catch {}
+    });
+
+    const closeBoth = (
+      code = 1000,
+      reason = "Connection closed"
+    ) => {
+      try {
+        if (server.readyState < 2) server.close(code, reason);
+      } catch {}
+
+      try {
+        if (upstream.readyState < 2) upstream.close(code, reason);
+      } catch {}
+    };
+
+    server.addEventListener("close", event =>
+      closeBoth(event.code || 1000, event.reason || "Client disconnected")
+    );
+
+    upstream.addEventListener("close", event =>
+      closeBoth(event.code || 1000, event.reason || "Deriv disconnected")
+    );
+
+    server.addEventListener("error", () =>
+      closeBoth(1011, "Client socket error")
+    );
+
+    upstream.addEventListener("error", () =>
+      closeBoth(1011, "Deriv socket error")
+    );
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+
+  } catch (error) {
+    console.error("Secure Deriv socket error:", error.message);
+    return json({
+      error: "Unable to establish secure Deriv demo connection."
+    }, 502);
+  }
+}
+
+/* =========================================
+   DERIV ROUTES
+========================================= */
+
 async function handleDeriv(request, env, url) {
   const path = url.pathname;
   const isCallback = path === "/api/deriv/callback";
@@ -721,8 +1062,20 @@ async function handleDeriv(request, env, url) {
     return json({ error: "Authentication required" }, 401);
   }
 
+  if (path === "/api/deriv/socket") {
+    if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
+      return json({
+        error: "Deriv encryption is not configured"
+      }, 500);
+    }
+
+    return handleDerivSocket(request, env, url, user);
+  }
+
   if (!env.DERIV_CLIENT_ID || !env.DERIV_TOKEN_ENCRYPTION_KEY) {
-    return json({ error: "Deriv OAuth is not fully configured" }, 500);
+    return json({
+      error: "Deriv OAuth is not fully configured"
+    }, 500);
   }
 
   /* START OAUTH CONNECTION */
@@ -752,7 +1105,13 @@ async function handleDeriv(request, env, url) {
         token_expires_at = NULL,
         created_at = excluded.created_at,
         updated_at = excluded.updated_at
-    `).bind(user.id, stateHash, verifier, now, now).run();
+    `).bind(
+      user.id,
+      stateHash,
+      verifier,
+      now,
+      now
+    ).run();
 
     const authUrl = new URL(DERIV_AUTH_URL);
 
@@ -772,12 +1131,16 @@ async function handleDeriv(request, env, url) {
   if (path === "/api/deriv/callback" && request.method === "GET") {
     const oauthError = url.searchParams.get("error");
 
-    if (oauthError) return redirectToApp("authorization_denied");
+    if (oauthError) {
+      return redirectToApp("authorization_denied");
+    }
 
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
 
-    if (!code || !state) return redirectToApp("invalid_callback");
+    if (!code || !state) {
+      return redirectToApp("invalid_callback");
+    }
 
     const pending = await env.DB.prepare(`
       SELECT state_hash, code_verifier, created_at
@@ -832,7 +1195,10 @@ async function handleDeriv(request, env, url) {
       return redirectToApp("token_exchange_failed");
     }
 
-    const encryptedToken = await encryptDerivToken(env, accessToken);
+    const encryptedToken = await encryptDerivToken(
+      env,
+      accessToken
+    );
 
     const expiresIn = Number(
       tokenData.expires_in ||
@@ -855,7 +1221,12 @@ async function handleDeriv(request, env, url) {
         code_verifier = NULL,
         updated_at = ?
       WHERE user_id = ?
-    `).bind(encryptedToken, expiresAt, now, user.id).run();
+    `).bind(
+      encryptedToken,
+      expiresAt,
+      now,
+      user.id
+    ).run();
 
     return redirectToApp("connected");
   }
@@ -887,7 +1258,9 @@ async function handleDeriv(request, env, url) {
 
   if (path === "/api/deriv/disconnect" && request.method === "POST") {
     if (!validOrigin(request, url)) {
-      return json({ error: "Request origin rejected" }, 403);
+      return json({
+        error: "Request origin rejected"
+      }, 403);
     }
 
     await env.DB.prepare("DELETE FROM deriv_oauth WHERE user_id = ?")
@@ -901,7 +1274,9 @@ async function handleDeriv(request, env, url) {
   }
 
   if (request.method === "POST" && !validOrigin(request, url)) {
-    return json({ error: "Request origin rejected" }, 403);
+    return json({
+      error: "Request origin rejected"
+    }, 403);
   }
 
   if (![
@@ -909,15 +1284,25 @@ async function handleDeriv(request, env, url) {
     "/api/deriv/accounts",
     "/api/deriv/otp"
   ].includes(path)) {
-    return json({ error: "Deriv route not found" }, 404);
+    return json({
+      error: "Deriv route not found"
+    }, 404);
   }
 
   if (path === "/api/deriv/otp" && request.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
+    return json({
+      error: "Method not allowed"
+    }, 405, {
+      Allow: "POST"
+    });
   }
 
   if (path !== "/api/deriv/otp" && request.method !== "GET") {
-    return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
+    return json({
+      error: "Method not allowed"
+    }, 405, {
+      Allow: "GET"
+    });
   }
 
   let token;
@@ -991,13 +1376,17 @@ async function handleDeriv(request, env, url) {
     try {
       body = await readJson(request);
     } catch {
-      return json({ error: "Invalid request body" }, 400);
+      return json({
+        error: "Invalid request body"
+      }, 400);
     }
 
     const accountId = String(body.account_id || "").trim();
 
     if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
-      return json({ error: "Invalid Deriv account ID" }, 400);
+      return json({
+        error: "Invalid Deriv account ID"
+      }, 400);
     }
 
     const selectedAccount = accounts.find(
@@ -1005,80 +1394,45 @@ async function handleDeriv(request, env, url) {
     );
 
     if (!selectedAccount) {
-      return json({ error: "Deriv account not found" }, 404);
+      return json({
+        error: "Deriv account not found"
+      }, 404);
     }
 
-    /* =========================================
-       TRADE ACCOUNT SECURITY
-       DEMO ACCOUNTS ALLOWED BY DEFAULT
-       REAL ACCOUNTS REQUIRE EXPLICIT AUTHORISATION
-    ========================================= */
+    /* STRICT DEMO-ONLY ACCOUNT SECURITY */
 
     const accountType = String(
       selectedAccount.account_type || ""
     ).toLowerCase();
 
-    if (accountType === "demo") {
-      console.log("Deriv demo account authorised:", accountId);
-    } else if (
-      accountType === "real" &&
-      env.DERIV_ALLOW_REAL_TRADING === "true" &&
-      body.confirm_real_trading === true
-    ) {
-      console.log("Deriv real account explicitly authorised:", accountId);
-    } else {
+    if (accountType !== "demo") {
       return json({
         ok: false,
         connected: true,
         authorised: false,
-        error: accountType === "real"
-          ? "Real-account access is disabled. Demo trading is permitted."
-          : "Unrecognised account type. Access denied."
+        error: "Real-account access is disabled. Only demo trading is permitted."
       }, 403);
     }
 
-    /* =========================================
-       GENERATE DERIV WEBSOCKET OTP
-    ========================================= */
-
-    const otpResponse = await derivApiFetch(
-      token,
-      `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
-      { method: "POST" }
+    const socketUrl = new URL(
+      "/api/deriv/socket",
+      url.origin
     );
 
-    const otpData = await otpResponse.json();
-    const websocketUrl = otpData.data?.url;
-
-    if (!otpResponse.ok || !websocketUrl) {
-      return json({
-        ok: false,
-        connected: false,
-        error: "Unable to generate Deriv WebSocket authentication URL",
-        status: otpResponse.status
-      }, 502);
-    }
-
-    const parsed = new URL(websocketUrl);
-
-    if (
-      parsed.protocol !== "wss:" ||
-      parsed.hostname !== "api.derivws.com"
-    ) {
-      return json({
-        ok: false,
-        error: "Deriv returned an unexpected WebSocket URL"
-      }, 502);
-    }
+    socketUrl.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    socketUrl.searchParams.set("account_id", accountId);
 
     return json({
       ok: true,
       connected: true,
       provider: "Deriv",
       account_id: accountId,
-      account_type: selectedAccount.account_type || null,
-      websocket_url: websocketUrl,
-      message: "Connect immediately; the URL expires after 120 seconds and can be used once.",
+      account_type: "demo",
+      websocket_url: socketUrl.toString(),
+      execution_mode: "server_proxy_demo_only",
+      max_stake: 10,
+      currency: "USD",
+      message: "Secure demo connection. Trading requests are validated by the server.",
       timestamp: new Date().toISOString()
     });
 
@@ -1103,19 +1457,13 @@ export default {
     const path = url.pathname;
 
     try {
-      /* AUTHENTICATION ROUTES */
-
       if (path.startsWith("/api/auth/")) {
         return await handleAuth(request, env, url);
       }
 
-      /* DERIV OAUTH ROUTES */
-
       if (path.startsWith("/api/deriv/")) {
         return await handleDeriv(request, env, url);
       }
-
-      /* MARKET DATA ROUTES */
 
       if (path === "/api/market" || path === "/api/candles") {
         const user = await getAuthenticatedUser(request, env);
@@ -1132,16 +1480,12 @@ export default {
         if (marketResponse) return marketResponse;
       }
 
-      /* UNKNOWN API ROUTES */
-
       if (path.startsWith("/api/")) {
         return json({
           ok: false,
           error: "API route not found"
         }, 404);
       }
-
-      /* REACT FRONTEND ASSETS */
 
       const response = await env.ASSETS.fetch(request);
       const headers = new Headers(response.headers);
