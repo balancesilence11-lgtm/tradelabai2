@@ -724,7 +724,7 @@ async function derivApiFetch(token, path, options = {}) {
 ========================================= */
 
 const DERIV_MAX_STAKE_USD = 10;
-const DERIV_ALLOWED_CONTRACTS = new Set(["CALL", "PUT"]);
+const DERIV_ALLOWED_CONTRACTS = new Set(["CALL", "PUT"]); // Legacy fallback; live availability is discovered per symbol.
 
 function wsError(socket, code, message, echoReq = undefined) {
   try {
@@ -740,11 +740,11 @@ const DERIV_MAX_WS_MESSAGE_BYTES = 4096;
 const DERIV_MAX_PROPOSALS = 100;
 const DERIV_PROPOSAL_TTL_MS = 60_000;
 const DERIV_ALLOWED_WS_ACTIONS = new Set([
-  "balance", "portfolio", "statement", "ticks", "proposal", "buy",
+  "balance", "portfolio", "statement", "ticks", "contracts_for", "proposal", "buy",
   "proposal_open_contract", "forget"
 ]);
 
-function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests) {
+function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, discoveredContracts) {
   let payload;
   try {
     const rawText = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
@@ -765,7 +765,7 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests) {
   );
   const allowedKeys = new Set([
     "req_id", "subscribe", "balance", "portfolio", "statement", "description",
-    "limit", "offset", "ticks", "proposal", "amount", "basis", "contract_type",
+    "limit", "offset", "ticks", "contracts_for", "proposal", "amount", "basis", "contract_type",
     "currency", "duration", "duration_unit", "underlying_symbol", "buy", "price",
     "proposal_open_contract", "contract_id", "forget"
   ]);
@@ -777,6 +777,18 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests) {
   }
 
   const action = actions[0];
+  if (action === "contracts_for") {
+    const symbol = String(payload.contracts_for || "");
+    if (typeof payload.contracts_for !== "string" || !/^[A-Za-z0-9_]{2,32}$/.test(symbol) || !Number.isSafeInteger(payload.req_id)) {
+      return { ok: false, code: "InvalidContractsRequest", message: "A valid market symbol and request identifier are required to discover available contracts.", echoReq: payload };
+    }
+    if (discoveredContracts.size >= DERIV_MAX_PROPOSALS && !discoveredContracts.has(symbol)) {
+      const oldest = discoveredContracts.keys().next().value;
+      if (oldest) discoveredContracts.delete(oldest);
+    }
+    return { ok: true, payload };
+  }
+
   if (action === "proposal") {
     const amount = Number(payload.amount);
     const contractType = String(payload.contract_type || "").toUpperCase();
@@ -786,8 +798,12 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests) {
     const duration = Number(payload.duration);
     const unit = String(payload.duration_unit || "");
     const unitLimits = { s: 86400, m: 1440, h: 24, d: 365 };
-    if (payload.proposal !== 1 || !DERIV_ALLOWED_CONTRACTS.has(contractType)) {
-      return { ok: false, code: "ContractDenied", message: "Only Rise/Fall CALL and PUT proposals are permitted.", echoReq: payload };
+    const available = discoveredContracts.get(symbol);
+    const contractAvailable = Array.isArray(available) && available.some(item =>
+      String(item.contract_type || "").toUpperCase() === contractType
+    );
+    if (payload.proposal !== 1 || !/^[A-Z0-9_]{2,32}$/.test(contractType) || !contractAvailable) {
+      return { ok: false, code: "ContractDenied", message: "This contract type has not been confirmed as available for the selected market. Refresh the market's available contracts and try again.", echoReq: payload };
     }
     if (basis !== "stake" || !Number.isFinite(amount) || amount <= 0 || amount > DERIV_MAX_STAKE_USD || currency !== "USD") {
       return { ok: false, code: "StakeLimitExceeded", message: "Demo stake must be greater than zero and no more than USD 10.", echoReq: payload };
@@ -932,6 +948,8 @@ async function handleDerivSocket(request, env, url, user) {
     const [client, server] = Object.values(pair);
     const proposalIds = new Map();
     const pendingProposalRequests = new Map();
+    const discoveredContracts = new Map();
+    const pendingContractsRequests = new Map();
     let messageWindowStart = Date.now();
     let messageCount = 0;
 
@@ -951,11 +969,18 @@ async function handleDerivSocket(request, env, url, user) {
         return;
       }
 
-      const checked = validateDerivClientMessage(event.data, proposalIds, pendingProposalRequests);
+      const checked = validateDerivClientMessage(event.data, proposalIds, pendingProposalRequests, discoveredContracts);
 
       if (!checked.ok) {
         wsError(server, checked.code, checked.message, checked.echoReq);
         return;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(checked.payload, "contracts_for")) {
+        pendingContractsRequests.set(checked.payload.req_id, {
+          symbol: checked.payload.contracts_for,
+          createdAt: Date.now()
+        });
       }
 
       try {
@@ -977,6 +1002,36 @@ async function handleDerivSocket(request, env, url, user) {
         return;
       }
 
+      // Record only contract types returned by Deriv for a symbol requested
+      // on this socket. This prevents clients inventing unsupported contracts.
+      const contractsResponse = message?.contracts_for;
+      const contractsRequestId = message?.echo_req?.req_id ?? message?.req_id;
+      const contractsRequest = contractsRequestId !== undefined
+        ? pendingContractsRequests.get(contractsRequestId)
+        : null;
+      if (contractsRequest) {
+        pendingContractsRequests.delete(contractsRequestId);
+        if (
+          Date.now() - contractsRequest.createdAt <= DERIV_PROPOSAL_TTL_MS &&
+          Array.isArray(contractsResponse?.available)
+        ) {
+          const safeAvailable = contractsResponse.available
+            .filter(item => item && typeof item.contract_type === "string" && /^[A-Z0-9_]{2,32}$/.test(item.contract_type))
+            .slice(0, 100)
+            .map(item => ({
+              contract_type: item.contract_type,
+              expiry_type: item.expiry_type,
+              min_contract_duration: item.min_contract_duration,
+              max_contract_duration: item.max_contract_duration,
+              market: item.market,
+              submarket: item.submarket,
+              contract_category: item.contract_category,
+              underlying_symbol: item.underlying_symbol
+            }));
+          discoveredContracts.set(contractsRequest.symbol, safeAvailable);
+        }
+      }
+
       // Only proposals issued after a validated <= USD 10 stake request
       // can be used for a purchase on this socket.
       const proposal = message?.proposal;
@@ -984,7 +1039,14 @@ async function handleDerivSocket(request, env, url, user) {
       const requested = requestId !== undefined ? pendingProposalRequests.get(requestId) : null;
       if (requested) {
         pendingProposalRequests.delete(requestId);
-        if (proposal?.id && Date.now() - requested.createdAt <= DERIV_PROPOSAL_TTL_MS) {
+        const responseSymbol = String(message?.echo_req?.underlying_symbol || "");
+        const responseContractType = String(message?.echo_req?.contract_type || "").toUpperCase();
+        if (
+          proposal?.id &&
+          Date.now() - requested.createdAt <= DERIV_PROPOSAL_TTL_MS &&
+          responseSymbol === requested.symbol &&
+          responseContractType === requested.contractType
+        ) {
           const askPrice = Number(proposal.ask_price);
           if (Number.isFinite(askPrice) && askPrice > 0 && askPrice <= DERIV_MAX_STAKE_USD && proposal.currency === "USD") {
             if (proposalIds.size >= DERIV_MAX_PROPOSALS) {
@@ -1005,6 +1067,7 @@ async function handleDerivSocket(request, env, url, user) {
       // Expire old proposal authorisations and abandoned proposal requests.
       for (const [id, item] of proposalIds) if (item.expiresAt <= Date.now()) proposalIds.delete(id);
       for (const [id, item] of pendingProposalRequests) if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingProposalRequests.delete(id);
+      for (const [id, item] of pendingContractsRequests) if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingContractsRequests.delete(id);
 
       try {
         server.send(JSON.stringify(message));
