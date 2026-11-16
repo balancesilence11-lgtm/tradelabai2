@@ -766,7 +766,7 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
   const allowedKeys = new Set([
     "req_id", "subscribe", "balance", "portfolio", "statement", "description",
     "limit", "offset", "ticks", "contracts_for", "proposal", "amount", "basis", "contract_type",
-    "currency", "duration", "duration_unit", "underlying_symbol", "buy", "price",
+    "currency", "duration", "duration_unit", "underlying_symbol", "barrier", "buy", "price",
     "proposal_open_contract", "contract_id", "forget"
   ]);
   if (actions.length !== 1 || Object.keys(payload).some(key => !allowedKeys.has(key))) {
@@ -811,6 +811,13 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
     if (!/^[A-Za-z0-9_]{2,32}$/.test(symbol) || !unitLimits[unit] || !Number.isInteger(duration) || duration < 1 || duration > unitLimits[unit]) {
       return { ok: false, code: "ProposalParametersDenied", message: "Invalid market symbol or contract duration.", echoReq: payload };
     }
+    const barrierRequired = ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType);
+    if (barrierRequired && (!Number.isInteger(Number(payload.barrier)) || Number(payload.barrier) < 0 || Number(payload.barrier) > 9)) {
+      return { ok: false, code: "InvalidDigitBarrier", message: "Digit contracts require an integer barrier from 0 to 9.", echoReq: payload };
+    }
+    if (!barrierRequired && payload.barrier !== undefined) {
+      return { ok: false, code: "UnexpectedBarrier", message: "A digit barrier is not valid for this contract type.", echoReq: payload };
+    }
     if (!Number.isSafeInteger(payload.req_id)) {
       return { ok: false, code: "RequestIdRequired", message: "A valid request identifier is required.", echoReq: payload };
     }
@@ -818,7 +825,9 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
       return { ok: false, code: "ProposalLimitReached", message: "Too many outstanding proposals. Wait and try again.", echoReq: payload };
     }
     pendingProposalRequests.set(payload.req_id, {
-      amount, contractType, currency, symbol, createdAt: Date.now()
+      amount, contractType, currency, symbol,
+      barrier: barrierRequired ? Number(payload.barrier) : null,
+      createdAt: Date.now()
     });
     return { ok: true, payload };
   }
@@ -1045,7 +1054,8 @@ async function handleDerivSocket(request, env, url, user) {
           proposal?.id &&
           Date.now() - requested.createdAt <= DERIV_PROPOSAL_TTL_MS &&
           responseSymbol === requested.symbol &&
-          responseContractType === requested.contractType
+          responseContractType === requested.contractType &&
+          (requested.barrier === null || Number(message?.echo_req?.barrier) === requested.barrier)
         ) {
           const askPrice = Number(proposal.ask_price);
           if (Number.isFinite(askPrice) && askPrice > 0 && askPrice <= DERIV_MAX_STAKE_USD && proposal.currency === "USD") {
