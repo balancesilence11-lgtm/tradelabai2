@@ -14,6 +14,17 @@ const SYMBOLS = [
   { value: "frxEURGBP", label: "EUR/GBP" },
   { value: "frxEURJPY", label: "EUR/JPY" },
   { value: "frxGBPJPY", label: "GBP/JPY" },
+  // One-second Volatility indices (Deriv symbols)
+  { value: "1HZ10V", label: "Volatility 10 (1s)" },
+  { value: "1HZ15V", label: "Volatility 15 (1s)" },
+  { value: "1HZ25V", label: "Volatility 25 (1s)" },
+  { value: "1HZ30V", label: "Volatility 30 (1s)" },
+  { value: "1HZ50V", label: "Volatility 50 (1s)" },
+  { value: "1HZ75V", label: "Volatility 75 (1s)" },
+  { value: "1HZ90V", label: "Volatility 90 (1s)" },
+  { value: "1HZ100V", label: "Volatility 100 (1s)" },
+
+  // Standard Volatility indices
   { value: "R_10", label: "Volatility 10" },
   { value: "R_25", label: "Volatility 25" },
   { value: "R_50", label: "Volatility 50" },
@@ -514,7 +525,7 @@ function DerivLivePanel() {
         <div>
           <h2 style={{ margin: 0 }}>Deriv Live Trading</h2>
           <p style={{ color: "#91a3bc", margin: "6px 0 0" }}>
-            Authenticated demo account · Market data · Rise/Fall execution
+            Authenticated demo account · Forex and Volatility (including 1s) · Rise/Fall demo execution
           </p>
         </div>
 
@@ -708,6 +719,13 @@ function DerivLivePanel() {
                 </option>
               ))}
             </select>
+            <small style={{ display: "block", color: "#91a3bc", marginTop: 6 }}>
+              {symbol.startsWith("1HZ")
+                ? "1-second Volatility market · ticks are generated every second."
+                : symbol.startsWith("R_")
+                  ? "Standard Volatility market · standard tick frequency."
+                  : "Forex market · live Deriv quotes."}
+            </small>
           </div>
 
           <div>
