@@ -112,8 +112,8 @@ function DerivLivePanel() {
 
   const [symbol, setSymbol] = useState("frxEURUSD");
   const [tick, setTick] = useState(null);
-  const [availableContracts, setAvailableContracts] = useState([]);
-  const [contractsLoading, setContractsLoading] = useState(false);
+  const [lastDigits, setLastDigits] = useState([]);
+  const [digitBarrier, setDigitBarrier] = useState("5");
 
   const [stake, setStake] = useState("1");
   const [contractType, setContractType] = useState("CALL");
@@ -170,6 +170,21 @@ function DerivLivePanel() {
 
         if (data.msg_type === "tick" && data.tick) {
           setTick(data.tick);
+          const quote = Number(data.tick.quote);
+          const pipSize = Number.isInteger(Number(data.tick.pip_size))
+            ? Math.min(10, Math.max(0, Number(data.tick.pip_size)))
+            : null;
+          if (Number.isFinite(quote)) {
+            const quoteText = pipSize === null
+              ? String(data.tick.quote)
+              : quote.toFixed(pipSize);
+            const decimals = quoteText.includes(".") ? quoteText.split(".")[1] : "";
+            const digitMatch = decimals.match(/(\d)$/);
+            if (digitMatch) {
+              const digit = Number(digitMatch[1]);
+              setLastDigits(previous => [{ digit, quote: quoteText, epoch: data.tick.epoch || Date.now() }, ...previous].slice(0, 200));
+            }
+          }
         }
 
         if (
@@ -272,9 +287,8 @@ function DerivLivePanel() {
     try {
       const result = await clientRef.current.connect(accountId);
 
-      setBalance(result.balance || null);
+      setBalance(result.balance);
       setPortfolio(result.portfolio || []);
-      await loadAvailableContracts(symbol);
 
       localStorage.setItem(
         "tradelab_deriv_selected_account",
@@ -317,35 +331,15 @@ function DerivLivePanel() {
   async function changeMarket(nextSymbol) {
     setSymbol(nextSymbol);
     setTick(null);
+    setLastDigits([]);
     setProposal(null);
-    setAvailableContracts([]);
 
     if (!connected) return;
 
     try {
       await clientRef.current.subscribeTicks(nextSymbol);
-      await loadAvailableContracts(nextSymbol);
     } catch (err) {
       setError(err.message);
-    }
-  }
-
-  async function loadAvailableContracts(market = symbol, force = false) {
-    if (!clientRef.current?.connected) return;
-    setContractsLoading(true);
-    try {
-      const list = await clientRef.current.getAvailableContracts(market, { force });
-      setAvailableContracts(list);
-      const types = list.map(item => String(item.contract_type || '').toUpperCase());
-      if (types.length && !types.includes(contractType)) {
-        setContractType(types.includes('CALL') ? 'CALL' : types[0]);
-        setProposal(null);
-      }
-    } catch (err) {
-      setAvailableContracts([]);
-      setError(err.message || 'Unable to load available options.');
-    } finally {
-      setContractsLoading(false);
     }
   }
 
@@ -444,7 +438,8 @@ function DerivLivePanel() {
         amount,
         currency,
         duration: Number(duration),
-        durationUnit
+        durationUnit,
+        ...( ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType) ? { barrier: Number(digitBarrier) } : {})
       });
 
       setProposal(quote);
@@ -477,7 +472,8 @@ function DerivLivePanel() {
         "CONFIRM DEMO TRADE",
         "",
         `Market: ${symbol}`,
-        `Direction: ${contractType === "CALL" ? "RISE" : "FALL"}`,
+        `Contract: ${contractType}` ,
+        ...( ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType) ? [`Prediction digit: ${digitBarrier}`] : []),
         `Stake: ${money(proposal.amount, currency)}`,
         `Potential payout: ${money(proposal.payout, currency)}`,
         `Duration: ${duration} ${durationUnit}`,
@@ -719,6 +715,42 @@ function DerivLivePanel() {
         </div>
       </div>
 
+      {/* LIVE LAST-DIGIT ANALYSIS */}
+      <section style={cardStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Last Digit Analysis</h3>
+            <p style={{ color: "#91a3bc", margin: "6px 0 0", fontSize: 12 }}>Live final decimal digit extracted from the selected market's tick quote.</p>
+          </div>
+          <span style={{ color: "#91a3bc", fontSize: 12 }}>{lastDigits.length} / 200 recent ticks</span>
+        </div>
+        {lastDigits.length === 0 ? (
+          <p style={{ color: "#91a3bc" }}>Waiting for live ticks. Connect your demo account to begin collecting digits.</p>
+        ) : (() => {
+          const counts = Array.from({ length: 10 }, (_, digit) => ({ digit, count: lastDigits.filter(item => item.digit === digit).length }));
+          const maxCount = Math.max(1, ...counts.map(item => item.count));
+          const ranked = [...counts].sort((a, b) => b.count - a.count);
+          const mostCommon = ranked[0];
+          const leastCommon = [...counts].sort((a, b) => a.count - b.count)[0];
+          const overdue = counts.map(item => {
+            const index = lastDigits.findIndex(entry => entry.digit === item.digit);
+            return { ...item, since: index < 0 ? lastDigits.length : index };
+          }).sort((a, b) => b.since - a.since)[0];
+          return <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))", gap: 10, margin: "16px 0" }}>
+              <div style={{ background: "#0b1422", borderRadius: 9, padding: 12 }}><small style={{ color: "#91a3bc" }}>Most frequent</small><h2 style={{ margin: "5px 0" }}>{mostCommon.digit} <small style={{ fontSize: 13 }}>{(mostCommon.count / lastDigits.length * 100).toFixed(1)}%</small></h2></div>
+              <div style={{ background: "#0b1422", borderRadius: 9, padding: 12 }}><small style={{ color: "#91a3bc" }}>Least frequent</small><h2 style={{ margin: "5px 0" }}>{leastCommon.digit} <small style={{ fontSize: 13 }}>{(leastCommon.count / lastDigits.length * 100).toFixed(1)}%</small></h2></div>
+              <div style={{ background: "#0b1422", borderRadius: 9, padding: 12 }}><small style={{ color: "#91a3bc" }}>Longest absent</small><h2 style={{ margin: "5px 0" }}>{overdue.digit} <small style={{ fontSize: 13 }}>{overdue.since} ticks</small></h2></div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(10,minmax(0,1fr))", gap: 7 }}>
+              {counts.map(item => <div key={item.digit} style={{ textAlign: "center", background: "#0b1422", borderRadius: 8, padding: "9px 3px" }}><strong>{item.digit}</strong><div style={{ height: 48, display: "flex", alignItems: "end", margin: "7px 0" }}><div style={{ width: "100%", height: `${Math.max(3, item.count / maxCount * 100)}%`, background: "#16a085", borderRadius: 4 }} /></div><small style={{ color: "#91a3bc" }}>{(item.count / lastDigits.length * 100).toFixed(0)}%</small></div>)}
+            </div>
+            <div style={{ marginTop: 14 }}><small style={{ color: "#91a3bc" }}>Recent digits (newest first)</small><div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 7 }}>{lastDigits.slice(0, 30).map((item, index) => <span key={`${item.epoch}-${index}`} title={item.quote} style={{ width: 27, height: 27, display: "grid", placeItems: "center", borderRadius: 6, background: index === 0 ? "#087d69" : "#263b55", fontWeight: 700 }}>{item.digit}</span>)}</div></div>
+            <p style={{ color: "#f0bb65", fontSize: 12, lineHeight: 1.6, marginBottom: 0 }}>Descriptive statistics only: digit frequencies and overdue counts do not predict the next independent tick or create a trading edge. Historical distribution is not a guarantee.</p>
+          </>;
+        })()}
+      </section>
+
       {/* TRADE CONFIGURATION */}
 
       <section style={cardStyle}>
@@ -757,22 +789,31 @@ function DerivLivePanel() {
             <select
               style={inputStyle}
               value={contractType}
-              disabled={!connected || contractsLoading || availableContracts.length === 0}
+              disabled={!connected}
               onChange={e => {
                 setContractType(e.target.value);
                 setProposal(null);
               }}
             >
-              {availableContracts.map(item => (
-                <option key={item.contract_type} value={item.contract_type}>
-                  {({ CALL: 'RISE', PUT: 'FALL' })[item.contract_type] || item.contract_type.replaceAll('_', ' ')}
-                </option>
-              ))}
+              <option value="CALL">RISE</option>
+              <option value="PUT">FALL</option>
+              <option value="DIGITOVER">DIGIT OVER</option>
+              <option value="DIGITUNDER">DIGIT UNDER</option>
+              <option value="DIGITMATCH">DIGIT MATCHES</option>
+              <option value="DIGITDIFF">DIGIT DIFFERS</option>
+              <option value="DIGITEVEN">DIGIT EVEN</option>
+              <option value="DIGITODD">DIGIT ODD</option>
             </select>
-            <small style={{ display: 'block', color: '#91a3bc', marginTop: 6 }}>
-              {contractsLoading ? 'Loading market options…' : `${availableContracts.length} contract types available for this market`}
-            </small>
           </div>
+
+          {["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType) && (
+            <div>
+              <label>Prediction Digit (0–9)</label>
+              <select style={inputStyle} value={digitBarrier} disabled={!connected} onChange={e => { setDigitBarrier(e.target.value); setProposal(null); }}>
+                {Array.from({ length: 10 }, (_, digit) => <option key={digit} value={digit}>{digit}</option>)}
+              </select>
+            </div>
+          )}
 
           <div>
             <label>Stake ({currency})</label>
