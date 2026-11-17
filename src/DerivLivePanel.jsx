@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import DerivClient from "./derivClient";
+import DigitMatchPredictor from "./digitMatchPredictor";
 
 const MAX_STAKE = 10;
 
@@ -14,7 +15,6 @@ const SYMBOLS = [
   { value: "frxEURGBP", label: "EUR/GBP" },
   { value: "frxEURJPY", label: "EUR/JPY" },
   { value: "frxGBPJPY", label: "GBP/JPY" },
-  // One-second Volatility indices (Deriv symbols)
   { value: "1HZ10V", label: "Volatility 10 (1s)" },
   { value: "1HZ15V", label: "Volatility 15 (1s)" },
   { value: "1HZ25V", label: "Volatility 25 (1s)" },
@@ -23,8 +23,6 @@ const SYMBOLS = [
   { value: "1HZ75V", label: "Volatility 75 (1s)" },
   { value: "1HZ90V", label: "Volatility 90 (1s)" },
   { value: "1HZ100V", label: "Volatility 100 (1s)" },
-
-  // Standard Volatility indices
   { value: "R_10", label: "Volatility 10" },
   { value: "R_25", label: "Volatility 25" },
   { value: "R_50", label: "Volatility 50" },
@@ -100,8 +98,28 @@ function getAccountLabel(account) {
 function DerivLivePanel() {
   const clientRef = useRef(null);
 
+  // DIGIT MATCH PREDICTION ENGINE
+  const digitPredictorRef = useRef(
+    new DigitMatchPredictor({
+      maxHistory: 5000,
+      minSamples: 200
+    })
+  );
+
+  const [digitAnalysis, setDigitAnalysis] = useState(null);
+
+  const [digitPerformance, setDigitPerformance] = useState({
+    total: 0,
+    wins: 0,
+    losses: 0,
+    accuracy: 0
+  });
+
+  const [digitHistory, setDigitHistory] = useState([]);
+
   const [status, setStatus] = useState("disconnected");
   const [accounts, setAccounts] = useState([]);
+
   const [accountId, setAccountId] = useState(
     () => localStorage.getItem("tradelab_deriv_selected_account") || ""
   );
@@ -112,8 +130,6 @@ function DerivLivePanel() {
 
   const [symbol, setSymbol] = useState("frxEURUSD");
   const [tick, setTick] = useState(null);
-  const [lastDigits, setLastDigits] = useState([]);
-  const [digitBarrier, setDigitBarrier] = useState("5");
 
   const [stake, setStake] = useState("1");
   const [contractType, setContractType] = useState("CALL");
@@ -168,22 +184,47 @@ function DerivLivePanel() {
           setPortfolio(data.portfolio.contracts || []);
         }
 
+        // LIVE TICK + DIGIT PREDICTION PROCESSING
         if (data.msg_type === "tick" && data.tick) {
-          setTick(data.tick);
-          const quote = Number(data.tick.quote);
-          const pipSize = Number.isInteger(Number(data.tick.pip_size))
-            ? Math.min(10, Math.max(0, Number(data.tick.pip_size)))
-            : null;
-          if (Number.isFinite(quote)) {
-            const quoteText = pipSize === null
-              ? String(data.tick.quote)
-              : quote.toFixed(pipSize);
-            const decimals = quoteText.includes(".") ? quoteText.split(".")[1] : "";
-            const digitMatch = decimals.match(/(\d)$/);
-            if (digitMatch) {
-              const digit = Number(digitMatch[1]);
-              setLastDigits(previous => [{ digit, quote: quoteText, epoch: data.tick.epoch || Date.now() }, ...previous].slice(0, 200));
+          const incomingTick = data.tick;
+
+          setTick(incomingTick);
+
+          const predictor = digitPredictorRef.current;
+
+          const digit = predictor.extractDigit(
+            incomingTick.quote,
+            incomingTick.pip_size
+          );
+
+          if (digit !== null) {
+            // Evaluate the previous prediction against this new tick.
+            const evaluation = predictor.evaluate(digit);
+
+            if (evaluation) {
+              setDigitHistory(previous => [
+                {
+                  ...evaluation,
+                  quote: incomingTick.quote
+                },
+                ...previous
+              ].slice(0, 50));
             }
+
+            // Add the latest observation to the prediction history.
+            predictor.addTick(incomingTick);
+
+            // Generate the next statistical prediction.
+            const prediction = predictor.predict();
+
+            setDigitAnalysis({
+              ...prediction,
+              currentDigit: digit
+            });
+
+            setDigitPerformance(
+              predictor.getPerformance()
+            );
           }
         }
 
@@ -331,8 +372,19 @@ function DerivLivePanel() {
   async function changeMarket(nextSymbol) {
     setSymbol(nextSymbol);
     setTick(null);
-    setLastDigits([]);
     setProposal(null);
+
+    // Start a fresh digit-analysis history for the new market.
+    digitPredictorRef.current.reset();
+    setDigitAnalysis(null);
+    setDigitHistory([]);
+
+    setDigitPerformance({
+      total: 0,
+      wins: 0,
+      losses: 0,
+      accuracy: 0
+    });
 
     if (!connected) return;
 
@@ -348,8 +400,6 @@ function DerivLivePanel() {
 
     changeMarket(symbol);
 
-    // Existing subscriptions are cleared when disconnected.
-    // Market changes create a new tick subscription.
   }, [connected]);
 
   /* ======================================================
@@ -438,8 +488,7 @@ function DerivLivePanel() {
         amount,
         currency,
         duration: Number(duration),
-        durationUnit,
-        ...( ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType) ? { barrier: Number(digitBarrier) } : {})
+        durationUnit
       });
 
       setProposal(quote);
@@ -472,8 +521,7 @@ function DerivLivePanel() {
         "CONFIRM DEMO TRADE",
         "",
         `Market: ${symbol}`,
-        `Contract: ${contractType}` ,
-        ...( ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType) ? [`Prediction digit: ${digitBarrier}`] : []),
+        `Direction: ${contractType === "CALL" ? "RISE" : "FALL"}`,
         `Stake: ${money(proposal.amount, currency)}`,
         `Potential payout: ${money(proposal.payout, currency)}`,
         `Duration: ${duration} ${durationUnit}`,
@@ -544,6 +592,7 @@ function DerivLivePanel() {
       }}>
         <div>
           <h2 style={{ margin: 0 }}>Deriv Live Trading</h2>
+
           <p style={{ color: "#91a3bc", margin: "6px 0 0" }}>
             Authenticated demo account · Forex and Volatility (including 1s) · Rise/Fall demo execution
           </p>
@@ -715,40 +764,272 @@ function DerivLivePanel() {
         </div>
       </div>
 
-      {/* LIVE LAST-DIGIT ANALYSIS */}
-      <section style={cardStyle}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      {/* ==================================================
+         AI DIGIT MATCH PREDICTOR
+         ================================================== */}
+
+      <section style={{
+        ...cardStyle,
+        borderColor: "#087d69"
+      }}>
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 10
+        }}>
           <div>
-            <h3 style={{ margin: 0 }}>Last Digit Analysis</h3>
-            <p style={{ color: "#91a3bc", margin: "6px 0 0", fontSize: 12 }}>Live final decimal digit extracted from the selected market's tick quote.</p>
+            <h3 style={{ marginTop: 0, marginBottom: 5 }}>
+              AI Digit Match Predictor
+            </h3>
+
+            <p style={{
+              color: "#91a3bc",
+              fontSize: 12,
+              margin: 0
+            }}>
+              Live Deriv tick analysis · Statistical prediction · Historical validation
+            </p>
           </div>
-          <span style={{ color: "#91a3bc", fontSize: 12 }}>{lastDigits.length} / 200 recent ticks</span>
+
+          <span style={{
+            padding: "7px 11px",
+            borderRadius: 20,
+            background: digitAnalysis?.ready ? "#103d32" : "#342b1b",
+            color: digitAnalysis?.ready ? "#35d6a2" : "#f0bb65",
+            fontSize: 11,
+            fontWeight: 700
+          }}>
+            {digitAnalysis?.ready ? "MODEL ACTIVE" : "COLLECTING DATA"}
+          </span>
         </div>
-        {lastDigits.length === 0 ? (
-          <p style={{ color: "#91a3bc" }}>Waiting for live ticks. Connect your demo account to begin collecting digits.</p>
-        ) : (() => {
-          const counts = Array.from({ length: 10 }, (_, digit) => ({ digit, count: lastDigits.filter(item => item.digit === digit).length }));
-          const maxCount = Math.max(1, ...counts.map(item => item.count));
-          const ranked = [...counts].sort((a, b) => b.count - a.count);
-          const mostCommon = ranked[0];
-          const leastCommon = [...counts].sort((a, b) => a.count - b.count)[0];
-          const overdue = counts.map(item => {
-            const index = lastDigits.findIndex(entry => entry.digit === item.digit);
-            return { ...item, since: index < 0 ? lastDigits.length : index };
-          }).sort((a, b) => b.since - a.since)[0];
-          return <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))", gap: 10, margin: "16px 0" }}>
-              <div style={{ background: "#0b1422", borderRadius: 9, padding: 12 }}><small style={{ color: "#91a3bc" }}>Most frequent</small><h2 style={{ margin: "5px 0" }}>{mostCommon.digit} <small style={{ fontSize: 13 }}>{(mostCommon.count / lastDigits.length * 100).toFixed(1)}%</small></h2></div>
-              <div style={{ background: "#0b1422", borderRadius: 9, padding: 12 }}><small style={{ color: "#91a3bc" }}>Least frequent</small><h2 style={{ margin: "5px 0" }}>{leastCommon.digit} <small style={{ fontSize: 13 }}>{(leastCommon.count / lastDigits.length * 100).toFixed(1)}%</small></h2></div>
-              <div style={{ background: "#0b1422", borderRadius: 9, padding: 12 }}><small style={{ color: "#91a3bc" }}>Longest absent</small><h2 style={{ margin: "5px 0" }}>{overdue.digit} <small style={{ fontSize: 13 }}>{overdue.since} ticks</small></h2></div>
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+          gap: 12,
+          marginTop: 18
+        }}>
+          <div>
+            <small style={{ color: "#91a3bc" }}>Latest Digit</small>
+            <h1 style={{ margin: "7px 0" }}>
+              {digitAnalysis?.currentDigit ?? "—"}
+            </h1>
+          </div>
+
+          <div>
+            <small style={{ color: "#91a3bc" }}>Statistical Candidate</small>
+            <h1 style={{
+              color: "#35d6a2",
+              margin: "7px 0"
+            }}>
+              {digitAnalysis?.ready
+                ? digitAnalysis.predictedDigit
+                : "—"}
+            </h1>
+          </div>
+
+          <div>
+            <small style={{ color: "#91a3bc" }}>Model Score</small>
+            <h2 style={{ margin: "10px 0" }}>
+              {digitAnalysis?.ready
+                ? `${(digitAnalysis.probability * 100).toFixed(2)}%`
+                : "Collecting data"}
+            </h2>
+          </div>
+
+          <div>
+            <small style={{ color: "#91a3bc" }}>Observations</small>
+            <h2 style={{ margin: "10px 0" }}>
+              {digitAnalysis?.sampleSize || 0}
+            </h2>
+          </div>
+        </div>
+
+        {!digitAnalysis?.ready && (
+          <div style={{
+            background: "#0b1422",
+            padding: 12,
+            borderRadius: 8,
+            marginTop: 12
+          }}>
+            <p style={{
+              color: "#f0bb65",
+              margin: 0,
+              fontSize: 13
+            }}>
+              Collecting market observations. At least 200 ticks are required before the first statistical prediction.
+            </p>
+          </div>
+        )}
+
+        {digitAnalysis?.ready && (
+          <>
+            <h4 style={{ marginTop: 22 }}>
+              Digit Probability Distribution
+            </h4>
+
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(5,1fr)",
+              gap: 8
+            }}>
+              {digitAnalysis.distribution.map(item => (
+                <div
+                  key={item.digit}
+                  style={{
+                    background: "#0b1422",
+                    padding: 10,
+                    borderRadius: 8,
+                    textAlign: "center",
+                    border:
+                      item.digit === digitAnalysis.predictedDigit
+                        ? "1px solid #35d6a2"
+                        : "1px solid #26364d"
+                  }}
+                >
+                  <strong>{item.digit}</strong>
+
+                  <div style={{
+                    fontSize: 12,
+                    color: "#91a3bc",
+                    marginTop: 5
+                  }}>
+                    {(item.probability * 100).toFixed(1)}%
+                  </div>
+                </div>
+              ))}
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(10,minmax(0,1fr))", gap: 7 }}>
-              {counts.map(item => <div key={item.digit} style={{ textAlign: "center", background: "#0b1422", borderRadius: 8, padding: "9px 3px" }}><strong>{item.digit}</strong><div style={{ height: 48, display: "flex", alignItems: "end", margin: "7px 0" }}><div style={{ width: "100%", height: `${Math.max(3, item.count / maxCount * 100)}%`, background: "#16a085", borderRadius: 4 }} /></div><small style={{ color: "#91a3bc" }}>{(item.count / lastDigits.length * 100).toFixed(0)}%</small></div>)}
-            </div>
-            <div style={{ marginTop: 14 }}><small style={{ color: "#91a3bc" }}>Recent digits (newest first)</small><div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 7 }}>{lastDigits.slice(0, 30).map((item, index) => <span key={`${item.epoch}-${index}`} title={item.quote} style={{ width: 27, height: 27, display: "grid", placeItems: "center", borderRadius: 6, background: index === 0 ? "#087d69" : "#263b55", fontWeight: 700 }}>{item.digit}</span>)}</div></div>
-            <p style={{ color: "#f0bb65", fontSize: 12, lineHeight: 1.6, marginBottom: 0 }}>Descriptive statistics only: digit frequencies and overdue counts do not predict the next independent tick or create a trading edge. Historical distribution is not a guarantee.</p>
-          </>;
-        })()}
+
+            <h4 style={{ marginTop: 22 }}>
+              Prediction Ranking
+            </h4>
+
+            {digitAnalysis.rankings.slice(0, 5).map(item => (
+              <div
+                key={item.digit}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "9px 0",
+                  borderBottom: "1px solid #26364d"
+                }}
+              >
+                <strong>Digit {item.digit}</strong>
+
+                <span style={{ color: "#35d6a2" }}>
+                  {(item.score * 100).toFixed(2)}%
+                </span>
+              </div>
+            ))}
+          </>
+        )}
+
+        <h4 style={{ marginTop: 22 }}>
+          Prediction Performance
+        </h4>
+
+        <div className="signal">
+          <span>Evaluated predictions</span>
+          <strong>{digitPerformance.total}</strong>
+        </div>
+
+        <div className="signal">
+          <span>Correct predictions</span>
+          <strong style={{ color: "#35d6a2" }}>
+            {digitPerformance.wins}
+          </strong>
+        </div>
+
+        <div className="signal">
+          <span>Incorrect predictions</span>
+          <strong style={{ color: "#ff8997" }}>
+            {digitPerformance.losses}
+          </strong>
+        </div>
+
+        <div className="signal">
+          <span>Historical accuracy</span>
+          <strong>{digitPerformance.accuracy.toFixed(2)}%</strong>
+        </div>
+
+        <h4 style={{ marginTop: 22 }}>
+          Recent Prediction Results
+        </h4>
+
+        {digitHistory.length === 0 ? (
+          <p style={{ color: "#91a3bc", fontSize: 12 }}>
+            Prediction results will appear here after the model begins making predictions.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 400
+            }}>
+              <thead>
+                <tr>
+                  {["Predicted", "Actual", "Result", "Time"].map(label => (
+                    <th
+                      key={label}
+                      style={{
+                        textAlign: "left",
+                        padding: 9,
+                        borderBottom: "1px solid #34445c",
+                        fontSize: 12
+                      }}
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody>
+                {digitHistory.map((item, index) => (
+                  <tr key={`${item.timestamp}-${index}`}>
+                    <td style={{ padding: 9 }}>
+                      {item.predicted}
+                    </td>
+
+                    <td style={{ padding: 9 }}>
+                      {item.actual}
+                    </td>
+
+                    <td style={{
+                      padding: 9,
+                      color: item.correct ? "#35d6a2" : "#ff8997",
+                      fontWeight: 700
+                    }}>
+                      {item.correct ? "CORRECT" : "INCORRECT"}
+                    </td>
+
+                    <td style={{
+                      padding: 9,
+                      color: "#91a3bc",
+                      fontSize: 11
+                    }}>
+                      {new Date(item.timestamp).toLocaleTimeString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 11,
+          lineHeight: 1.6,
+          marginBottom: 0
+        }}>
+          Predictions are statistical estimates, not guaranteed outcomes.
+          A 10% random baseline applies to an unbiased ten-digit outcome.
+          Historical accuracy does not guarantee future performance.
+        </p>
       </section>
 
       {/* TRADE CONFIGURATION */}
@@ -763,6 +1044,7 @@ function DerivLivePanel() {
         }}>
           <div>
             <label>Market</label>
+
             <select
               style={inputStyle}
               value={symbol}
@@ -775,7 +1057,12 @@ function DerivLivePanel() {
                 </option>
               ))}
             </select>
-            <small style={{ display: "block", color: "#91a3bc", marginTop: 6 }}>
+
+            <small style={{
+              display: "block",
+              color: "#91a3bc",
+              marginTop: 6
+            }}>
               {symbol.startsWith("1HZ")
                 ? "1-second Volatility market · ticks are generated every second."
                 : symbol.startsWith("R_")
@@ -786,6 +1073,7 @@ function DerivLivePanel() {
 
           <div>
             <label>Direction</label>
+
             <select
               style={inputStyle}
               value={contractType}
@@ -797,26 +1085,12 @@ function DerivLivePanel() {
             >
               <option value="CALL">RISE</option>
               <option value="PUT">FALL</option>
-              <option value="DIGITOVER">DIGIT OVER</option>
-              <option value="DIGITUNDER">DIGIT UNDER</option>
-              <option value="DIGITMATCH">DIGIT MATCHES</option>
-              <option value="DIGITDIFF">DIGIT DIFFERS</option>
-              <option value="DIGITEVEN">DIGIT EVEN</option>
-              <option value="DIGITODD">DIGIT ODD</option>
             </select>
           </div>
 
-          {["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType) && (
-            <div>
-              <label>Prediction Digit (0–9)</label>
-              <select style={inputStyle} value={digitBarrier} disabled={!connected} onChange={e => { setDigitBarrier(e.target.value); setProposal(null); }}>
-                {Array.from({ length: 10 }, (_, digit) => <option key={digit} value={digit}>{digit}</option>)}
-              </select>
-            </div>
-          )}
-
           <div>
             <label>Stake ({currency})</label>
+
             <input
               style={inputStyle}
               type="number"
@@ -834,6 +1108,7 @@ function DerivLivePanel() {
 
           <div>
             <label>Duration</label>
+
             <input
               style={inputStyle}
               type="number"
@@ -850,6 +1125,7 @@ function DerivLivePanel() {
 
           <div>
             <label>Duration Unit</label>
+
             <select
               style={inputStyle}
               value={durationUnit}
@@ -1022,6 +1298,7 @@ function DerivLivePanel() {
           {monitoredContract.profit !== undefined && (
             <div className="signal">
               <span>Profit / Loss</span>
+
               <strong style={{
                 color: Number(monitoredContract.profit) >= 0
                   ? "#35d6a2"
@@ -1207,6 +1484,8 @@ function DerivLivePanel() {
         )}
       </section>
 
+      {/* DEMO SAFEGUARDS */}
+
       <div style={{
         ...cardStyle,
         borderColor: "#755c2b",
@@ -1215,6 +1494,7 @@ function DerivLivePanel() {
         lineHeight: 1.7
       }}>
         <strong>Demo trading safeguards</strong>
+
         <p style={{ marginBottom: 0 }}>
           TradeLab currently restricts this interface to demo accounts
           and a maximum $10 stake. Client-side controls are not a
