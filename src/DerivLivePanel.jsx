@@ -1,4 +1,4 @@
-mport React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import DerivClient from "./derivClient";
 import DigitMatchPredictor from "./digitMatchPredictor";
 import DerivBotBuilder from "./DerivBotBuilder";
