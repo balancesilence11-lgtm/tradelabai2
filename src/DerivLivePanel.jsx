@@ -81,9 +81,9 @@ function DerivLivePanel() {
   const digitPredictorRef = useRef(new DigitMatchPredictor({ maxHistory: 5000, minSamples: 200 }));
   const contractsRequestRef = useRef(0);
   const proposalRequestRef = useRef(0);
+  const monitoredContractIdsRef = useRef(new Set());
 
   const [digitAnalysis, setDigitAnalysis] = useState(null);
-  const [selectedTargetDigit, setSelectedTargetDigit] = useState("5");
   const [digitPerformance, setDigitPerformance] = useState({ total: 0, wins: 0, losses: 0, accuracy: 0 });
   const [digitHistory, setDigitHistory] = useState([]);
 
@@ -92,6 +92,7 @@ function DerivLivePanel() {
   const [accountId, setAccountId] = useState(() => localStorage.getItem("tradelab_deriv_selected_account") || "");
   const [balance, setBalance] = useState(null);
   const [portfolio, setPortfolio] = useState([]);
+  const [livePositions, setLivePositions] = useState({});
   const [history, setHistory] = useState([]);
 
   const [symbol, setSymbol] = useState("frxEURUSD");
@@ -128,6 +129,8 @@ function DerivLivePanel() {
           proposalRequestRef.current += 1;
           setBalance(null);
           setPortfolio([]);
+          setLivePositions({});
+          monitoredContractIdsRef.current.clear();
           setTick(null);
           setProposal(null);
           setProposalParameters(null);
@@ -138,7 +141,11 @@ function DerivLivePanel() {
       },
       onMessage: data => {
         if (data.msg_type === "balance" && data.balance) setBalance(data.balance);
-        if (data.msg_type === "portfolio" && data.portfolio) setPortfolio(data.portfolio.contracts || []);
+        if (data.msg_type === "portfolio" && data.portfolio) {
+          const contracts = data.portfolio.contracts || [];
+          setPortfolio(contracts);
+          monitorPortfolioPositions(contracts);
+        }
 
         if (data.msg_type === "tick" && data.tick) {
           const incomingTick = data.tick;
@@ -159,13 +166,24 @@ function DerivLivePanel() {
 
         if (data.msg_type === "proposal_open_contract" && data.proposal_open_contract) {
           const contract = data.proposal_open_contract;
+          const contractId = String(contract.contract_id || "");
+          if (contractId) {
+            setLivePositions(previous => ({ ...previous, [contractId]: { ...previous[contractId], ...contract } }));
+            setPortfolio(previous => previous.map(item => String(item.contract_id) === contractId ? { ...item, ...contract } : item));
+          }
           setMonitoredContract(contract);
           if (contract.is_sold) {
-            setNotice(`Contract ${contract.contract_id} has settled.`);
-            client.refreshAccount().then(snapshot => {
-              setBalance(snapshot.balance);
-              setPortfolio(snapshot.portfolio);
-            }).catch(err => console.warn("Account refresh failed:", err));
+            monitoredContractIdsRef.current.delete(contractId);
+            setPortfolio(previous => previous.filter(item => String(item.contract_id) !== contractId));
+            setNotice(`Contract ${contract.contract_id} has settled. Final P/L: ${money(contract.profit, contract.currency || currency)}.`);
+            Promise.all([
+              client.refreshAccount().then(snapshot => {
+                setBalance(snapshot.balance);
+                setPortfolio(snapshot.portfolio || []);
+                monitorPortfolioPositions(snapshot.portfolio || []);
+              }),
+              loadHistory()
+            ]).catch(err => console.warn("Post-settlement refresh failed:", err));
           }
         }
         if (data.error) setError(data.error.message || "Deriv API error.");
@@ -181,6 +199,19 @@ function DerivLivePanel() {
     // The client is intentionally initialized once for this mounted panel.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function monitorPortfolioPositions(contracts = []) {
+    if (!clientRef.current?.connected || !Array.isArray(contracts)) return;
+    for (const item of contracts) {
+      const id = String(item?.contract_id || "");
+      if (!/^\d+$/.test(id) || monitoredContractIdsRef.current.has(id)) continue;
+      monitoredContractIdsRef.current.add(id);
+      clientRef.current.monitorContract(id).catch(err => {
+        monitoredContractIdsRef.current.delete(id);
+        console.warn(`Unable to monitor contract ${id}:`, err.message);
+      });
+    }
+  }
 
   async function loadAccounts() {
     if (!clientRef.current) return;
@@ -260,6 +291,8 @@ function DerivLivePanel() {
       const result = await clientRef.current.connect(accountId);
       setBalance(result.balance);
       setPortfolio(result.portfolio || []);
+      setLivePositions({});
+      monitorPortfolioPositions(result.portfolio || []);
       localStorage.setItem("tradelab_deriv_selected_account", accountId);
       await loadHistory();
       await loadAvailableContracts(symbol);
@@ -278,6 +311,8 @@ function DerivLivePanel() {
     clientRef.current?.disconnect();
     setBalance(null);
     setPortfolio([]);
+    setLivePositions({});
+    monitoredContractIdsRef.current.clear();
     setHistory([]);
     setTick(null);
     setProposal(null);
@@ -321,7 +356,8 @@ function DerivLivePanel() {
     try {
       const snapshot = await clientRef.current.refreshAccount();
       setBalance(snapshot.balance);
-      setPortfolio(snapshot.portfolio);
+      setPortfolio(snapshot.portfolio || []);
+      monitorPortfolioPositions(snapshot.portfolio || []);
       await loadHistory();
       setNotice("Account information refreshed.");
     } catch (err) {
@@ -352,16 +388,6 @@ function DerivLivePanel() {
       return;
     }
 
-    // For Matches, the predictor's selected target digit is the single source
-    // of truth. This prevents a stale Bot Builder field from quoting another digit.
-    const normalizedContractType = String(contractType || "").toUpperCase();
-    const matchBarrier = String(selectedTargetDigit);
-    if (normalizedContractType === "DIGITMATCH" &&
-        (!Number.isInteger(Number(matchBarrier)) || Number(matchBarrier) < 0 || Number(matchBarrier) > 9)) {
-      setError("Choose a valid match digit from 0 to 9.");
-      return;
-    }
-
     const params = {
       symbol,
       contractType,
@@ -369,11 +395,7 @@ function DerivLivePanel() {
       currency,
       duration: tradeDuration,
       durationUnit,
-      ...(normalizedContractType === "DIGITMATCH"
-        ? { barrier: matchBarrier }
-        : parameters.barrier !== undefined && parameters.barrier !== ""
-          ? { barrier: parameters.barrier }
-          : {}),
+      ...(parameters.barrier !== undefined && parameters.barrier !== "" ? { barrier: parameters.barrier } : {}),
       ...(parameters.barrier2 !== undefined && parameters.barrier2 !== "" ? { barrier2: parameters.barrier2 } : {})
     };
 
@@ -438,9 +460,11 @@ function DerivLivePanel() {
 
       if (result.contract_id) {
         setMonitoredContract({ contract_id: result.contract_id, status: "Monitoring", is_sold: 0 });
+        monitoredContractIdsRef.current.add(String(result.contract_id));
         try {
           await clientRef.current.monitorContract(result.contract_id);
         } catch (monitorError) {
+          monitoredContractIdsRef.current.delete(String(result.contract_id));
           console.warn("Contract monitoring could not start:", monitorError);
         }
       }
@@ -470,10 +494,22 @@ function DerivLivePanel() {
   async function refreshAccountAfterTrade() {
     const snapshot = await clientRef.current.refreshAccount();
     setBalance(snapshot.balance);
-    setPortfolio(snapshot.portfolio);
+    setPortfolio(snapshot.portfolio || []);
+    monitorPortfolioPositions(snapshot.portfolio || []);
   }
 
   const selectedMarketLabel = SYMBOLS.find(item => item.value === symbol)?.label || symbol;
+  const openPositionStats = portfolio.reduce((stats, item) => {
+    const live = livePositions[String(item.contract_id || "")] || {};
+    const position = { ...item, ...live };
+    const pnl = Number(position.profit ?? (Number(position.bid_price) - Number(position.buy_price)));
+    if (Number.isFinite(pnl)) {
+      stats.totalPnl += pnl;
+      if (pnl > 0) stats.profitable += 1;
+      else if (pnl < 0) stats.losing += 1;
+    }
+    return stats;
+  }, { totalPnl: 0, profitable: 0, losing: 0 });
 
   return (
     <div style={panelStyle}>
@@ -527,27 +563,6 @@ function DerivLivePanel() {
           <span style={{ border: "1px solid #236b5a", color: "#35d6a2", borderRadius: 20, padding: "6px 11px", fontSize: 11, fontWeight: 800 }}>
             {digitAnalysis?.ready ? "MODEL ACTIVE" : "COLLECTING TICKS"}
           </span>
-        </div>
-
-        <div style={{ ...cardStyle, padding: 14, marginTop: 16, borderColor: "#087d69", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 14 }}>
-          <div style={{ minWidth: 220, flex: 1 }}>
-            <strong style={{ display: "block", marginBottom: 5 }}>Choose the last digit to match</strong>
-            <small style={{ color: "#91a3bc" }}>Select your target digit from 0 to 9. The AI recommendation is shown separately below.</small>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <select aria-label="Digit to match" value={selectedTargetDigit} onChange={event => setSelectedTargetDigit(event.target.value)} style={{ background: "#0b1422", color: "#fff", border: "1px solid #35d6a2", borderRadius: 8, padding: "11px 16px", fontSize: 18, fontWeight: 800, minWidth: 85 }}>
-              {Array.from({ length: 10 }, (_, digit) => <option key={digit} value={String(digit)}>{digit}</option>)}
-            </select>
-            <div style={{ textAlign: "right" }}>
-              <small style={{ display: "block", color: "#91a3bc" }}>AI top suggestion</small>
-              <strong style={{ fontSize: 23, color: "#35d6a2" }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</strong>
-            </div>
-          </div>
-          <div style={{ flexBasis: "100%", color: digitAnalysis?.ready ? (Number(selectedTargetDigit) === digitAnalysis.predictedDigit ? "#35d6a2" : "#f0bb65") : "#91a3bc", fontSize: 12 }}>
-            {digitAnalysis?.ready
-              ? (Number(selectedTargetDigit) === digitAnalysis.predictedDigit ? "Your selected match digit agrees with the AI's top-ranked digit." : `You selected ${selectedTargetDigit}; the AI currently ranks ${digitAnalysis.predictedDigit} highest. You can choose either.`)
-              : `Selected target digit: ${selectedTargetDigit}. The AI recommendation will appear after enough live ticks are collected.`}
-          </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12, marginTop: 16 }}>
@@ -616,8 +631,6 @@ function DerivLivePanel() {
         orderLoading={orderLoading}
         proposalLoading={proposalLoading}
         currency={currency}
-        initialTargetDigit={selectedTargetDigit}
-        onTargetDigitChange={setSelectedTargetDigit}
       />
 
       {lastOrder && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Latest Demo Order</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{lastOrder.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Purchase Price</span><strong>{money(lastOrder.buy_price, currency)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Potential Payout</span><strong>{money(lastOrder.payout, currency)}</strong></div></section>}
@@ -625,8 +638,35 @@ function DerivLivePanel() {
       {monitoredContract && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Contract Monitoring</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{monitoredContract.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Status</span><strong>{monitoredContract.is_sold ? "SETTLED" : "OPEN / MONITORING"}</strong></div>{monitoredContract.profit !== undefined && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Profit / Loss</span><strong style={{ color: Number(monitoredContract.profit) >= 0 ? "#35d6a2" : "#ff8997" }}>{money(monitoredContract.profit, currency)}</strong></div>}{monitoredContract.exit_tick !== undefined && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Exit Price</span><strong>{monitoredContract.exit_tick}</strong></div>}</section>}
 
       <section style={cardStyle}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h3>Open Positions</h3><button style={{ ...buttonStyle, background: "#263b55", color: "#fff" }} disabled={!connected || loading} onClick={refreshAccount}>Refresh</button></div>
-        {portfolio.length === 0 ? <p style={{ color: "#91a3bc" }}>No open positions returned by Deriv.</p> : <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 550 }}><thead><tr>{["Contract", "Market", "Buy Price", "Current Value", "Profit"].map(label => <th key={label} style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #34445c" }}>{label}</th>)}</tr></thead><tbody>{portfolio.map((item, index) => <tr key={item.contract_id || index}><td style={{ padding: 10 }}>{item.contract_id}</td><td style={{ padding: 10 }}>{item.underlying || item.symbol || "—"}</td><td style={{ padding: 10 }}>{money(item.buy_price, currency)}</td><td style={{ padding: 10 }}>{money(item.bid_price, currency)}</td><td style={{ padding: 10, color: Number(item.profit) >= 0 ? "#35d6a2" : "#ff8997" }}>{money(item.profit, currency)}</td></tr>)}</tbody></table></div>}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div><h3 style={{ margin: 0 }}>Open Positions</h3><small style={{ color: "#91a3bc" }}>Live contract values and unrealised profit/loss from Deriv</small></div>
+          <button style={{ ...buttonStyle, background: "#263b55", color: "#fff" }} disabled={!connected || loading} onClick={refreshAccount}>Refresh Positions</button>
+        </div>
+        {portfolio.length > 0 && <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, marginTop: 14 }}>
+          <div style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>Total open P/L</small><div style={{ fontSize: 20, fontWeight: 800, color: openPositionStats.totalPnl >= 0 ? "#35d6a2" : "#ff8997", marginTop: 5 }}>{money(openPositionStats.totalPnl, currency)}</div></div>
+          <div style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>Profitable positions</small><div style={{ fontSize: 20, fontWeight: 800, color: "#35d6a2", marginTop: 5 }}>{openPositionStats.profitable}</div></div>
+          <div style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>Losing positions</small><div style={{ fontSize: 20, fontWeight: 800, color: "#ff8997", marginTop: 5 }}>{openPositionStats.losing}</div></div>
+        </div>}
+        {portfolio.length === 0 ? <p style={{ color: "#91a3bc" }}>No open positions returned by Deriv.</p> : <div style={{ overflowX: "auto", marginTop: 12 }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 850 }}><thead><tr>{["Contract ID", "Market", "Contract", "Stake", "Current Value", "Profit / Loss", "Position Status"].map(label => <th key={label} style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #34445c", whiteSpace: "nowrap" }}>{label}</th>)}</tr></thead><tbody>{portfolio.map((item, index) => {
+          const id = String(item.contract_id || "");
+          const live = livePositions[id] || {};
+          const position = { ...item, ...live };
+          const pnl = Number(position.profit ?? (Number(position.bid_price) - Number(position.buy_price)));
+          const hasPnl = Number.isFinite(pnl);
+          const statusLabel = position.is_sold ? "SETTLED" : !hasPnl ? "UPDATING" : pnl > 0 ? "PROFITABLE" : pnl < 0 ? "LOSING" : "BREAK-EVEN";
+          const pnlColor = !hasPnl ? "#91a3bc" : pnl >= 0 ? "#35d6a2" : "#ff8997";
+          const marketName = SYMBOLS.find(option => option.value === (position.underlying || position.symbol))?.label || position.underlying || position.symbol || "—";
+          return <tr key={id || index}>
+            <td style={{ padding: 10, whiteSpace: "nowrap" }}>{id || "—"}</td>
+            <td style={{ padding: 10 }}>{marketName}</td>
+            <td style={{ padding: 10 }}>{getContractTypeLabel(position.contract_type || position.contract_type_name || "—")}</td>
+            <td style={{ padding: 10 }}>{money(position.buy_price, position.currency || currency)}</td>
+            <td style={{ padding: 10 }}>{position.bid_price !== undefined ? money(position.bid_price, position.currency || currency) : "Waiting for live update…"}</td>
+            <td style={{ padding: 10, color: pnlColor, fontWeight: 800 }}>{hasPnl ? money(pnl, position.currency || currency) : "Waiting for live update…"}</td>
+            <td style={{ padding: 10, color: position.is_sold ? "#91a3bc" : pnlColor, fontWeight: 800 }}>{statusLabel}</td>
+          </tr>;
+        })}</tbody></table></div>}
+        <p style={{ color: "#91a3bc", fontSize: 11, marginBottom: 0 }}>Profit/loss is unrealised while a contract is open and can change until settlement. Deriv's final result is shown in Trade History after the contract closes.</p>
       </section>
 
       <section style={cardStyle}>
