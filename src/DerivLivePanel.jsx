@@ -84,6 +84,17 @@ function DerivLivePanel() {
   const monitoredContractIdsRef = useRef(new Set());
 
   const [digitAnalysis, setDigitAnalysis] = useState(null);
+  const [selectedTargetDigit, setSelectedTargetDigit] = useState(() => {
+    const saved = Number(localStorage.getItem("tradelab_selected_target_digit"));
+    return Number.isInteger(saved) && saved >= 0 && saved <= 9 ? String(saved) : "5";
+  });
+
+  function updateSelectedTargetDigit(value) {
+    const digit = String(value);
+    if (!/^[0-9]$/.test(digit)) return;
+    setSelectedTargetDigit(digit);
+    try { localStorage.setItem("tradelab_selected_target_digit", digit); } catch {}
+  }
   const [digitPerformance, setDigitPerformance] = useState({ total: 0, wins: 0, losses: 0, accuracy: 0 });
   const [digitHistory, setDigitHistory] = useState([]);
 
@@ -565,6 +576,13 @@ function DerivLivePanel() {
           </span>
         </div>
 
+        <div style={{ ...cardStyle, marginTop: 14, padding: 14, borderColor: "#087d69", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+          <div><strong>MY TARGET DIGIT TO MATCH</strong><div style={{ color: "#91a3bc", fontSize: 12, marginTop: 5 }}>Choose the exact final digit for the Deriv Matches contract. This is separate from the AI recommendation.</div></div>
+          <select aria-label="Target digit to match" value={selectedTargetDigit} onChange={event => updateSelectedTargetDigit(event.target.value)} style={{ ...inputStyle, width: 110, fontSize: 20, fontWeight: 800, textAlign: "center" }}>
+            {Array.from({ length: 10 }, (_, digit) => <option key={digit} value={String(digit)}>{digit}</option>)}
+          </select>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12, marginTop: 16 }}>
           <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>LATEST DIGIT</small><div style={{ fontSize: 32, fontWeight: 800, marginTop: 5 }}>{digitAnalysis?.currentDigit ?? "—"}</div><small style={{ color: "#91a3bc" }}>From latest live tick</small></div>
           <div style={{ ...cardStyle, padding: 14, borderColor: "#087d69" }}><small style={{ color: "#91a3bc" }}>TOP MATCH CANDIDATE</small><div style={{ fontSize: 32, fontWeight: 800, color: "#35d6a2", marginTop: 5 }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</div><small style={{ color: "#91a3bc" }}>Second candidate: {digitAnalysis?.ready ? digitAnalysis.secondBest : "—"}</small></div>
@@ -631,6 +649,8 @@ function DerivLivePanel() {
         orderLoading={orderLoading}
         proposalLoading={proposalLoading}
         currency={currency}
+        selectedDigit={selectedTargetDigit}
+        onSelectedDigitChange={updateSelectedTargetDigit}
       />
 
       {lastOrder && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Latest Demo Order</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{lastOrder.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Purchase Price</span><strong>{money(lastOrder.buy_price, currency)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Potential Payout</span><strong>{money(lastOrder.payout, currency)}</strong></div></section>}
