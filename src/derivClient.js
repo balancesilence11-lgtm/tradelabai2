@@ -1,11 +1,18 @@
 /* TradeLab AI — Deriv authenticated WebSocket client
- * Supports dynamically discovered Deriv contract types.
- * Demo accounts only. Access tokens remain server-side.
+ * Place at src/derivClient.js
+ * Uses the existing authenticated Worker routes:
+ *   GET  /api/deriv/accounts
+ *   POST /api/deriv/otp { account_id }
+ * No Deriv access token is exposed to the browser.
  */
 
 const API = '/api/deriv';
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_STAKE = 10;
+const DIGIT_CONTRACTS = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER']);
+const PRICE_BARRIER_CONTRACTS = new Set(['ONETOUCH', 'NOTOUCH', 'HIGHER', 'LOWER']);
+const RANGE_CONTRACTS = new Set(['RANGE', 'EXPIRYRANGE']);
+const DURATION_LIMITS = { t: 10, s: 86400, m: 1440, h: 24, d: 365 };
 
 export class DerivClient {
   constructor({ onMessage = () => {}, onStatus = () => {} } = {}) {
@@ -210,10 +217,6 @@ export class DerivClient {
     };
   }
 
-  /* =========================================
-     DYNAMIC CONTRACT DISCOVERY
-  ========================================= */
-
   async getAvailableContracts(symbol, { force = false } = {}) {
     if (!this.account || this.account.type !== 'demo') {
       throw new Error('Demo account required.');
@@ -234,9 +237,12 @@ export class DerivClient {
     });
 
     const available = Array.isArray(result.contracts_for?.available)
-      ? result.contracts_for.available.filter(
-          item => item && typeof item.contract_type === 'string'
-        )
+      ? result.contracts_for.available
+          .filter(item => item && typeof item.contract_type === 'string')
+          .map(item => ({
+            ...item,
+            contract_type: item.contract_type.toUpperCase()
+          }))
       : [];
 
     this.availableContracts.set(market, available);
@@ -250,15 +256,8 @@ export class DerivClient {
   }
 
   async getTradeStatement({ limit = 50, offset = 0 } = {}) {
-    const safeLimit = Math.min(
-      100,
-      Math.max(1, Math.floor(Number(limit) || 50))
-    );
-
-    const safeOffset = Math.max(
-      0,
-      Math.floor(Number(offset) || 0)
-    );
+    const safeLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 50)));
+    const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
 
     const result = await this.send({
       statement: 1,
@@ -281,17 +280,6 @@ export class DerivClient {
     });
   }
 
-  /* =========================================
-     MULTI-CONTRACT PROPOSALS
-
-     Optional parameters:
-       barrier  - Digit or price barrier
-       barrier2 - Second barrier for range contracts
-
-     Only contract types discovered from Deriv
-     for the selected market are accepted.
-  ========================================= */
-
   async getProposal({
     symbol,
     contractType,
@@ -302,110 +290,139 @@ export class DerivClient {
     barrier,
     barrier2
   }) {
-    if (!this.account || this.account.type !== 'demo') {
-      throw new Error('Demo account required.');
+    if (!this.connected || !this.account || this.account.type !== 'demo') {
+      throw new Error('An authenticated Deriv demo account is required.');
     }
 
     const stake = Number(amount);
 
-    if (
-      !Number.isFinite(stake) ||
-      stake <= 0 ||
-      stake > MAX_STAKE
-    ) {
-      throw new Error(
-        `Demo stake must be greater than zero and no more than ${MAX_STAKE}.`
-      );
+    if (!Number.isFinite(stake) || stake <= 0 || stake > MAX_STAKE) {
+      throw new Error(`Demo stake must be greater than zero and no more than ${MAX_STAKE}.`);
     }
 
-    if (!/^[A-Za-z0-9_]+$/.test(String(symbol || ''))) {
+    const market = String(symbol || '');
+
+    if (!/^[A-Za-z0-9_]{2,32}$/.test(market)) {
       throw new Error('Invalid market symbol.');
     }
 
-    const selectedType = String(contractType || '').toUpperCase();
+    const type = String(contractType || '').toUpperCase();
 
-    if (!/^[A-Z0-9_]{2,32}$/.test(selectedType)) {
+    if (!/^[A-Z0-9_]{2,32}$/.test(type)) {
       throw new Error('Invalid contract type.');
     }
 
-    const available = await this.getAvailableContracts(symbol);
+    const available = await this.getAvailableContracts(market);
 
-    const selectedContract = available.find(
-      item =>
-        String(item.contract_type || '').toUpperCase() === selectedType
-    );
-
-    if (!selectedContract) {
+    if (!available.some(item => item.contract_type === type)) {
       throw new Error(
-        'This contract type is not available for the selected market.'
+        'This contract type is not available for the selected market. Refresh available contracts and try again.'
       );
     }
 
-    const units = {
-      t: 86400,
-      s: 86400,
-      m: 1440,
-      h: 24,
-      d: 365
-    };
+    const unit = String(durationUnit || '').toLowerCase();
+    const length = Number(duration);
 
     if (
-      !units[durationUnit] ||
-      !Number.isInteger(Number(duration)) ||
-      Number(duration) < 1 ||
-      Number(duration) > units[durationUnit]
+      !Object.prototype.hasOwnProperty.call(DURATION_LIMITS, unit) ||
+      !Number.isInteger(length) ||
+      length < 1 ||
+      length > DURATION_LIMITS[unit]
     ) {
-      throw new Error('Invalid contract duration.');
+      throw new Error('Invalid contract duration or duration unit.');
     }
 
-    const proposalRequest = {
+    const payload = {
       proposal: 1,
       amount: stake,
       basis: 'stake',
-      contract_type: selectedType,
-      currency: String(currency || 'USD'),
-      duration: Number(duration),
-      duration_unit: durationUnit,
-      underlying_symbol: symbol
+      contract_type: type,
+      currency: String(currency || 'USD').toUpperCase(),
+      duration: length,
+      duration_unit: unit,
+      underlying_symbol: market
     };
 
-    // Add barriers only when supplied by the strategy configuration.
-    if (barrier !== undefined && barrier !== null && String(barrier).trim() !== '') {
-      proposalRequest.barrier = String(barrier).trim();
+    if (DIGIT_CONTRACTS.has(type)) {
+      if (
+        barrier === undefined ||
+        barrier === null ||
+        String(barrier).trim() === ''
+      ) {
+        throw new Error('Select a digit barrier from 0 to 9 for this contract.');
+      }
+
+      const digit = Number(barrier);
+
+      if (!Number.isInteger(digit) || digit < 0 || digit > 9) {
+        throw new Error('Digit barrier must be a whole number from 0 to 9.');
+      }
+
+      payload.barrier = String(digit);
+
+    } else if (PRICE_BARRIER_CONTRACTS.has(type)) {
+      if (
+        barrier === undefined ||
+        barrier === null ||
+        String(barrier).trim() === ''
+      ) {
+        throw new Error('A numeric price barrier is required for this contract.');
+      }
+
+      const priceBarrier = Number(barrier);
+
+      if (!Number.isFinite(priceBarrier)) {
+        throw new Error('Price barrier must be a valid number.');
+      }
+
+      payload.barrier = String(priceBarrier);
+
+    } else if (RANGE_CONTRACTS.has(type)) {
+      if (
+        barrier === undefined ||
+        barrier2 === undefined ||
+        String(barrier).trim() === '' ||
+        String(barrier2).trim() === ''
+      ) {
+        throw new Error('Both lower and upper barriers are required for this range contract.');
+      }
+
+      const lower = Number(barrier);
+      const upper = Number(barrier2);
+
+      if (
+        !Number.isFinite(lower) ||
+        !Number.isFinite(upper) ||
+        lower >= upper
+      ) {
+        throw new Error(
+          'Range barriers must be numeric, with the lower barrier below the upper barrier.'
+        );
+      }
+
+      payload.barrier = String(lower);
+      payload.barrier2 = String(upper);
+
+    } else if (barrier !== undefined || barrier2 !== undefined) {
+      throw new Error('Barrier values are not supported for the selected contract type.');
     }
 
-    if (barrier2 !== undefined && barrier2 !== null && String(barrier2).trim() !== '') {
-      proposalRequest.barrier2 = String(barrier2).trim();
-    }
-
-    const result = await this.send(proposalRequest);
+    const result = await this.send(payload);
 
     if (!result.proposal?.id) {
-      throw new Error('Deriv did not return a valid proposal.');
+      throw new Error(result.error?.message || 'Deriv did not return a valid proposal.');
     }
 
     return result.proposal;
   }
 
-  /* =========================================
-     DEMO PURCHASE
-  ========================================= */
-
-  async buyDemoProposal(
-    proposalId,
-    maxPrice,
-    { confirmed = false } = {}
-  ) {
+  async buyDemoProposal(proposalId, maxPrice, { confirmed = false } = {}) {
     if (!confirmed) {
-      throw new Error(
-        'Explicit user confirmation is required before placing a demo order.'
-      );
+      throw new Error('Explicit user confirmation is required before placing a demo order.');
     }
 
     if (!this.account || this.account.type !== 'demo') {
-      throw new Error(
-        'Demo account required; real-money execution is disabled.'
-      );
+      throw new Error('Demo account required; real-money execution is disabled.');
     }
 
     if (!proposalId || String(proposalId).length > 128) {
