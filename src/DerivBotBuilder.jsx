@@ -1,374 +1,413 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 
-const styles = {
-  card: {
-    background: "#123e59",
-    border: "1px solid #245875",
-    borderRadius: 9,
-    padding: 14,
-    marginBottom: 20,
-    color: "#ffffff"
+/*
+ * TradeLab AI — Deriv Bot Builder
+ * Replace: src/DerivBotBuilder.jsx
+ *
+ * Contract choices are populated ONLY from Deriv contracts_for data supplied
+ * through availableContracts. This component does not invent market options.
+ * Execution remains proposal-first and requires a separate user confirmation.
+ */
+
+const GROUPS = [
+  {
+    id: "all",
+    label: "All available"
   },
-  heading: {
-    fontWeight: 800,
-    fontSize: 14,
-    padding: "10px 12px",
-    background: "#0d3048",
-    borderRadius: 6,
-    marginBottom: 12
+  {
+    id: "direction",
+    label: "Up / Down",
+    types: ["CALL", "PUT"]
   },
-  label: {
-    display: "block",
-    fontSize: 12,
-    color: "#d5e5f1",
-    marginBottom: 7
+  {
+    id: "digits",
+    label: "Digits",
+    types: ["DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"]
   },
-  select: {
-    background: "#ffffff",
-    color: "#182b3c",
-    border: "1px solid #b8c6d2",
-    borderRadius: 18,
-    padding: "7px 12px",
-    fontSize: 12,
-    maxWidth: "100%"
+  {
+    id: "evenodd",
+    label: "Even / Odd",
+    types: ["DIGITEVEN", "DIGITODD"]
   },
-  input: {
-    background: "#ffffff",
-    color: "#182b3c",
-    border: "1px solid #b8c6d2",
-    borderRadius: 8,
-    padding: "8px 10px",
-    width: 90
+  {
+    id: "touch",
+    label: "Touch",
+    types: ["ONETOUCH", "NOTOUCH"]
   },
-  row: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: 9,
-    marginBottom: 15,
-    fontSize: 12
+  {
+    id: "higherlower",
+    label: "Higher / Lower",
+    types: ["HIGHER", "LOWER"]
+  },
+  {
+    id: "range",
+    label: "Range",
+    types: ["RANGE", "EXPIRYRANGE"]
   }
+];
+
+const CONTRACT_LABELS = {
+  CALL: "Rise",
+  PUT: "Fall",
+  DIGITMATCH: "Matches",
+  DIGITDIFF: "Differs",
+  DIGITOVER: "Over",
+  DIGITUNDER: "Under",
+  DIGITEVEN: "Even",
+  DIGITODD: "Odd",
+  ONETOUCH: "Touches",
+  NOTOUCH: "Does Not Touch",
+  HIGHER: "Higher",
+  LOWER: "Lower",
+  RANGE: "Stays Between",
+  EXPIRYRANGE: "Ends Between"
 };
 
-const marketGroups = {
-  "Continuous Indices": [
-    ["1HZ10V", "Volatility 10 (1s)"],
-    ["1HZ15V", "Volatility 15 (1s)"],
-    ["1HZ25V", "Volatility 25 (1s)"],
-    ["1HZ30V", "Volatility 30 (1s)"],
-    ["1HZ50V", "Volatility 50 (1s)"],
-    ["1HZ75V", "Volatility 75 (1s)"],
-    ["1HZ90V", "Volatility 90 (1s)"],
-    ["1HZ100V", "Volatility 100 (1s)"],
-    ["R_10", "Volatility 10"],
-    ["R_25", "Volatility 25"],
-    ["R_50", "Volatility 50"],
-    ["R_75", "Volatility 75"],
-    ["R_100", "Volatility 100"]
-  ],
-  Forex: [
-    ["frxEURUSD", "EUR/USD"],
-    ["frxGBPUSD", "GBP/USD"],
-    ["frxUSDJPY", "USD/JPY"],
-    ["frxUSDCHF", "USD/CHF"],
-    ["frxUSDCAD", "USD/CAD"],
-    ["frxAUDUSD", "AUD/USD"],
-    ["frxNZDUSD", "NZD/USD"],
-    ["frxEURGBP", "EUR/GBP"],
-    ["frxEURJPY", "EUR/JPY"],
-    ["frxGBPJPY", "GBP/JPY"]
-  ]
+const DIGIT_TYPES = new Set([
+  "DIGITMATCH",
+  "DIGITDIFF",
+  "DIGITOVER",
+  "DIGITUNDER"
+]);
+
+const PRICE_BARRIER_TYPES = new Set([
+  "ONETOUCH",
+  "NOTOUCH",
+  "HIGHER",
+  "LOWER"
+]);
+
+const RANGE_TYPES = new Set(["RANGE", "EXPIRYRANGE"]);
+
+const inputStyle = {
+  width: "100%",
+  boxSizing: "border-box",
+  background: "#0b1422",
+  color: "#e7edf7",
+  border: "1px solid #34445c",
+  borderRadius: 8,
+  padding: "11px 12px",
+  outline: "none"
 };
+
+const labelStyle = {
+  display: "block",
+  color: "#aebbd0",
+  fontSize: 12,
+  marginBottom: 7
+};
+
+const buttonStyle = {
+  border: 0,
+  borderRadius: 8,
+  padding: "11px 16px",
+  fontWeight: 700,
+  cursor: "pointer"
+};
+
+function normalizeContracts(items) {
+  if (!Array.isArray(items)) return [];
+
+  const seen = new Set();
+
+  return items
+    .filter(item => item && typeof item.contract_type === "string")
+    .map(item => ({
+      ...item,
+      contract_type: item.contract_type.toUpperCase()
+    }))
+    .filter(item => {
+      if (seen.has(item.contract_type)) return false;
+      seen.add(item.contract_type);
+      return true;
+    });
+}
+
+function getContractLabel(type) {
+  return CONTRACT_LABELS[type] || type.replaceAll("_", " ");
+}
 
 export default function DerivBotBuilder({
-  connected,
-  symbol,
-  changeMarket,
-  contractType,
-  setContractType,
-  duration,
-  setDuration,
-  durationUnit,
-  setDurationUnit,
-  stake,
-  setStake,
-  onPrepareTrade,
-  onExecuteTrade,
-  proposal,
-  orderLoading,
-  proposalLoading,
-  currency = "USD"
+  connected = false,
+  symbol = "",
+  changeMarket = () => {},
+  contractType = "CALL",
+  setContractType = () => {},
+  duration = "5",
+  setDuration = () => {},
+  durationUnit = "m",
+  setDurationUnit = () => {},
+  stake = "1",
+  setStake = () => {},
+  availableContracts = [],
+  contractsLoading = false,
+  onPrepareTrade = () => {},
+  onExecuteTrade = () => {},
+  proposal = null,
+  orderLoading = false,
+  proposalLoading = false,
+  currency = "USD",
+  marketOptions = [],
+  error = "",
+  notice = ""
 }) {
-  const [marketType, setMarketType] = useState(
-    symbol.startsWith("frx") ? "Forex" : "Derived"
+  const [group, setGroup] = useState("all");
+  const [barrier, setBarrier] = useState("5");
+  const [barrier2, setBarrier2] = useState("");
+  const [localError, setLocalError] = useState("");
+
+  const contracts = useMemo(
+    () => normalizeContracts(availableContracts),
+    [availableContracts]
   );
 
-  const [marketGroup, setMarketGroup] = useState(
-    symbol.startsWith("frx") ? "Forex" : "Continuous Indices"
+  const activeContract = contracts.find(
+    item => item.contract_type === String(contractType).toUpperCase()
   );
 
-  const [quickMode, setQuickMode] = useState(false);
-  const [purchaseCondition, setPurchaseCondition] = useState("Rise");
-  const [restartOnError, setRestartOnError] = useState(false);
-  const [restartLastTrade, setRestartLastTrade] = useState(true);
-  const [runOnce, setRunOnce] = useState(false);
+  const selectedGroup = GROUPS.find(item => item.id === group);
 
-  const options = marketGroups[marketGroup] || [];
+  const filteredContracts = useMemo(() => {
+    if (!selectedGroup || !selectedGroup.types) return contracts;
+    return contracts.filter(item =>
+      selectedGroup.types.includes(item.contract_type)
+    );
+  }, [contracts, selectedGroup]);
 
-  const selectedMarket =
-    options.find(item => item[0] === symbol) || options[0];
+  const type = String(contractType || "").toUpperCase();
+  const needsDigit = DIGIT_TYPES.has(type);
+  const needsPriceBarrier = PRICE_BARRIER_TYPES.has(type);
+  const needsRange = RANGE_TYPES.has(type);
+  const needsBarrier = needsDigit || needsPriceBarrier || needsRange;
 
-  function updateMarketType(value) {
-    setMarketType(value);
+  function handleGroupChange(nextGroup) {
+    setGroup(nextGroup);
+    setLocalError("");
 
-    const group = value === "Derived"
-      ? "Continuous Indices"
-      : "Forex";
+    const groupDefinition = GROUPS.find(item => item.id === nextGroup);
+    if (!groupDefinition || !groupDefinition.types) return;
 
-    setMarketGroup(group);
+    const firstAvailable = contracts.find(item =>
+      groupDefinition.types.includes(item.contract_type)
+    );
 
-    const firstSymbol = marketGroups[group][0][0];
-    changeMarket(firstSymbol);
+    if (firstAvailable) setContractType(firstAvailable.contract_type);
   }
 
-  function updateMarketGroup(value) {
-    setMarketGroup(value);
-
-    const firstSymbol = marketGroups[value][0][0];
-    changeMarket(firstSymbol);
+  function handleContractChange(nextType) {
+    setContractType(nextType);
+    setLocalError("");
   }
 
-  function applyQuickStrategy() {
-    setQuickMode(true);
-    setPurchaseCondition("Rise");
-    setContractType("CALL");
-    setDuration("1");
-    setDurationUnit("t");
-    setStake("1");
+  function prepareProposal() {
+    setLocalError("");
+
+    if (!connected) {
+      setLocalError("Connect your Deriv demo account first.");
+      return;
+    }
+
+    if (!activeContract) {
+      setLocalError("Select a contract type currently offered for this market.");
+      return;
+    }
+
+    const amount = Number(stake);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 10) {
+      setLocalError("Demo stake must be greater than zero and no more than 10.");
+      return;
+    }
+
+    const requestOptions = {};
+
+    if (needsDigit) {
+      const digit = Number(barrier);
+      if (!Number.isInteger(digit) || digit < 0 || digit > 9) {
+        setLocalError("Enter a digit barrier from 0 to 9.");
+        return;
+      }
+      requestOptions.barrier = String(digit);
+    } else if (needsPriceBarrier) {
+      const priceBarrier = Number(barrier);
+      if (!Number.isFinite(priceBarrier) || barrier.trim() === "") {
+        setLocalError("Enter a valid numeric price barrier.");
+        return;
+      }
+      requestOptions.barrier = String(priceBarrier);
+    } else if (needsRange) {
+      const lower = Number(barrier);
+      const upper = Number(barrier2);
+
+      if (
+        barrier.trim() === "" ||
+        barrier2.trim() === "" ||
+        !Number.isFinite(lower) ||
+        !Number.isFinite(upper) ||
+        lower >= upper
+      ) {
+        setLocalError("Enter two valid price barriers; the lower barrier must be below the upper barrier.");
+        return;
+      }
+
+      requestOptions.barrier = String(lower);
+      requestOptions.barrier2 = String(upper);
+    }
+
+    onPrepareTrade(requestOptions);
   }
 
-  const button = {
-    border: 0,
-    borderRadius: 7,
-    padding: "11px 18px",
-    background: "#3979ed",
-    color: "#fff",
-    fontWeight: 800,
-    cursor: "pointer"
-  };
+  const canPrepare =
+    connected &&
+    !contractsLoading &&
+    !proposalLoading &&
+    Boolean(activeContract);
 
   return (
-    <div style={{
-      color: "#e7edf7",
-      display: "grid",
-      gap: 14
-    }}>
-
-      {/* BUILDER HEADER */}
-
+    <section
+      style={{
+        background: "#111c2d",
+        border: "1px solid #26364d",
+        borderRadius: 14,
+        padding: 18,
+        color: "#e7edf7",
+        display: "grid",
+        gap: 16
+      }}
+    >
       <div style={{
         display: "flex",
         justifyContent: "space-between",
         alignItems: "center",
         flexWrap: "wrap",
-        gap: 12
+        gap: 10
       }}>
         <div>
-          <h2 style={{ margin: 0 }}>Bot Builder</h2>
-          <p style={{
-            color: "#91a3bc",
-            fontSize: 12,
-            marginTop: 5
-          }}>
-            Configure and prepare your Deriv trading strategy.
+          <h3 style={{ margin: 0 }}>Deriv Bot Builder</h3>
+          <p style={{ color: "#91a3bc", fontSize: 12, margin: "6px 0 0" }}>
+            Configure a contract, review its quote, then confirm a demo order.
           </p>
         </div>
-
         <span style={{
-          padding: "7px 12px",
+          padding: "7px 10px",
           borderRadius: 20,
           background: connected ? "#103d32" : "#342b1b",
           color: connected ? "#35d6a2" : "#f0bb65",
           fontSize: 11,
           fontWeight: 800
         }}>
-          {connected ? "DERIV CONNECTED" : "NOT CONNECTED"}
+          {connected ? "DEMO CONNECTED" : "NOT CONNECTED"}
         </span>
       </div>
 
-      {/* QUICK STRATEGY */}
-
-      <div>
-        <button
-          style={button}
-          onClick={applyQuickStrategy}
-        >
-          ⚡ Quick Strategy
-        </button>
-
-        {quickMode && (
-          <span style={{
-            marginLeft: 10,
-            color: "#35d6a2",
+      {(error || notice || localError) && (
+        <div
+          role={localError || error ? "alert" : "status"}
+          style={{
+            padding: 11,
+            borderRadius: 8,
+            background: "#0b1422",
+            border: `1px solid ${(localError || error) ? "#a94353" : "#1d8c70"}`,
+            color: (localError || error) ? "#ff8997" : "#50d6aa",
             fontSize: 12
-          }}>
-            Quick settings applied. Review before preparing a trade.
-          </span>
+          }}
+        >
+          {localError || error || notice}
+        </div>
+      )}
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+        gap: 13
+      }}>
+        {marketOptions.length > 0 && (
+          <div>
+            <label style={labelStyle}>Market</label>
+            <select
+              style={inputStyle}
+              value={symbol}
+              disabled={!connected}
+              onChange={event => changeMarket(event.target.value)}
+            >
+              {marketOptions.map(item => (
+                <option key={item.value} value={item.value}>
+                  {item.label || item.value}
+                </option>
+              ))}
+            </select>
+          </div>
         )}
-      </div>
 
-      {/* 1. TRADE PARAMETERS */}
-
-      <section style={styles.card}>
-        <div style={styles.heading}>
-          ▤ &nbsp; 1. Trade Parameters
-        </div>
-
-        <div style={styles.row}>
-          <span>Market:</span>
-
+        <div>
+          <label style={labelStyle}>Contract category</label>
           <select
-            style={styles.select}
-            value={marketType}
-            disabled={!connected}
-            onChange={e => updateMarketType(e.target.value)}
+            style={inputStyle}
+            value={group}
+            disabled={!connected || contractsLoading || contracts.length === 0}
+            onChange={event => handleGroupChange(event.target.value)}
           >
-            <option value="Derived">Derived</option>
-            <option value="Forex">Forex</option>
-          </select>
-
-          <span>›</span>
-
-          <select
-            style={styles.select}
-            value={marketGroup}
-            disabled={!connected}
-            onChange={e => updateMarketGroup(e.target.value)}
-          >
-            {Object.keys(marketGroups).map(group => (
-              <option key={group} value={group}>
-                {group}
-              </option>
-            ))}
-          </select>
-
-          <span>›</span>
-
-          <select
-            style={styles.select}
-            value={symbol}
-            disabled={!connected}
-            onChange={e => changeMarket(e.target.value)}
-          >
-            {options.map(item => (
-              <option key={item[0]} value={item[0]}>
-                {item[1]}
-              </option>
+            {GROUPS.map(item => (
+              <option key={item.id} value={item.id}>{item.label}</option>
             ))}
           </select>
         </div>
 
-        <div style={styles.row}>
-          <span>Trade Type:</span>
-
+        <div>
+          <label style={labelStyle}>Contract type</label>
           <select
-            style={styles.select}
-            value="Up/Down"
-            disabled
+            style={inputStyle}
+            value={activeContract ? type : ""}
+            disabled={!connected || contractsLoading || filteredContracts.length === 0}
+            onChange={event => handleContractChange(event.target.value)}
           >
-            <option>Up/Down</option>
+            {!activeContract && <option value="">Choose available contract</option>}
+            {filteredContracts.map(item => (
+              <option key={item.contract_type} value={item.contract_type}>
+                {getContractLabel(item.contract_type)}
+              </option>
+            ))}
           </select>
-
-          <span>›</span>
-
-          <select
-            style={styles.select}
-            value="Rise/Fall"
-            disabled
-          >
-            <option>Rise/Fall</option>
-          </select>
-        </div>
-
-        <div style={styles.row}>
-          <span>Contract Type:</span>
-
-          <select
-            style={styles.select}
-            value={contractType}
-            disabled={!connected}
-            onChange={e => setContractType(e.target.value)}
-          >
-            <option value="CALL">Rise</option>
-            <option value="PUT">Fall</option>
-          </select>
-        </div>
-
-        <div style={styles.row}>
-          <span>Default Candle Interval:</span>
-
-          <select
-            style={styles.select}
-            defaultValue="1"
-          >
-            <option value="1">1 minute</option>
-            <option value="5">5 minutes</option>
-            <option value="15">15 minutes</option>
-            <option value="30">30 minutes</option>
-            <option value="60">1 hour</option>
-          </select>
-          <small style={{ color: "#b8c8d8" }}>
-            Analysis setting; does not change the live tick subscription.
+          <small style={{ color: "#91a3bc", display: "block", marginTop: 6 }}>
+            {contractsLoading
+              ? "Loading options from Deriv…"
+              : `${contracts.length} contract type(s) returned for this market.`}
           </small>
         </div>
 
-        <div style={styles.row}>
-          <label>
-            <input
-              type="checkbox"
-              checked={restartOnError}
-              onChange={e => setRestartOnError(e.target.checked)}
-            />
-            &nbsp; Restart buy/sell on error
-          </label>
-        </div>
-
-        <div style={styles.row}>
-          <label>
-            <input
-              type="checkbox"
-              checked={restartLastTrade}
-              onChange={e => setRestartLastTrade(e.target.checked)}
-            />
-            &nbsp; Restart last trade on error
-          </label>
-        </div>
-
-        <div style={styles.heading}>
-          Run once at start:
-        </div>
-
-        <label style={styles.row}>
+        <div>
+          <label style={labelStyle}>Stake ({currency})</label>
           <input
-            type="checkbox"
-            checked={runOnce}
-            onChange={e => setRunOnce(e.target.checked)}
+            style={inputStyle}
+            type="number"
+            min="0.01"
+            max="10"
+            step="0.01"
+            value={stake}
+            disabled={!connected}
+            onChange={event => setStake(event.target.value)}
           />
-          Enable one-time start condition
-        </label>
-
-        <div style={styles.heading}>
-          Trade Options:
         </div>
 
-        <div style={styles.row}>
-          <span>Duration:</span>
+        <div>
+          <label style={labelStyle}>Duration</label>
+          <input
+            style={inputStyle}
+            type="number"
+            min="1"
+            step="1"
+            value={duration}
+            disabled={!connected}
+            onChange={event => setDuration(event.target.value)}
+          />
+        </div>
 
+        <div>
+          <label style={labelStyle}>Duration unit</label>
           <select
-            style={styles.select}
+            style={inputStyle}
             value={durationUnit}
             disabled={!connected}
-            onChange={e => setDurationUnit(e.target.value)}
+            onChange={event => setDurationUnit(event.target.value)}
           >
             <option value="t">Ticks</option>
             <option value="s">Seconds</option>
@@ -376,186 +415,133 @@ export default function DerivBotBuilder({
             <option value="h">Hours</option>
             <option value="d">Days</option>
           </select>
-
-          <input
-            style={styles.input}
-            type="number"
-            min="1"
-            value={duration}
-            disabled={!connected}
-            onChange={e => setDuration(e.target.value)}
-          />
-
-          <span>Stake:</span>
-
-          <input
-            style={styles.input}
-            type="number"
-            min="0.35"
-            max="10"
-            step="0.01"
-            value={stake}
-            disabled={!connected}
-            onChange={e => setStake(e.target.value)}
-          />
-
-          <span>{currency}</span>
-        </div>
-      </section>
-
-      {/* 2. PURCHASE CONDITIONS */}
-
-      <section style={styles.card}>
-        <div style={styles.heading}>
-          ♙ &nbsp; 2. Purchase Conditions
-        </div>
-
-        <div style={styles.row}>
-          <span>Purchase:</span>
-
-          <select
-            style={styles.select}
-            value={purchaseCondition}
-            onChange={e => {
-              const value = e.target.value;
-              setPurchaseCondition(value);
-
-              if (value === "Rise") setContractType("CALL");
-              if (value === "Fall") setContractType("PUT");
-            }}
-          >
-            <option value="Rise">Rise</option>
-            <option value="Fall">Fall</option>
-          </select>
-        </div>
-
-        <p style={{
-          fontSize: 11,
-          color: "#c1d3e1",
-          marginBottom: 0
-        }}>
-          Digit Match strategy conditions will be added as a separate
-          selectable strategy block after prediction validation.
-        </p>
-      </section>
-
-      {/* 3. EXECUTION */}
-
-      <section style={styles.card}>
-        <div style={styles.heading}>
-          ▶ &nbsp; 3. Strategy Execution
-        </div>
-
-        <div style={styles.row}>
-          <span>Selected market:</span>
-          <strong>{selectedMarket?.[1] || symbol}</strong>
-        </div>
-
-        <div style={styles.row}>
-          <span>Direction:</span>
-          <strong>
-            {contractType === "CALL" ? "RISE" : "FALL"}
-          </strong>
-        </div>
-
-        <div style={styles.row}>
-          <span>Stake:</span>
-          <strong>{stake} {currency}</strong>
-        </div>
-
-        <div style={styles.row}>
-          <span>Duration:</span>
-          <strong>{duration} {durationUnit}</strong>
-        </div>
-
-        <button
-          style={{
-            ...button,
-            opacity: connected ? 1 : 0.5
-          }}
-          disabled={!connected || proposalLoading}
-          onClick={onPrepareTrade}
-        >
-          {proposalLoading
-            ? "Preparing proposal..."
-            : "Prepare Demo Trade"}
-        </button>
-
-        {proposal && (
-          <div style={{
-            marginTop: 14,
-            padding: 12,
-            background: "#0b3047",
-            borderRadius: 8
-          }}>
-            <strong>Proposal ready</strong>
-
-            <p style={{ fontSize: 12 }}>
-              Stake: {proposal.amount} {currency}
-              <br />
-              Potential payout: {proposal.payout} {currency}
-            </p>
-
-            <button
-              style={{
-                ...button,
-                background: "#087d69"
-              }}
-              disabled={orderLoading}
-              onClick={onExecuteTrade}
-            >
-              {orderLoading
-                ? "Placing demo trade..."
-                : "Confirm Demo Trade"}
-            </button>
-          </div>
-        )}
-      </section>
-
-      {/* BOTTOM CONTROL BAR */}
-
-      <div style={{
-        position: "sticky",
-        bottom: 0,
-        zIndex: 5,
-        background: "#0b1422",
-        border: "1px solid #34445c",
-        borderRadius: 12,
-        padding: 12,
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        flexWrap: "wrap"
-      }}>
-        <button
-          style={{
-            ...button,
-            minWidth: 125
-          }}
-          disabled={!connected || proposalLoading}
-          onClick={onPrepareTrade}
-        >
-          ▶ &nbsp; RUN
-        </button>
-
-        <div>
-          <strong style={{
-            color: connected ? "#35d6a2" : "#f0bb65",
-            fontSize: 13
-          }}>
-            {connected ? "Bot Builder Ready" : "Bot is not connected"}
-          </strong>
-
-          <div style={{
-            color: "#91a3bc",
-            fontSize: 10,
-            marginTop: 4
-          }}>
-            RUN prepares a demo trade proposal. It does not start unattended automation.
-          </div>
         </div>
       </div>
 
-    </div>
+      {needsBarrier && (
+        <div style={{
+          border: "1px solid #34445c",
+          borderRadius: 10,
+          padding: 14,
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+          gap: 13
+        }}>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <strong style={{ fontSize: 13 }}>Contract barrier settings</strong>
+            <p style={{ color: "#91a3bc", fontSize: 11, margin: "5px 0 0" }}>
+              {needsDigit
+                ? "Digit contracts require a final-digit barrier from 0 to 9."
+                : needsRange
+                  ? "Enter the lower and upper price barriers for this range contract."
+                  : "Enter the numeric price level required by this contract."}
+            </p>
+          </div>
+
+          <div>
+            <label style={labelStyle}>
+              {needsRange ? "Lower barrier" : needsDigit ? "Digit barrier (0–9)" : "Price barrier"}
+            </label>
+            <input
+              style={inputStyle}
+              type="number"
+              min={needsDigit ? "0" : undefined}
+              max={needsDigit ? "9" : undefined}
+              step={needsDigit ? "1" : "any"}
+              value={barrier}
+              onChange={event => setBarrier(event.target.value)}
+            />
+          </div>
+
+          {needsRange && (
+            <div>
+              <label style={labelStyle}>Upper barrier</label>
+              <input
+                style={inputStyle}
+                type="number"
+                step="any"
+                value={barrier2}
+                onChange={event => setBarrier2(event.target.value)}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{
+        background: "#0b1422",
+        border: "1px solid #26364d",
+        borderRadius: 9,
+        padding: 12,
+        fontSize: 12,
+        lineHeight: 1.6,
+        color: "#aebbd0"
+      }}>
+        <strong style={{ color: "#f0bb65" }}>Demo safeguards</strong>
+        <div>Maximum stake per proposal: {currency} 10.</div>
+        <div>Only contract types returned by Deriv for the selected market can be requested.</div>
+        <div>Preparing a proposal does not place an order. A separate confirmation is required.</div>
+      </div>
+
+      <button
+        type="button"
+        style={{
+          ...buttonStyle,
+          background: "#087d69",
+          color: "#fff",
+          opacity: canPrepare ? 1 : 0.55
+        }}
+        disabled={!canPrepare}
+        onClick={prepareProposal}
+      >
+        {proposalLoading ? "Requesting Deriv quote…" : "Prepare trade proposal"}
+      </button>
+
+      {proposal && (
+        <div style={{
+          border: "1px solid #087d69",
+          borderRadius: 10,
+          padding: 14,
+          display: "grid",
+          gap: 12
+        }}>
+          <div>
+            <strong>Proposal ready for review</strong>
+            <p style={{ color: "#91a3bc", fontSize: 11, margin: "5px 0 0" }}>
+              {getContractLabel(type)} · {symbol} · {duration} {durationUnit}
+              {proposal.longcode ? ` · ${proposal.longcode}` : ""}
+            </p>
+          </div>
+
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))",
+            gap: 12
+          }}>
+            <div>
+              <small style={{ color: "#91a3bc" }}>Stake / purchase price</small>
+              <div style={{ fontWeight: 800 }}>
+                {Number(proposal.ask_price ?? proposal.amount).toFixed(2)} {currency}
+              </div>
+            </div>
+            <div>
+              <small style={{ color: "#91a3bc" }}>Potential payout</small>
+              <div style={{ fontWeight: 800 }}>
+                {Number(proposal.payout).toFixed(2)} {currency}
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            style={{ ...buttonStyle, background: "#087d69", color: "#fff" }}
+            disabled={!connected || orderLoading}
+            onClick={onExecuteTrade}
+          >
+            {orderLoading ? "Placing demo order…" : "Confirm & place demo order"}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
