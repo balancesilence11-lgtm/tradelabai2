@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+mport React, { useEffect, useRef, useState } from "react";
 import DerivClient from "./derivClient";
 import DigitMatchPredictor from "./digitMatchPredictor";
+import DerivBotBuilder from "./DerivBotBuilder";
 
 const MAX_STAKE = 10;
 
@@ -44,6 +45,14 @@ const cardStyle = {
   padding: 18
 };
 
+const buttonStyle = {
+  border: 0,
+  borderRadius: 8,
+  padding: "11px 16px",
+  fontWeight: 700,
+  cursor: "pointer"
+};
+
 const inputStyle = {
   width: "100%",
   background: "#0b1422",
@@ -53,14 +62,6 @@ const inputStyle = {
   padding: "11px 12px",
   outline: "none",
   boxSizing: "border-box"
-};
-
-const buttonStyle = {
-  border: 0,
-  borderRadius: 8,
-  padding: "11px 16px",
-  fontWeight: 700,
-  cursor: "pointer"
 };
 
 const money = (value, currency = "USD") => {
@@ -99,6 +100,7 @@ function DerivLivePanel() {
   const clientRef = useRef(null);
 
   // DIGIT MATCH PREDICTION ENGINE
+
   const digitPredictorRef = useRef(
     new DigitMatchPredictor({
       maxHistory: 5000,
@@ -117,28 +119,41 @@ function DerivLivePanel() {
 
   const [digitHistory, setDigitHistory] = useState([]);
 
+  // DERIV CONNECTION
+
   const [status, setStatus] = useState("disconnected");
   const [accounts, setAccounts] = useState([]);
 
   const [accountId, setAccountId] = useState(
-    () => localStorage.getItem("tradelab_deriv_selected_account") || ""
+    () =>
+      localStorage.getItem("tradelab_deriv_selected_account") || ""
   );
+
+  // ACCOUNT DATA
 
   const [balance, setBalance] = useState(null);
   const [portfolio, setPortfolio] = useState([]);
   const [history, setHistory] = useState([]);
 
+  // MARKET DATA
+
   const [symbol, setSymbol] = useState("frxEURUSD");
   const [tick, setTick] = useState(null);
+
+  // TRADE SETTINGS
 
   const [stake, setStake] = useState("1");
   const [contractType, setContractType] = useState("CALL");
   const [duration, setDuration] = useState("5");
   const [durationUnit, setDurationUnit] = useState("m");
 
+  // PROPOSAL AND EXECUTION
+
   const [proposal, setProposal] = useState(null);
   const [lastOrder, setLastOrder] = useState(null);
   const [monitoredContract, setMonitoredContract] = useState(null);
+
+  // STATUS
 
   const [loading, setLoading] = useState(false);
   const [proposalLoading, setProposalLoading] = useState(false);
@@ -176,15 +191,20 @@ function DerivLivePanel() {
       },
 
       onMessage: data => {
+        // BALANCE
+
         if (data.msg_type === "balance" && data.balance) {
           setBalance(data.balance);
         }
+
+        // PORTFOLIO
 
         if (data.msg_type === "portfolio" && data.portfolio) {
           setPortfolio(data.portfolio.contracts || []);
         }
 
-        // LIVE TICK + DIGIT PREDICTION PROCESSING
+        // LIVE TICKS AND DIGIT PREDICTION
+
         if (data.msg_type === "tick" && data.tick) {
           const incomingTick = data.tick;
 
@@ -198,7 +218,9 @@ function DerivLivePanel() {
           );
 
           if (digit !== null) {
-            // Evaluate the previous prediction against this new tick.
+            // Evaluate the previous prediction using
+            // the newly received market digit.
+
             const evaluation = predictor.evaluate(digit);
 
             if (evaluation) {
@@ -211,10 +233,12 @@ function DerivLivePanel() {
               ].slice(0, 50));
             }
 
-            // Add the latest observation to the prediction history.
+            // Add the current tick to the observation history.
+
             predictor.addTick(incomingTick);
 
-            // Generate the next statistical prediction.
+            // Generate the next prediction.
+
             const prediction = predictor.predict();
 
             setDigitAnalysis({
@@ -227,6 +251,8 @@ function DerivLivePanel() {
             );
           }
         }
+
+        // CONTRACT MONITORING
 
         if (
           data.msg_type === "proposal_open_contract" &&
@@ -247,13 +273,20 @@ function DerivLivePanel() {
                 setPortfolio(snapshot.portfolio);
               })
               .catch(err => {
-                console.warn("Account refresh failed:", err);
+                console.warn(
+                  "Account refresh failed:",
+                  err
+                );
               });
           }
         }
 
+        // API ERRORS
+
         if (data.error) {
-          setError(data.error.message || "Deriv API error.");
+          setError(
+            data.error.message || "Deriv API error."
+          );
         }
       }
     });
@@ -298,13 +331,20 @@ function DerivLivePanel() {
 
       if (
         accountId &&
-        !demoAccounts.some(a => getAccountId(a) === accountId)
+        !demoAccounts.some(
+          a => getAccountId(a) === accountId
+        )
       ) {
         setAccountId("");
-        localStorage.removeItem("tradelab_deriv_selected_account");
+
+        localStorage.removeItem(
+          "tradelab_deriv_selected_account"
+        );
       }
     } catch (err) {
-      setError(err.message || "Unable to load Deriv accounts.");
+      setError(
+        err.message || "Unable to load Deriv accounts."
+      );
     } finally {
       setLoading(false);
     }
@@ -338,9 +378,13 @@ function DerivLivePanel() {
 
       await loadHistory();
 
-      setNotice("Deriv demo account connected successfully.");
+      setNotice(
+        "Deriv demo account connected successfully."
+      );
     } catch (err) {
-      setError(err.message || "Unable to connect Deriv account.");
+      setError(
+        err.message || "Unable to connect Deriv account."
+      );
     } finally {
       setLoading(false);
     }
@@ -374,8 +418,10 @@ function DerivLivePanel() {
     setTick(null);
     setProposal(null);
 
-    // Start a fresh digit-analysis history for the new market.
+    // Reset digit statistics when switching markets.
+
     digitPredictorRef.current.reset();
+
     setDigitAnalysis(null);
     setDigitHistory([]);
 
@@ -400,6 +446,8 @@ function DerivLivePanel() {
 
     changeMarket(symbol);
 
+    // Re-subscribe when the connection becomes active.
+
   }, [connected]);
 
   /* ======================================================
@@ -413,7 +461,8 @@ function DerivLivePanel() {
     setError("");
 
     try {
-      const snapshot = await clientRef.current.refreshAccount();
+      const snapshot =
+        await clientRef.current.refreshAccount();
 
       setBalance(snapshot.balance);
       setPortfolio(snapshot.portfolio);
@@ -422,7 +471,9 @@ function DerivLivePanel() {
 
       setNotice("Account information refreshed.");
     } catch (err) {
-      setError(err.message || "Account refresh failed.");
+      setError(
+        err.message || "Account refresh failed."
+      );
     } finally {
       setLoading(false);
     }
@@ -436,10 +487,11 @@ function DerivLivePanel() {
     if (!clientRef.current?.connected) return;
 
     try {
-      const result = await clientRef.current.getProfitTable({
-        limit: 50,
-        offset: 0
-      });
+      const result =
+        await clientRef.current.getProfitTable({
+          limit: 50,
+          offset: 0
+        });
 
       const transactions =
         result.transactions ||
@@ -447,10 +499,15 @@ function DerivLivePanel() {
         [];
 
       setHistory(
-        Array.isArray(transactions) ? transactions : []
+        Array.isArray(transactions)
+          ? transactions
+          : []
       );
     } catch (err) {
-      console.warn("Profit table unavailable:", err.message);
+      console.warn(
+        "Profit table unavailable:",
+        err.message
+      );
     }
   }
 
@@ -469,33 +526,49 @@ function DerivLivePanel() {
     setProposal(null);
 
     const amount = Number(stake);
+    const tradeDuration = Number(duration);
 
     if (
       !Number.isFinite(amount) ||
       amount <= 0 ||
       amount > MAX_STAKE
     ) {
-      setError(`Stake must be between 0 and ${MAX_STAKE}.`);
+      setError(
+        `Stake must be greater than zero and not exceed ${MAX_STAKE}.`
+      );
+      return;
+    }
+
+    if (
+      !Number.isFinite(tradeDuration) ||
+      tradeDuration < 1
+    ) {
+      setError("Enter a valid trade duration.");
       return;
     }
 
     setProposalLoading(true);
 
     try {
-      const quote = await clientRef.current.getProposal({
-        symbol,
-        contractType,
-        amount,
-        currency,
-        duration: Number(duration),
-        durationUnit
-      });
+      const quote =
+        await clientRef.current.getProposal({
+          symbol,
+          contractType,
+          amount,
+          currency,
+          duration: tradeDuration,
+          durationUnit
+        });
 
       setProposal(quote);
 
-      setNotice("Proposal received. Review the quote before confirming.");
+      setNotice(
+        "Proposal received. Review the quote before confirming."
+      );
     } catch (err) {
-      setError(err.message || "Unable to obtain proposal.");
+      setError(
+        err.message || "Unable to obtain proposal."
+      );
     } finally {
       setProposalLoading(false);
     }
@@ -507,12 +580,16 @@ function DerivLivePanel() {
 
   async function executeDemoTrade() {
     if (!proposal) {
-      setError("Request a proposal before placing an order.");
+      setError(
+        "Request a proposal before placing an order."
+      );
       return;
     }
 
     if (!connected) {
-      setError("Demo account is not connected.");
+      setError(
+        "Demo account is not connected."
+      );
       return;
     }
 
@@ -538,11 +615,12 @@ function DerivLivePanel() {
     setNotice("");
 
     try {
-      const result = await clientRef.current.buyDemoProposal(
-        proposal.id,
-        proposal.ask_price,
-        { confirmed: true }
-      );
+      const result =
+        await clientRef.current.buyDemoProposal(
+          proposal.id,
+          proposal.ask_price,
+          { confirmed: true }
+        );
 
       setLastOrder(result);
       setProposal(null);
@@ -560,8 +638,13 @@ function DerivLivePanel() {
       }
 
       if (result.accountSnapshot) {
-        setBalance(result.accountSnapshot.balance);
-        setPortfolio(result.accountSnapshot.portfolio);
+        setBalance(
+          result.accountSnapshot.balance
+        );
+
+        setPortfolio(
+          result.accountSnapshot.portfolio
+        );
       }
 
       await loadHistory();
@@ -570,7 +653,9 @@ function DerivLivePanel() {
         `Demo order successfully placed. Contract ID: ${result.contract_id}`
       );
     } catch (err) {
-      setError(err.message || "Demo order failed.");
+      setError(
+        err.message || "Demo order failed."
+      );
     } finally {
       setOrderLoading(false);
     }
@@ -583,6 +668,8 @@ function DerivLivePanel() {
   return (
     <div style={panelStyle}>
 
+      {/* HEADER */}
+
       <div style={{
         display: "flex",
         justifyContent: "space-between",
@@ -591,24 +678,38 @@ function DerivLivePanel() {
         gap: 12
       }}>
         <div>
-          <h2 style={{ margin: 0 }}>Deriv Live Trading</h2>
+          <h2 style={{ margin: 0 }}>
+            Deriv Live Trading
+          </h2>
 
-          <p style={{ color: "#91a3bc", margin: "6px 0 0" }}>
-            Authenticated demo account · Forex and Volatility (including 1s) · Rise/Fall demo execution
+          <p style={{
+            color: "#91a3bc",
+            margin: "6px 0 0"
+          }}>
+            Authenticated Deriv connection ·
+            Forex · Volatility · AI analysis
           </p>
         </div>
 
         <span style={{
           padding: "8px 12px",
           borderRadius: 20,
-          background: connected ? "#103d32" : "#342b1b",
-          color: connected ? "#35d6a2" : "#f0bb65",
+          background: connected
+            ? "#103d32"
+            : "#342b1b",
+          color: connected
+            ? "#35d6a2"
+            : "#f0bb65",
           fontSize: 12,
           fontWeight: 800
         }}>
-          ● {connected ? "CONNECTED — DEMO" : status.toUpperCase()}
+          ● {connected
+            ? "CONNECTED — DEMO"
+            : status.toUpperCase()}
         </span>
       </div>
+
+      {/* ERROR */}
 
       {error && (
         <div role="alert" style={{
@@ -619,6 +720,8 @@ function DerivLivePanel() {
           {error}
         </div>
       )}
+
+      {/* NOTICE */}
 
       {notice && (
         <div role="status" style={{
@@ -633,7 +736,9 @@ function DerivLivePanel() {
       {/* ACCOUNT CONNECTION */}
 
       <section style={cardStyle}>
-        <h3 style={{ marginTop: 0 }}>Demo Account Connection</h3>
+        <h3 style={{ marginTop: 0 }}>
+          Demo Account Connection
+        </h3>
 
         <div style={{
           display: "flex",
@@ -642,7 +747,10 @@ function DerivLivePanel() {
           alignItems: "end"
         }}>
           <div style={{ flex: "1 1 250px" }}>
-            <label style={{ display: "block", marginBottom: 8 }}>
+            <label style={{
+              display: "block",
+              marginBottom: 8
+            }}>
               Select Deriv demo account
             </label>
 
@@ -650,9 +758,13 @@ function DerivLivePanel() {
               style={inputStyle}
               value={accountId}
               disabled={connected || loading}
-              onChange={event => setAccountId(event.target.value)}
+              onChange={event =>
+                setAccountId(event.target.value)
+              }
             >
-              <option value="">Select demo account</option>
+              <option value="">
+                Select demo account
+              </option>
 
               {accounts.map(account => (
                 <option
@@ -675,7 +787,9 @@ function DerivLivePanel() {
               disabled={loading || !accountId}
               onClick={connectAccount}
             >
-              {loading ? "Connecting..." : "Connect Demo Account"}
+              {loading
+                ? "Connecting..."
+                : "Connect Demo Account"}
             </button>
           ) : (
             <>
@@ -722,7 +836,8 @@ function DerivLivePanel() {
           fontSize: 12,
           marginBottom: 0
         }}>
-          Only Deriv demo accounts are permitted. Real-money execution is disabled.
+          Only Deriv demo accounts are permitted.
+          Real-money execution is disabled.
         </p>
       </section>
 
@@ -730,32 +845,64 @@ function DerivLivePanel() {
 
       <div style={{
         display: "grid",
-        gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+        gridTemplateColumns:
+          "repeat(auto-fit,minmax(180px,1fr))",
         gap: 12
       }}>
         <div style={cardStyle}>
-          <div style={{ color: "#91a3bc", fontSize: 12 }}>Account Balance</div>
+          <div style={{
+            color: "#91a3bc",
+            fontSize: 12
+          }}>
+            Account Balance
+          </div>
+
           <h2 style={{ marginBottom: 0 }}>
             {balance
-              ? money(balance.balance, balance.currency)
+              ? money(
+                  balance.balance,
+                  balance.currency
+                )
               : "—"}
           </h2>
         </div>
 
         <div style={cardStyle}>
-          <div style={{ color: "#91a3bc", fontSize: 12 }}>Open Positions</div>
-          <h2 style={{ marginBottom: 0 }}>{portfolio.length}</h2>
-        </div>
+          <div style={{
+            color: "#91a3bc",
+            fontSize: 12
+          }}>
+            Open Positions
+          </div>
 
-        <div style={cardStyle}>
-          <div style={{ color: "#91a3bc", fontSize: 12 }}>Current Market</div>
           <h2 style={{ marginBottom: 0 }}>
-            {SYMBOLS.find(s => s.value === symbol)?.label || symbol}
+            {portfolio.length}
           </h2>
         </div>
 
         <div style={cardStyle}>
-          <div style={{ color: "#91a3bc", fontSize: 12 }}>Live Price</div>
+          <div style={{
+            color: "#91a3bc",
+            fontSize: 12
+          }}>
+            Current Market
+          </div>
+
+          <h2 style={{ marginBottom: 0 }}>
+            {SYMBOLS.find(
+              item => item.value === symbol
+            )?.label || symbol}
+          </h2>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{
+            color: "#91a3bc",
+            fontSize: 12
+          }}>
+            Live Price
+          </div>
+
           <h2 style={{ marginBottom: 0 }}>
             {tick?.quote !== undefined
               ? Number(tick.quote).toFixed(5)
@@ -765,65 +912,44 @@ function DerivLivePanel() {
       </div>
 
       {/* ==================================================
-         AI DIGIT MATCH PREDICTOR
+         DIGIT MATCH PREDICTOR
          ================================================== */}
 
       <section style={{
         ...cardStyle,
         borderColor: "#087d69"
       }}>
-        <div style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 10
+        <h3 style={{ marginTop: 0 }}>
+          AI Digit Match Predictor
+        </h3>
+
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 12
         }}>
-          <div>
-            <h3 style={{ marginTop: 0, marginBottom: 5 }}>
-              AI Digit Match Predictor
-            </h3>
-
-            <p style={{
-              color: "#91a3bc",
-              fontSize: 12,
-              margin: 0
-            }}>
-              Live Deriv tick analysis · Statistical prediction · Historical validation
-            </p>
-          </div>
-
-          <span style={{
-            padding: "7px 11px",
-            borderRadius: 20,
-            background: digitAnalysis?.ready ? "#103d32" : "#342b1b",
-            color: digitAnalysis?.ready ? "#35d6a2" : "#f0bb65",
-            fontSize: 11,
-            fontWeight: 700
-          }}>
-            {digitAnalysis?.ready ? "MODEL ACTIVE" : "COLLECTING DATA"}
-          </span>
-        </div>
+          Live Deriv tick analysis ·
+          Statistical prediction ·
+          Historical validation
+        </p>
 
         <div style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
-          gap: 12,
-          marginTop: 18
+          gridTemplateColumns:
+            "repeat(auto-fit,minmax(140px,1fr))",
+          gap: 12
         }}>
           <div>
-            <small style={{ color: "#91a3bc" }}>Latest Digit</small>
-            <h1 style={{ margin: "7px 0" }}>
+            <small>Latest Digit</small>
+
+            <h1>
               {digitAnalysis?.currentDigit ?? "—"}
             </h1>
           </div>
 
           <div>
-            <small style={{ color: "#91a3bc" }}>Statistical Candidate</small>
-            <h1 style={{
-              color: "#35d6a2",
-              margin: "7px 0"
-            }}>
+            <small>Statistical Candidate</small>
+
+            <h1 style={{ color: "#35d6a2" }}>
               {digitAnalysis?.ready
                 ? digitAnalysis.predictedDigit
                 : "—"}
@@ -831,44 +957,40 @@ function DerivLivePanel() {
           </div>
 
           <div>
-            <small style={{ color: "#91a3bc" }}>Model Score</small>
-            <h2 style={{ margin: "10px 0" }}>
+            <small>Model Score</small>
+
+            <h2>
               {digitAnalysis?.ready
-                ? `${(digitAnalysis.probability * 100).toFixed(2)}%`
+                ? `${(
+                    digitAnalysis.probability * 100
+                  ).toFixed(2)}%`
                 : "Collecting data"}
             </h2>
           </div>
 
           <div>
-            <small style={{ color: "#91a3bc" }}>Observations</small>
-            <h2 style={{ margin: "10px 0" }}>
+            <small>Observations</small>
+
+            <h2>
               {digitAnalysis?.sampleSize || 0}
             </h2>
           </div>
         </div>
 
         {!digitAnalysis?.ready && (
-          <div style={{
-            background: "#0b1422",
-            padding: 12,
-            borderRadius: 8,
-            marginTop: 12
+          <p style={{
+            color: "#f0bb65",
+            fontSize: 12
           }}>
-            <p style={{
-              color: "#f0bb65",
-              margin: 0,
-              fontSize: 13
-            }}>
-              Collecting market observations. At least 200 ticks are required before the first statistical prediction.
-            </p>
-          </div>
+            Collecting observations. At least
+            200 ticks are required before the
+            first statistical prediction.
+          </p>
         )}
 
         {digitAnalysis?.ready && (
           <>
-            <h4 style={{ marginTop: 22 }}>
-              Digit Probability Distribution
-            </h4>
+            <h4>Digit Probability Distribution</h4>
 
             <div style={{
               display: "grid",
@@ -884,7 +1006,8 @@ function DerivLivePanel() {
                     borderRadius: 8,
                     textAlign: "center",
                     border:
-                      item.digit === digitAnalysis.predictedDigit
+                      item.digit ===
+                      digitAnalysis.predictedDigit
                         ? "1px solid #35d6a2"
                         : "1px solid #26364d"
                   }}
@@ -893,8 +1016,7 @@ function DerivLivePanel() {
 
                   <div style={{
                     fontSize: 12,
-                    color: "#91a3bc",
-                    marginTop: 5
+                    color: "#91a3bc"
                   }}>
                     {(item.probability * 100).toFixed(1)}%
                   </div>
@@ -902,33 +1024,36 @@ function DerivLivePanel() {
               ))}
             </div>
 
-            <h4 style={{ marginTop: 22 }}>
-              Prediction Ranking
-            </h4>
+            <h4>Prediction Ranking</h4>
 
-            {digitAnalysis.rankings.slice(0, 5).map(item => (
-              <div
-                key={item.digit}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "9px 0",
-                  borderBottom: "1px solid #26364d"
-                }}
-              >
-                <strong>Digit {item.digit}</strong>
+            {digitAnalysis.rankings
+              .slice(0, 5)
+              .map(item => (
+                <div
+                  key={item.digit}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    padding: "9px 0",
+                    borderBottom:
+                      "1px solid #26364d"
+                  }}
+                >
+                  <strong>
+                    Digit {item.digit}
+                  </strong>
 
-                <span style={{ color: "#35d6a2" }}>
-                  {(item.score * 100).toFixed(2)}%
-                </span>
-              </div>
-            ))}
+                  <span style={{
+                    color: "#35d6a2"
+                  }}>
+                    {(item.score * 100).toFixed(2)}%
+                  </span>
+                </div>
+              ))}
           </>
         )}
 
-        <h4 style={{ marginTop: 22 }}>
-          Prediction Performance
-        </h4>
+        <h4>Prediction Performance</h4>
 
         <div className="signal">
           <span>Evaluated predictions</span>
@@ -951,16 +1076,20 @@ function DerivLivePanel() {
 
         <div className="signal">
           <span>Historical accuracy</span>
-          <strong>{digitPerformance.accuracy.toFixed(2)}%</strong>
+          <strong>
+            {digitPerformance.accuracy.toFixed(2)}%
+          </strong>
         </div>
 
-        <h4 style={{ marginTop: 22 }}>
-          Recent Prediction Results
-        </h4>
+        <h4>Recent Prediction Results</h4>
 
         {digitHistory.length === 0 ? (
-          <p style={{ color: "#91a3bc", fontSize: 12 }}>
-            Prediction results will appear here after the model begins making predictions.
+          <p style={{
+            color: "#91a3bc",
+            fontSize: 12
+          }}>
+            Results will appear here after predictions
+            have been evaluated.
           </p>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -971,13 +1100,19 @@ function DerivLivePanel() {
             }}>
               <thead>
                 <tr>
-                  {["Predicted", "Actual", "Result", "Time"].map(label => (
+                  {[
+                    "Predicted",
+                    "Actual",
+                    "Result",
+                    "Time"
+                  ].map(label => (
                     <th
                       key={label}
                       style={{
                         textAlign: "left",
                         padding: 9,
-                        borderBottom: "1px solid #34445c",
+                        borderBottom:
+                          "1px solid #34445c",
                         fontSize: 12
                       }}
                     >
@@ -1000,10 +1135,14 @@ function DerivLivePanel() {
 
                     <td style={{
                       padding: 9,
-                      color: item.correct ? "#35d6a2" : "#ff8997",
+                      color: item.correct
+                        ? "#35d6a2"
+                        : "#ff8997",
                       fontWeight: 700
                     }}>
-                      {item.correct ? "CORRECT" : "INCORRECT"}
+                      {item.correct
+                        ? "CORRECT"
+                        : "INCORRECT"}
                     </td>
 
                     <td style={{
@@ -1011,7 +1150,9 @@ function DerivLivePanel() {
                       color: "#91a3bc",
                       fontSize: 11
                     }}>
-                      {new Date(item.timestamp).toLocaleTimeString()}
+                      {new Date(
+                        item.timestamp
+                      ).toLocaleTimeString()}
                     </td>
                   </tr>
                 ))}
@@ -1023,240 +1164,58 @@ function DerivLivePanel() {
         <p style={{
           color: "#91a3bc",
           fontSize: 11,
-          lineHeight: 1.6,
-          marginBottom: 0
+          lineHeight: 1.6
         }}>
-          Predictions are statistical estimates, not guaranteed outcomes.
-          A 10% random baseline applies to an unbiased ten-digit outcome.
-          Historical accuracy does not guarantee future performance.
+          Predictions are statistical estimates,
+          not guaranteed outcomes. A 10% random
+          baseline applies to an unbiased
+          ten-digit outcome.
         </p>
       </section>
 
-      {/* TRADE CONFIGURATION */}
+      {/* ==================================================
+         DERIV BOT BUILDER
+         ================================================== */}
 
-      <section style={cardStyle}>
-        <h3 style={{ marginTop: 0 }}>Trade Configuration</h3>
-
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
-          gap: 14
-        }}>
-          <div>
-            <label>Market</label>
-
-            <select
-              style={inputStyle}
-              value={symbol}
-              disabled={!connected}
-              onChange={e => changeMarket(e.target.value)}
-            >
-              {SYMBOLS.map(item => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-
-            <small style={{
-              display: "block",
-              color: "#91a3bc",
-              marginTop: 6
-            }}>
-              {symbol.startsWith("1HZ")
-                ? "1-second Volatility market · ticks are generated every second."
-                : symbol.startsWith("R_")
-                  ? "Standard Volatility market · standard tick frequency."
-                  : "Forex market · live Deriv quotes."}
-            </small>
-          </div>
-
-          <div>
-            <label>Direction</label>
-
-            <select
-              style={inputStyle}
-              value={contractType}
-              disabled={!connected}
-              onChange={e => {
-                setContractType(e.target.value);
-                setProposal(null);
-              }}
-            >
-              <option value="CALL">RISE</option>
-              <option value="PUT">FALL</option>
-            </select>
-          </div>
-
-          <div>
-            <label>Stake ({currency})</label>
-
-            <input
-              style={inputStyle}
-              type="number"
-              min="0.35"
-              max={MAX_STAKE}
-              step="0.01"
-              value={stake}
-              disabled={!connected}
-              onChange={e => {
-                setStake(e.target.value);
-                setProposal(null);
-              }}
-            />
-          </div>
-
-          <div>
-            <label>Duration</label>
-
-            <input
-              style={inputStyle}
-              type="number"
-              min="1"
-              max="1440"
-              value={duration}
-              disabled={!connected}
-              onChange={e => {
-                setDuration(e.target.value);
-                setProposal(null);
-              }}
-            />
-          </div>
-
-          <div>
-            <label>Duration Unit</label>
-
-            <select
-              style={inputStyle}
-              value={durationUnit}
-              disabled={!connected}
-              onChange={e => {
-                setDurationUnit(e.target.value);
-                setProposal(null);
-              }}
-            >
-              <option value="s">Seconds</option>
-              <option value="m">Minutes</option>
-              <option value="h">Hours</option>
-              <option value="d">Days</option>
-            </select>
-          </div>
-        </div>
-
-        <p style={{
-          color: "#f0bb65",
-          fontSize: 12
-        }}>
-          Maximum permitted demo stake: {money(MAX_STAKE, currency)} per proposal.
-        </p>
-
-        <button
-          style={{
-            ...buttonStyle,
-            background: "#087d69",
-            color: "#fff"
-          }}
-          disabled={!connected || proposalLoading}
-          onClick={requestProposal}
-        >
-          {proposalLoading ? "Requesting Quote..." : "Get Trade Proposal"}
-        </button>
-      </section>
-
-      {/* PROPOSAL PREVIEW */}
-
-      {proposal && (
-        <section style={{
-          ...cardStyle,
-          borderColor: "#087d69"
-        }}>
-          <h3 style={{ marginTop: 0 }}>Trade Proposal Preview</h3>
-
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
-            gap: 14
-          }}>
-            <div>
-              <small style={{ color: "#91a3bc" }}>Market</small>
-              <h3>{symbol}</h3>
-            </div>
-
-            <div>
-              <small style={{ color: "#91a3bc" }}>Direction</small>
-              <h3>
-                {contractType === "CALL" ? "RISE" : "FALL"}
-              </h3>
-            </div>
-
-            <div>
-              <small style={{ color: "#91a3bc" }}>Stake</small>
-              <h3>{money(proposal.amount, currency)}</h3>
-            </div>
-
-            <div>
-              <small style={{ color: "#91a3bc" }}>Potential Payout</small>
-              <h3>{money(proposal.payout, currency)}</h3>
-            </div>
-
-            <div>
-              <small style={{ color: "#91a3bc" }}>Potential Profit</small>
-              <h3 style={{ color: "#35d6a2" }}>
-                {money(
-                  Number(proposal.payout) - Number(proposal.amount),
-                  currency
-                )}
-              </h3>
-            </div>
-
-            <div>
-              <small style={{ color: "#91a3bc" }}>Purchase Price</small>
-              <h3>{money(proposal.ask_price, currency)}</h3>
-            </div>
-          </div>
-
-          {proposal.longcode && (
-            <p style={{
-              color: "#91a3bc",
-              lineHeight: 1.6
-            }}>
-              {proposal.longcode}
-            </p>
-          )}
-
-          <button
-            style={{
-              ...buttonStyle,
-              background: "#087d69",
-              color: "#fff"
-            }}
-            disabled={orderLoading || !connected}
-            onClick={executeDemoTrade}
-          >
-            {orderLoading
-              ? "Placing Demo Order..."
-              : "Confirm & Place Demo Trade"}
-          </button>
-
-          <button
-            style={{
-              ...buttonStyle,
-              background: "#34445c",
-              color: "#fff",
-              marginLeft: 10
-            }}
-            onClick={() => setProposal(null)}
-          >
-            Cancel Proposal
-          </button>
-        </section>
-      )}
+      <DerivBotBuilder
+        connected={connected}
+        symbol={symbol}
+        changeMarket={changeMarket}
+        contractType={contractType}
+        setContractType={value => {
+          setContractType(value);
+          setProposal(null);
+        }}
+        duration={duration}
+        setDuration={value => {
+          setDuration(value);
+          setProposal(null);
+        }}
+        durationUnit={durationUnit}
+        setDurationUnit={value => {
+          setDurationUnit(value);
+          setProposal(null);
+        }}
+        stake={stake}
+        setStake={value => {
+          setStake(value);
+          setProposal(null);
+        }}
+        onPrepareTrade={requestProposal}
+        onExecuteTrade={executeDemoTrade}
+        proposal={proposal}
+        orderLoading={orderLoading}
+        proposalLoading={proposalLoading}
+        currency={currency}
+      />
 
       {/* LAST ORDER */}
 
       {lastOrder && (
         <section style={cardStyle}>
-          <h3 style={{ marginTop: 0 }}>Latest Demo Order</h3>
+          <h3 style={{ marginTop: 0 }}>
+            Latest Demo Order
+          </h3>
 
           <div className="signal">
             <span>Contract ID</span>
@@ -1265,12 +1224,16 @@ function DerivLivePanel() {
 
           <div className="signal">
             <span>Purchase Price</span>
-            <strong>{money(lastOrder.buy_price, currency)}</strong>
+            <strong>
+              {money(lastOrder.buy_price, currency)}
+            </strong>
           </div>
 
           <div className="signal">
             <span>Potential Payout</span>
-            <strong>{money(lastOrder.payout, currency)}</strong>
+            <strong>
+              {money(lastOrder.payout, currency)}
+            </strong>
           </div>
         </section>
       )}
@@ -1279,11 +1242,15 @@ function DerivLivePanel() {
 
       {monitoredContract && (
         <section style={cardStyle}>
-          <h3 style={{ marginTop: 0 }}>Contract Monitoring</h3>
+          <h3 style={{ marginTop: 0 }}>
+            Contract Monitoring
+          </h3>
 
           <div className="signal">
             <span>Contract ID</span>
-            <strong>{monitoredContract.contract_id}</strong>
+            <strong>
+              {monitoredContract.contract_id}
+            </strong>
           </div>
 
           <div className="signal">
@@ -1300,11 +1267,15 @@ function DerivLivePanel() {
               <span>Profit / Loss</span>
 
               <strong style={{
-                color: Number(monitoredContract.profit) >= 0
-                  ? "#35d6a2"
-                  : "#ff8997"
+                color:
+                  Number(monitoredContract.profit) >= 0
+                    ? "#35d6a2"
+                    : "#ff8997"
               }}>
-                {money(monitoredContract.profit, currency)}
+                {money(
+                  monitoredContract.profit,
+                  currency
+                )}
               </strong>
             </div>
           )}
@@ -1312,7 +1283,10 @@ function DerivLivePanel() {
           {monitoredContract.exit_tick !== undefined && (
             <div className="signal">
               <span>Exit Price</span>
-              <strong>{monitoredContract.exit_tick}</strong>
+
+              <strong>
+                {monitoredContract.exit_tick}
+              </strong>
             </div>
           )}
         </section>
@@ -1354,12 +1328,22 @@ function DerivLivePanel() {
             }}>
               <thead>
                 <tr>
-                  {["Contract", "Market", "Buy Price", "Current Value", "Profit"].map(label => (
-                    <th key={label} style={{
-                      textAlign: "left",
-                      padding: 10,
-                      borderBottom: "1px solid #34445c"
-                    }}>
+                  {[
+                    "Contract",
+                    "Market",
+                    "Buy Price",
+                    "Current Value",
+                    "Profit"
+                  ].map(label => (
+                    <th
+                      key={label}
+                      style={{
+                        textAlign: "left",
+                        padding: 10,
+                        borderBottom:
+                          "1px solid #34445c"
+                      }}
+                    >
                       {label}
                     </th>
                   ))}
@@ -1374,7 +1358,9 @@ function DerivLivePanel() {
                     </td>
 
                     <td style={{ padding: 10 }}>
-                      {item.underlying || item.symbol || "—"}
+                      {item.underlying ||
+                        item.symbol ||
+                        "—"}
                     </td>
 
                     <td style={{ padding: 10 }}>
@@ -1387,9 +1373,10 @@ function DerivLivePanel() {
 
                     <td style={{
                       padding: 10,
-                      color: Number(item.profit) >= 0
-                        ? "#35d6a2"
-                        : "#ff8997"
+                      color:
+                        Number(item.profit) >= 0
+                          ? "#35d6a2"
+                          : "#ff8997"
                     }}>
                       {money(item.profit, currency)}
                     </td>
@@ -1437,12 +1424,22 @@ function DerivLivePanel() {
             }}>
               <thead>
                 <tr>
-                  {["Contract", "Market", "Buy Price", "Sell Price", "Profit"].map(label => (
-                    <th key={label} style={{
-                      textAlign: "left",
-                      padding: 10,
-                      borderBottom: "1px solid #34445c"
-                    }}>
+                  {[
+                    "Contract",
+                    "Market",
+                    "Buy Price",
+                    "Sell Price",
+                    "Profit"
+                  ].map(label => (
+                    <th
+                      key={label}
+                      style={{
+                        textAlign: "left",
+                        padding: 10,
+                        borderBottom:
+                          "1px solid #34445c"
+                      }}
+                    >
                       {label}
                     </th>
                   ))}
@@ -1457,7 +1454,9 @@ function DerivLivePanel() {
                     </td>
 
                     <td style={{ padding: 10 }}>
-                      {item.underlying || item.symbol || "—"}
+                      {item.underlying ||
+                        item.symbol ||
+                        "—"}
                     </td>
 
                     <td style={{ padding: 10 }}>
@@ -1470,9 +1469,10 @@ function DerivLivePanel() {
 
                     <td style={{
                       padding: 10,
-                      color: Number(item.profit) >= 0
-                        ? "#35d6a2"
-                        : "#ff8997"
+                      color:
+                        Number(item.profit) >= 0
+                          ? "#35d6a2"
+                          : "#ff8997"
                     }}>
                       {money(item.profit, currency)}
                     </td>
@@ -1493,13 +1493,14 @@ function DerivLivePanel() {
         fontSize: 12,
         lineHeight: 1.7
       }}>
-        <strong>Demo trading safeguards</strong>
+        <strong>Demo Trading Safeguards</strong>
 
         <p style={{ marginBottom: 0 }}>
-          TradeLab currently restricts this interface to demo accounts
-          and a maximum $10 stake. Client-side controls are not a
-          substitute for server-side execution enforcement. Real-money
-          trading remains disabled.
+          TradeLab currently restricts this interface
+          to demo accounts and a maximum $10 stake.
+          Server-side execution controls must also
+          enforce these limits. Real-money trading
+          remains disabled.
         </p>
       </div>
 
