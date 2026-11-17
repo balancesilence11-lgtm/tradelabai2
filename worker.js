@@ -720,7 +720,9 @@ async function derivApiFetch(token, path, options = {}) {
    - Deriv OTP and upstream socket stay server-side.
    - Browser connects only to this Worker.
    - Only demo accounts are permitted.
-   - Rise/Fall proposals and purchases are capped at USD 10.
+   - Contract types are discovered from Deriv per market before proposals.
+   - Digit and price barriers are validated server-side.
+   - Demo proposals and purchases are capped at USD 10.
 ========================================= */
 
 const DERIV_MAX_STAKE_USD = 10;
@@ -765,9 +767,10 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
   );
   const allowedKeys = new Set([
     "req_id", "subscribe", "balance", "portfolio", "statement", "description",
-    "limit", "offset", "ticks", "contracts_for", "proposal", "amount", "basis", "contract_type",
-    "currency", "duration", "duration_unit", "underlying_symbol", "barrier", "buy", "price",
-    "proposal_open_contract", "contract_id", "forget"
+    "limit", "offset", "ticks", "contracts_for", "proposal", "amount", "basis",
+    "contract_type", "currency", "duration", "duration_unit",
+    "underlying_symbol", "barrier", "barrier2",
+    "buy", "price", "proposal_open_contract", "contract_id", "forget"
   ]);
   if (actions.length !== 1 || Object.keys(payload).some(key => !allowedKeys.has(key))) {
     return { ok: false, code: "ActionDenied", message: "This Deriv request is not permitted.", echoReq: payload };
@@ -797,11 +800,29 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
     const symbol = String(payload.underlying_symbol || "");
     const duration = Number(payload.duration);
     const unit = String(payload.duration_unit || "");
-    const unitLimits = { s: 86400, m: 1440, h: 24, d: 365 };
+    const unitLimits = { t: 10, s: 86400, m: 1440, h: 24, d: 365 };
     const available = discoveredContracts.get(symbol);
     const contractAvailable = Array.isArray(available) && available.some(item =>
       String(item.contract_type || "").toUpperCase() === contractType
     );
+
+    const barrier = payload.barrier === undefined || payload.barrier === null
+      ? ""
+      : String(payload.barrier).trim();
+    const barrier2 = payload.barrier2 === undefined || payload.barrier2 === null
+      ? ""
+      : String(payload.barrier2).trim();
+    const validBarrier = value =>
+      value !== "" && /^[+-]?\\d{1,12}(\\.\\d{1,8})?$/.test(value);
+
+    const digitContracts = new Set([
+      "DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"
+    ]);
+    const singleBarrierContracts = new Set([
+      "ONETOUCH", "NOTOUCH", "HIGHER", "LOWER"
+    ]);
+    const rangeContracts = new Set(["RANGE", "EXPIRYRANGE"]);
+
     if (payload.proposal !== 1 || !/^[A-Z0-9_]{2,32}$/.test(contractType) || !contractAvailable) {
       return { ok: false, code: "ContractDenied", message: "This contract type has not been confirmed as available for the selected market. Refresh the market's available contracts and try again.", echoReq: payload };
     }
@@ -811,23 +832,32 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
     if (!/^[A-Za-z0-9_]{2,32}$/.test(symbol) || !unitLimits[unit] || !Number.isInteger(duration) || duration < 1 || duration > unitLimits[unit]) {
       return { ok: false, code: "ProposalParametersDenied", message: "Invalid market symbol or contract duration.", echoReq: payload };
     }
-    const barrierRequired = ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"].includes(contractType);
-    if (barrierRequired && (!Number.isInteger(Number(payload.barrier)) || Number(payload.barrier) < 0 || Number(payload.barrier) > 9)) {
-      return { ok: false, code: "InvalidDigitBarrier", message: "Digit contracts require an integer barrier from 0 to 9.", echoReq: payload };
-    }
-    if (!barrierRequired && payload.barrier !== undefined) {
-      return { ok: false, code: "UnexpectedBarrier", message: "A digit barrier is not valid for this contract type.", echoReq: payload };
-    }
     if (!Number.isSafeInteger(payload.req_id)) {
       return { ok: false, code: "RequestIdRequired", message: "A valid request identifier is required.", echoReq: payload };
     }
+
+    if (digitContracts.has(contractType)) {
+      if (!/^[0-9]$/.test(barrier) || barrier2 !== "") {
+        return { ok: false, code: "InvalidDigitBarrier", message: "Digit contracts require one barrier digit from 0 to 9 and no second barrier.", echoReq: payload };
+      }
+    } else if (singleBarrierContracts.has(contractType)) {
+      if (!validBarrier(barrier) || barrier2 !== "") {
+        return { ok: false, code: "InvalidBarrier", message: "This contract requires one valid price barrier and no second barrier.", echoReq: payload };
+      }
+    } else if (rangeContracts.has(contractType)) {
+      if (!validBarrier(barrier) || !validBarrier(barrier2) || Number(barrier) >= Number(barrier2)) {
+        return { ok: false, code: "InvalidRangeBarriers", message: "Range contracts require two valid price barriers, with the lower barrier below the upper barrier.", echoReq: payload };
+      }
+    } else if (barrier !== "" || barrier2 !== "") {
+      return { ok: false, code: "UnexpectedBarrier", message: "This contract type does not accept a barrier.", echoReq: payload };
+    }
+
     if (pendingProposalRequests.size >= DERIV_MAX_PROPOSALS) {
       return { ok: false, code: "ProposalLimitReached", message: "Too many outstanding proposals. Wait and try again.", echoReq: payload };
     }
+
     pendingProposalRequests.set(payload.req_id, {
-      amount, contractType, currency, symbol,
-      barrier: barrierRequired ? Number(payload.barrier) : null,
-      createdAt: Date.now()
+      amount, contractType, currency, symbol, barrier, barrier2, createdAt: Date.now()
     });
     return { ok: true, payload };
   }
@@ -1055,7 +1085,8 @@ async function handleDerivSocket(request, env, url, user) {
           Date.now() - requested.createdAt <= DERIV_PROPOSAL_TTL_MS &&
           responseSymbol === requested.symbol &&
           responseContractType === requested.contractType &&
-          (requested.barrier === null || Number(message?.echo_req?.barrier) === requested.barrier)
+          String(message?.echo_req?.barrier ?? "") === requested.barrier &&
+          String(message?.echo_req?.barrier2 ?? "") === requested.barrier2
         ) {
           const askPrice = Number(proposal.ask_price);
           if (Number.isFinite(askPrice) && askPrice > 0 && askPrice <= DERIV_MAX_STAKE_USD && proposal.currency === "USD") {
