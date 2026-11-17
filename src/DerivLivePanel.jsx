@@ -352,6 +352,16 @@ function DerivLivePanel() {
       return;
     }
 
+    // For Matches, the predictor's selected target digit is the single source
+    // of truth. This prevents a stale Bot Builder field from quoting another digit.
+    const normalizedContractType = String(contractType || "").toUpperCase();
+    const matchBarrier = String(selectedTargetDigit);
+    if (normalizedContractType === "DIGITMATCH" &&
+        (!Number.isInteger(Number(matchBarrier)) || Number(matchBarrier) < 0 || Number(matchBarrier) > 9)) {
+      setError("Choose a valid match digit from 0 to 9.");
+      return;
+    }
+
     const params = {
       symbol,
       contractType,
@@ -359,7 +369,11 @@ function DerivLivePanel() {
       currency,
       duration: tradeDuration,
       durationUnit,
-      ...(parameters.barrier !== undefined && parameters.barrier !== "" ? { barrier: parameters.barrier } : {}),
+      ...(normalizedContractType === "DIGITMATCH"
+        ? { barrier: matchBarrier }
+        : parameters.barrier !== undefined && parameters.barrier !== ""
+          ? { barrier: parameters.barrier }
+          : {}),
       ...(parameters.barrier2 !== undefined && parameters.barrier2 !== "" ? { barrier2: parameters.barrier2 } : {})
     };
 
@@ -603,6 +617,7 @@ function DerivLivePanel() {
         proposalLoading={proposalLoading}
         currency={currency}
         initialTargetDigit={selectedTargetDigit}
+        onTargetDigitChange={setSelectedTargetDigit}
       />
 
       {lastOrder && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Latest Demo Order</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{lastOrder.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Purchase Price</span><strong>{money(lastOrder.buy_price, currency)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Potential Payout</span><strong>{money(lastOrder.payout, currency)}</strong></div></section>}
