@@ -151,7 +151,7 @@ export default function DerivBotBuilder({
   error = "",
   notice = ""
 }) {
-  const [group, setGroup] = useState("all");
+  const [group, setGroup] = useState("digits");
   const [barrier, setBarrier] = useState("5");
   const [barrier2, setBarrier2] = useState("");
   const [localError, setLocalError] = useState("");
