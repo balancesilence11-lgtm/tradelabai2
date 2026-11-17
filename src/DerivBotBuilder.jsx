@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 
 /*
  * TradeLab AI — Deriv Bot Builder
@@ -147,22 +147,22 @@ export default function DerivBotBuilder({
   orderLoading = false,
   proposalLoading = false,
   currency = "USD",
+  selectedDigit = "5",
+  onSelectedDigitChange = () => {},
   marketOptions = [],
   error = "",
-  notice = "",
-  initialTargetDigit = "5",
-  onTargetDigitChange = () => {}
+  notice = ""
 }) {
   const [group, setGroup] = useState("digits");
-  const [barrier, setBarrier] = useState("5");
-  const [barrier2, setBarrier2] = useState("");
-  const [localError, setLocalError] = useState("");
+  const [barrier, setBarrier] = useState(String(selectedDigit));
 
   useEffect(() => {
-    if (String(contractType).toUpperCase() === "DIGITMATCH") {
-      setBarrier(String(initialTargetDigit));
+    if (DIGIT_TYPES.has(String(contractType || "").toUpperCase())) {
+      setBarrier(String(selectedDigit));
     }
-  }, [initialTargetDigit, contractType]);
+  }, [selectedDigit, contractType]);
+  const [barrier2, setBarrier2] = useState("");
+  const [localError, setLocalError] = useState("");
 
   const contracts = useMemo(
     () => normalizeContracts(availableContracts),
@@ -229,7 +229,7 @@ export default function DerivBotBuilder({
     const requestOptions = {};
 
     if (needsDigit) {
-      const digit = Number(barrier);
+      const digit = Number(selectedDigit);
       if (!Number.isInteger(digit) || digit < 0 || digit > 9) {
         setLocalError("Enter a digit barrier from 0 to 9.");
         return;
@@ -456,13 +456,10 @@ export default function DerivBotBuilder({
               min={needsDigit ? "0" : undefined}
               max={needsDigit ? "9" : undefined}
               step={needsDigit ? "1" : "any"}
-              value={barrier}
+              value={needsDigit ? String(selectedDigit) : barrier}
               onChange={event => {
-                const nextBarrier = event.target.value;
-                setBarrier(nextBarrier);
-                if (needsDigit && type === "DIGITMATCH") {
-                  onTargetDigitChange(nextBarrier);
-                }
+                setBarrier(event.target.value);
+                if (needsDigit && /^[0-9]$/.test(event.target.value)) onSelectedDigitChange(event.target.value);
               }}
             />
           </div>
