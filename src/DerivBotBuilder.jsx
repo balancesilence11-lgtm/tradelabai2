@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 /*
  * TradeLab AI — Deriv Bot Builder
@@ -149,12 +149,19 @@ export default function DerivBotBuilder({
   currency = "USD",
   marketOptions = [],
   error = "",
-  notice = ""
+  notice = "",
+  initialTargetDigit = "5"
 }) {
   const [group, setGroup] = useState("digits");
   const [barrier, setBarrier] = useState("5");
   const [barrier2, setBarrier2] = useState("");
   const [localError, setLocalError] = useState("");
+
+  useEffect(() => {
+    if (String(contractType).toUpperCase() === "DIGITMATCH") {
+      setBarrier(String(initialTargetDigit));
+    }
+  }, [initialTargetDigit, contractType]);
 
   const contracts = useMemo(
     () => normalizeContracts(availableContracts),
