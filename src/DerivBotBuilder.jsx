@@ -150,7 +150,8 @@ export default function DerivBotBuilder({
   marketOptions = [],
   error = "",
   notice = "",
-  initialTargetDigit = "5"
+  initialTargetDigit = "5",
+  onTargetDigitChange = () => {}
 }) {
   const [group, setGroup] = useState("digits");
   const [barrier, setBarrier] = useState("5");
@@ -456,7 +457,13 @@ export default function DerivBotBuilder({
               max={needsDigit ? "9" : undefined}
               step={needsDigit ? "1" : "any"}
               value={barrier}
-              onChange={event => setBarrier(event.target.value)}
+              onChange={event => {
+                const nextBarrier = event.target.value;
+                setBarrier(nextBarrier);
+                if (needsDigit && type === "DIGITMATCH") {
+                  onTargetDigitChange(nextBarrier);
+                }
+              }}
             />
           </div>
 
