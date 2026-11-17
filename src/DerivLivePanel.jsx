@@ -83,6 +83,7 @@ function DerivLivePanel() {
   const proposalRequestRef = useRef(0);
 
   const [digitAnalysis, setDigitAnalysis] = useState(null);
+  const [selectedTargetDigit, setSelectedTargetDigit] = useState("5");
   const [digitPerformance, setDigitPerformance] = useState({ total: 0, wins: 0, losses: 0, accuracy: 0 });
   const [digitHistory, setDigitHistory] = useState([]);
 
@@ -514,6 +515,27 @@ function DerivLivePanel() {
           </span>
         </div>
 
+        <div style={{ ...cardStyle, padding: 14, marginTop: 16, borderColor: "#087d69", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 14 }}>
+          <div style={{ minWidth: 220, flex: 1 }}>
+            <strong style={{ display: "block", marginBottom: 5 }}>Choose the last digit to match</strong>
+            <small style={{ color: "#91a3bc" }}>Select your target digit from 0 to 9. The AI recommendation is shown separately below.</small>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <select aria-label="Digit to match" value={selectedTargetDigit} onChange={event => setSelectedTargetDigit(event.target.value)} style={{ background: "#0b1422", color: "#fff", border: "1px solid #35d6a2", borderRadius: 8, padding: "11px 16px", fontSize: 18, fontWeight: 800, minWidth: 85 }}>
+              {Array.from({ length: 10 }, (_, digit) => <option key={digit} value={String(digit)}>{digit}</option>)}
+            </select>
+            <div style={{ textAlign: "right" }}>
+              <small style={{ display: "block", color: "#91a3bc" }}>AI top suggestion</small>
+              <strong style={{ fontSize: 23, color: "#35d6a2" }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</strong>
+            </div>
+          </div>
+          <div style={{ flexBasis: "100%", color: digitAnalysis?.ready ? (Number(selectedTargetDigit) === digitAnalysis.predictedDigit ? "#35d6a2" : "#f0bb65") : "#91a3bc", fontSize: 12 }}>
+            {digitAnalysis?.ready
+              ? (Number(selectedTargetDigit) === digitAnalysis.predictedDigit ? "Your selected match digit agrees with the AI's top-ranked digit." : `You selected ${selectedTargetDigit}; the AI currently ranks ${digitAnalysis.predictedDigit} highest. You can choose either.`)
+              : `Selected target digit: ${selectedTargetDigit}. The AI recommendation will appear after enough live ticks are collected.`}
+          </div>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12, marginTop: 16 }}>
           <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>LATEST DIGIT</small><div style={{ fontSize: 32, fontWeight: 800, marginTop: 5 }}>{digitAnalysis?.currentDigit ?? "—"}</div><small style={{ color: "#91a3bc" }}>From latest live tick</small></div>
           <div style={{ ...cardStyle, padding: 14, borderColor: "#087d69" }}><small style={{ color: "#91a3bc" }}>TOP MATCH CANDIDATE</small><div style={{ fontSize: 32, fontWeight: 800, color: "#35d6a2", marginTop: 5 }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</div><small style={{ color: "#91a3bc" }}>Second candidate: {digitAnalysis?.ready ? digitAnalysis.secondBest : "—"}</small></div>
@@ -580,6 +602,7 @@ function DerivLivePanel() {
         orderLoading={orderLoading}
         proposalLoading={proposalLoading}
         currency={currency}
+        initialTargetDigit={selectedTargetDigit}
       />
 
       {lastOrder && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Latest Demo Order</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{lastOrder.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Purchase Price</span><strong>{money(lastOrder.buy_price, currency)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Potential Payout</span><strong>{money(lastOrder.payout, currency)}</strong></div></section>}
