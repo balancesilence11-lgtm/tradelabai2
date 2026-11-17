@@ -96,7 +96,7 @@ function DerivLivePanel() {
   const [symbol, setSymbol] = useState("frxEURUSD");
   const [tick, setTick] = useState(null);
   const [stake, setStake] = useState("1");
-  const [contractType, setContractType] = useState("CALL");
+  const [contractType, setContractType] = useState("DIGITMATCH");
   const [duration, setDuration] = useState("5");
   const [durationUnit, setDurationUnit] = useState("m");
 
@@ -503,29 +503,60 @@ function DerivLivePanel() {
         <div style={cardStyle}><div style={{ color: "#91a3bc", fontSize: 12 }}>Live Price</div><h2 style={{ marginBottom: 0 }}>{tick?.quote !== undefined ? Number(tick.quote).toFixed(5) : "—"}</h2></div>
       </div>
 
-      <section style={{ ...cardStyle, borderColor: "#087d69" }}>
-        <h3 style={{ marginTop: 0 }}>AI Digit Match Predictor</h3>
-        <p style={{ color: "#91a3bc", fontSize: 12 }}>Live Deriv tick analysis · Statistical prediction · Historical validation</p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12 }}>
-          <div><small>Latest Digit</small><h1>{digitAnalysis?.currentDigit ?? "—"}</h1></div>
-          <div><small>Statistical Candidate</small><h1 style={{ color: "#35d6a2" }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</h1></div>
-          <div><small>Model Score</small><h2>{digitAnalysis?.ready ? `${(digitAnalysis.probability * 100).toFixed(2)}%` : "Collecting data"}</h2></div>
-          <div><small>Observations</small><h2>{digitAnalysis?.sampleSize || 0}</h2></div>
-        </div>
-        {!digitAnalysis?.ready && <p style={{ color: "#f0bb65", fontSize: 12 }}>Collecting observations. At least 200 ticks are required before the first statistical prediction.</p>}
-        {digitAnalysis?.ready && <>
-          <h4>Digit Probability Distribution</h4>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8 }}>
-            {(digitAnalysis.distribution || []).map(item => <div key={item.digit} style={{ background: "#0b1422", padding: 10, borderRadius: 8, textAlign: "center", border: item.digit === digitAnalysis.predictedDigit ? "1px solid #35d6a2" : "1px solid #26364d" }}><strong>{item.digit}</strong><div style={{ fontSize: 12, color: "#91a3bc" }}>{(item.probability * 100).toFixed(1)}%</div></div>)}
+      <section style={{ ...cardStyle, borderColor: "#087d69", background: "linear-gradient(145deg,#111c2d 0%,#0d1a29 100%)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <h3 style={{ margin: 0 }}>AI Digit Match Predictor</h3>
+            <p style={{ color: "#91a3bc", fontSize: 12, margin: "6px 0 0" }}>Live Deriv tick analysis · Weighted digit model · Historical validation</p>
           </div>
-          <h4>Prediction Ranking</h4>
-          {(digitAnalysis.rankings || []).slice(0, 5).map(item => <div key={item.digit} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid #26364d" }}><strong>Digit {item.digit}</strong><span style={{ color: "#35d6a2" }}>{(item.score * 100).toFixed(2)}%</span></div>)}
-        </>}
-        <h4>Prediction Performance</h4>
-        {[ ["Evaluated predictions", digitPerformance.total], ["Correct predictions", digitPerformance.wins], ["Incorrect predictions", digitPerformance.losses], ["Historical accuracy", `${digitPerformance.accuracy.toFixed(2)}%`] ].map(([label, value]) => <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>{label}</span><strong>{value}</strong></div>)}
-        <h4>Recent Prediction Results</h4>
-        {digitHistory.length === 0 ? <p style={{ color: "#91a3bc", fontSize: 12 }}>Results will appear here after predictions have been evaluated.</p> : <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 400 }}><thead><tr>{["Predicted", "Actual", "Result", "Time"].map(label => <th key={label} style={{ textAlign: "left", padding: 9, borderBottom: "1px solid #34445c", fontSize: 12 }}>{label}</th>)}</tr></thead><tbody>{digitHistory.map((item, index) => <tr key={`${item.timestamp}-${index}`}><td style={{ padding: 9 }}>{item.predicted}</td><td style={{ padding: 9 }}>{item.actual}</td><td style={{ padding: 9, color: item.correct ? "#35d6a2" : "#ff8997", fontWeight: 700 }}>{item.correct ? "CORRECT" : "INCORRECT"}</td><td style={{ padding: 9, color: "#91a3bc", fontSize: 11 }}>{new Date(item.timestamp).toLocaleTimeString()}</td></tr>)}</tbody></table></div>}
-        <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6 }}>Predictions are statistical estimates, not guaranteed outcomes. A 10% random baseline applies to an unbiased ten-digit outcome.</p>
+          <span style={{ border: "1px solid #236b5a", color: "#35d6a2", borderRadius: 20, padding: "6px 11px", fontSize: 11, fontWeight: 800 }}>
+            {digitAnalysis?.ready ? "MODEL ACTIVE" : "COLLECTING TICKS"}
+          </span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12, marginTop: 16 }}>
+          <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>LATEST DIGIT</small><div style={{ fontSize: 32, fontWeight: 800, marginTop: 5 }}>{digitAnalysis?.currentDigit ?? "—"}</div><small style={{ color: "#91a3bc" }}>From latest live tick</small></div>
+          <div style={{ ...cardStyle, padding: 14, borderColor: "#087d69" }}><small style={{ color: "#91a3bc" }}>TOP MATCH CANDIDATE</small><div style={{ fontSize: 32, fontWeight: 800, color: "#35d6a2", marginTop: 5 }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</div><small style={{ color: "#91a3bc" }}>Second candidate: {digitAnalysis?.ready ? digitAnalysis.secondBest : "—"}</small></div>
+          <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>MODEL SCORE</small><div style={{ fontSize: 25, fontWeight: 800, marginTop: 9 }}>{digitAnalysis?.ready ? `${(digitAnalysis.probability * 100).toFixed(2)}%` : "Pending"}</div><small style={{ color: "#91a3bc" }}>Random baseline: 10%</small></div>
+          <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>TICK OBSERVATIONS</small><div style={{ fontSize: 25, fontWeight: 800, marginTop: 9 }}>{digitAnalysis?.sampleSize || 0}</div><small style={{ color: "#91a3bc" }}>Minimum required: 200</small></div>
+        </div>
+
+        {!digitAnalysis?.ready && <div style={{ marginTop: 14, padding: 13, borderRadius: 9, background: "#241f16", border: "1px solid #66502a", color: "#f0bb65", fontSize: 12 }}>
+          Collecting observations. The statistical model becomes available after at least 200 valid ticks. Current progress: {digitAnalysis?.samples || 0} / {digitAnalysis?.required || 200}.
+          <div style={{ height: 7, borderRadius: 8, background: "#3a3020", marginTop: 9, overflow: "hidden" }}><div style={{ width: `${Math.min(100, ((digitAnalysis?.samples || 0) / (digitAnalysis?.required || 200)) * 100)}%`, height: "100%", background: "#e5a83e" }} /></div>
+        </div>}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginTop: 16 }}>
+          <div style={{ ...cardStyle, padding: 14 }}>
+            <h4 style={{ margin: "0 0 12px" }}>Digit Probability Distribution</h4>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 7 }}>
+              {(digitAnalysis?.distribution || Array.from({ length: 10 }, (_, digit) => ({ digit, probability: 0 }))).map(item => {
+                const isTop = digitAnalysis?.ready && item.digit === digitAnalysis.predictedDigit;
+                return <div key={item.digit} style={{ padding: "9px 5px", borderRadius: 8, textAlign: "center", background: isTop ? "#103d32" : "#0b1422", border: isTop ? "1px solid #35d6a2" : "1px solid #26364d" }}>
+                  <strong style={{ fontSize: 17 }}>{item.digit}</strong><div style={{ color: isTop ? "#35d6a2" : "#91a3bc", fontSize: 11, marginTop: 4 }}>{(item.probability * 100).toFixed(1)}%</div>
+                </div>;
+              })}
+            </div>
+            <small style={{ color: "#91a3bc", display: "block", marginTop: 10 }}>Historical frequency across collected ticks.</small>
+          </div>
+          <div style={{ ...cardStyle, padding: 14 }}>
+            <h4 style={{ margin: "0 0 12px" }}>Top Model Rankings</h4>
+            {(digitAnalysis?.rankings || []).slice(0, 5).map((item, index) => <div key={item.digit} style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5 }}><strong>#{index + 1} · Digit {item.digit}</strong><span style={{ color: "#35d6a2" }}>{(item.score * 100).toFixed(2)}%</span></div>
+              <div style={{ height: 7, borderRadius: 8, background: "#26364d", overflow: "hidden" }}><div style={{ width: `${Math.min(100, item.score * 100)}%`, height: "100%", background: index === 0 ? "#35d6a2" : "#477f91" }} /></div>
+            </div>)}
+            {!digitAnalysis?.ready && <p style={{ color: "#91a3bc", fontSize: 12 }}>Rankings will appear when the model has enough observations.</p>}
+          </div>
+        </div>
+
+        <h4 style={{ margin: "18px 0 10px" }}>Prediction Performance</h4>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))", gap: 10 }}>
+          {[["Evaluated", digitPerformance.total], ["Correct", digitPerformance.wins], ["Incorrect", digitPerformance.losses], ["Historical accuracy", `${digitPerformance.accuracy.toFixed(2)}%`]].map(([label, value]) => <div key={label} style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>{label}</small><div style={{ fontSize: 21, fontWeight: 800, marginTop: 5 }}>{value}</div></div>)}
+        </div>
+
+        <h4 style={{ margin: "18px 0 8px" }}>Recent Evaluated Predictions</h4>
+        {digitHistory.length === 0 ? <p style={{ color: "#91a3bc", fontSize: 12 }}>No evaluated predictions yet. Results will appear after a prediction is compared with the next observed tick.</p> : <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 430 }}><thead><tr>{["Predicted", "Actual", "Outcome", "Time"].map(label => <th key={label} style={{ textAlign: "left", padding: 9, borderBottom: "1px solid #34445c", fontSize: 12 }}>{label}</th>)}</tr></thead><tbody>{digitHistory.map((item, index) => <tr key={`${item.timestamp}-${index}`}><td style={{ padding: 9 }}>{item.predicted}</td><td style={{ padding: 9 }}>{item.actual}</td><td style={{ padding: 9, color: item.correct ? "#35d6a2" : "#ff8997", fontWeight: 700 }}>{item.correct ? "CORRECT" : "INCORRECT"}</td><td style={{ padding: 9, color: "#91a3bc", fontSize: 11 }}>{new Date(item.timestamp).toLocaleTimeString()}</td></tr>)}</tbody></table></div>}
+        <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>This model ranks digits using historical frequency, recency-weighted frequency and last-digit transitions. Scores are statistical estimates, not guaranteed outcomes. A 10% random baseline applies to an unbiased ten-digit outcome.</p>
       </section>
 
       <DerivBotBuilder
