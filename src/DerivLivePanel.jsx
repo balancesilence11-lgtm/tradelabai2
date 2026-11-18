@@ -121,12 +121,39 @@ function getAccountLabel(account) {
 function DerivLivePanel() {
   const clientRef = useRef(null);
 
-  const digitPredictorRef = useRef(
-    new DigitMatchPredictor({
-      maxHistory: 5000,
-      minSamples: 200
-    })
-  );
+  // Keep a separate, persistent walk-forward model for each selected market.
+  // This prevents one market's digit history from contaminating another.
+  const predictorsByMarketRef = useRef({});
+  const activeMarketRef = useRef("1HZ100V");
+
+  function getPredictorForMarket(market) {
+    if (!predictorsByMarketRef.current[market]) {
+      const predictor = new DigitMatchPredictor({
+        maxHistory: 5000,
+        minSamples: 200,
+        maxPredictions: 2000
+      });
+      try {
+        const saved = localStorage.getItem(`tradelab_predictor_phase4_${market}`);
+        if (saved) predictor.importState(JSON.parse(saved));
+      } catch (error) {
+        console.warn(`Could not restore ${market} prediction history:`, error);
+      }
+      predictorsByMarketRef.current[market] = predictor;
+    }
+    return predictorsByMarketRef.current[market];
+  }
+
+  function persistPredictor(market, predictor) {
+    try {
+      localStorage.setItem(
+        `tradelab_predictor_phase4_${market}`,
+        JSON.stringify(predictor.exportState())
+      );
+    } catch (error) {
+      console.warn(`Could not save ${market} prediction history:`, error);
+    }
+  }
 
   const contractsRequestRef = useRef(0);
   const proposalRequestRef = useRef(0);
@@ -164,6 +191,10 @@ function DerivLivePanel() {
   });
 
   const [digitHistory, setDigitHistory] = useState([]);
+  const [digitPerformanceByDigit, setDigitPerformanceByDigit] = useState([]);
+  const [recentDigitPerformance, setRecentDigitPerformance] = useState({ total: 0, wins: 0, losses: 0, accuracy: 0 });
+  const [reliabilityStatus, setReliabilityStatus] = useState(null);
+  const [marketPerformance, setMarketPerformance] = useState([]);
 
   const [status, setStatus] = useState("disconnected");
   const [accounts, setAccounts] = useState([]);
@@ -257,42 +288,57 @@ function DerivLivePanel() {
 
           setTick(incomingTick);
 
-          const predictor = digitPredictorRef.current;
-
+          const market = activeMarketRef.current;
+          const predictor = getPredictorForMarket(market);
           const digit = predictor.extractDigit(
             incomingTick.quote,
             incomingTick.pip_size
           );
 
           if (digit !== null) {
-            // Add only a genuinely new tick. Evaluate the previous forecast
-            // against this newly observed digit, then create the next forecast.
-            const accepted = predictor.addTick(incomingTick);
+            // One-step walk-forward test: the forecast was created from prior
+            // ticks; this newly received tick is its unseen evaluation target.
+            const accepted = predictor.addTick({ ...incomingTick, symbol: market });
 
             if (accepted) {
               const evaluation = predictor.evaluate(digit);
 
               if (evaluation) {
-                setDigitHistory(previous => [
-                  {
-                    ...evaluation,
-                    quote: incomingTick.quote
-                  },
-                  ...previous
-                ].slice(0, 50));
+                const evaluatedRow = {
+                  ...evaluation,
+                  market,
+                  quote: incomingTick.quote
+                };
+                setDigitHistory(previous => [evaluatedRow, ...previous].slice(0, 50));
               }
 
               const prediction = predictor.predict();
-
-              setDigitAnalysis(prediction);
+              setDigitAnalysis({ ...prediction, currentDigit: digit, market });
 
               const performance = predictor.getPerformance();
               setDigitPerformance({
                 total: performance.total,
-                wins: performance.correct,
-                losses: performance.incorrect,
+                wins: performance.wins,
+                losses: performance.losses,
                 accuracy: performance.accuracy
               });
+              setDigitPerformanceByDigit(predictor.getDigitPerformance());
+              setRecentDigitPerformance(predictor.getRecentPerformance(100));
+              setReliabilityStatus(predictor.getReliabilityStatus());
+              persistPredictor(market, predictor);
+
+              const marketRows = Object.entries(predictorsByMarketRef.current).map(([marketKey, model]) => {
+                const stats = model.getPerformance();
+                return {
+                  market: marketKey,
+                  label: SYMBOLS.find(item => item.value === marketKey)?.label || marketKey,
+                  samples: model.history.length,
+                  evaluated: stats.total,
+                  accuracy: stats.accuracy,
+                  status: stats.status
+                };
+              }).sort((a, b) => b.evaluated - a.evaluated);
+              setMarketPerformance(marketRows);
             }
           }
         }
@@ -593,17 +639,33 @@ function DerivLivePanel() {
     setProposalParameters(null);
     setAvailableContracts([]);
 
-    digitPredictorRef.current.reset();
+    activeMarketRef.current = nextSymbol;
+    const nextPredictor = getPredictorForMarket(nextSymbol);
+    const savedAnalysis = nextPredictor.getLatestAnalysis();
+    const savedPerformance = nextPredictor.getPerformance();
 
-    setDigitAnalysis(null);
-    setDigitHistory([]);
-
+    setDigitAnalysis(savedAnalysis ? { ...savedAnalysis, market: nextSymbol } : null);
+    setDigitHistory(nextPredictor.getRecentEvaluations(50).map(item => ({ ...item, market: nextSymbol })));
     setDigitPerformance({
-      total: 0,
-      wins: 0,
-      losses: 0,
-      accuracy: 0
+      total: savedPerformance.total,
+      wins: savedPerformance.wins,
+      losses: savedPerformance.losses,
+      accuracy: savedPerformance.accuracy
     });
+    setDigitPerformanceByDigit(nextPredictor.getDigitPerformance());
+    setRecentDigitPerformance(nextPredictor.getRecentPerformance(100));
+    setReliabilityStatus(nextPredictor.getReliabilityStatus());
+    setMarketPerformance(Object.entries(predictorsByMarketRef.current).map(([marketKey, model]) => {
+      const stats = model.getPerformance();
+      return {
+        market: marketKey,
+        label: SYMBOLS.find(item => item.value === marketKey)?.label || marketKey,
+        samples: model.history.length,
+        evaluated: stats.total,
+        accuracy: stats.accuracy,
+        status: stats.status
+      };
+    }).sort((a, b) => b.evaluated - a.evaluated));
 
     if (!clientRef.current?.connected) return;
 
@@ -1650,6 +1712,57 @@ function DerivLivePanel() {
               </div>
             </div>
           ))}
+        </div>
+
+        {/* PHASE 4: WALK-FORWARD VALIDATION */}
+        <h4 style={{ margin: "20px 0 10px" }}>
+          Phase 4 — Walk-Forward Reliability Validation
+        </h4>
+        <div style={{
+          ...cardStyle,
+          padding: 14,
+          background: "#0b1422",
+          color: "#fff",
+          borderColor: "#087d69"
+        }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
+            <div><small style={{ color: "#91a3bc" }}>Evaluated next-tick forecasts</small><div style={{ fontSize: 22, fontWeight: 800 }}>{reliabilityStatus?.total || 0}</div></div>
+            <div><small style={{ color: "#91a3bc" }}>Observed accuracy</small><div style={{ fontSize: 22, fontWeight: 800 }}>{(reliabilityStatus?.accuracy || 0).toFixed(2)}%</div></div>
+            <div><small style={{ color: "#91a3bc" }}>Difference vs 10% baseline</small><div style={{ fontSize: 22, fontWeight: 800 }}>{reliabilityStatus ? `${reliabilityStatus.baselineDifference >= 0 ? "+" : ""}${reliabilityStatus.baselineDifference.toFixed(2)} pp` : "—"}</div></div>
+            <div><small style={{ color: "#91a3bc" }}>95% Wilson interval</small><div style={{ fontSize: 16, fontWeight: 800 }}>{reliabilityStatus?.confidenceInterval95 ? `${reliabilityStatus.confidenceInterval95.low.toFixed(2)}% – ${reliabilityStatus.confidenceInterval95.high.toFixed(2)}%` : "Not available"}</div></div>
+          </div>
+          <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "#17263a", color: "#f0bb65", fontWeight: 800 }}>
+            VALIDATION: {reliabilityStatus?.status || "INSUFFICIENT EVALUATIONS"}
+          </div>
+          <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>
+            Each forecast is scored against the next accepted live tick, without using that tick to create the forecast. At least 100 evaluations are required before classification. The Wilson interval is descriptive; serial dependence between ticks can make it optimistic, so an above-baseline label is not proof of a durable trading edge.
+          </p>
+        </div>
+
+        <h4 style={{ margin: "18px 0 8px" }}>Accuracy by Predicted Digit</h4>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+            <thead><tr>{["Predicted digit", "Evaluations", "Correct", "Accuracy", "95% interval", "Assessment"].map(label => <th key={label} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #34445c", fontSize: 11 }}>{label}</th>)}</tr></thead>
+            <tbody>{(digitPerformanceByDigit.length ? digitPerformanceByDigit : Array.from({ length: 10 }, (_, digit) => ({ digit, total: 0, wins: 0, accuracy: 0, confidenceInterval95: null, status: "NO DATA" }))).map(row => <tr key={row.digit}>
+              <td style={{ padding: 8 }}>{row.digit}</td><td style={{ padding: 8 }}>{row.total}</td><td style={{ padding: 8 }}>{row.wins}</td><td style={{ padding: 8 }}>{row.total ? `${row.accuracy.toFixed(2)}%` : "—"}</td>
+              <td style={{ padding: 8, fontSize: 11 }}>{row.confidenceInterval95 && row.total ? `${row.confidenceInterval95.low.toFixed(1)}–${row.confidenceInterval95.high.toFixed(1)}%` : "—"}</td>
+              <td style={{ padding: 8, color: row.status === "ABOVE BASELINE OBSERVED" ? "#35d6a2" : row.status === "BELOW BASELINE OBSERVED" ? "#ff8997" : "#f0bb65", fontSize: 11 }}>{row.status}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+
+        <h4 style={{ margin: "18px 0 8px" }}>Performance by Market</h4>
+        {marketPerformance.length === 0 ? <p style={{ color: "#91a3bc", fontSize: 12 }}>Market comparisons will populate as each market receives live ticks and evaluated forecasts.</p> : <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+            <thead><tr>{["Market", "Ticks", "Evaluations", "Accuracy", "Validation status"].map(label => <th key={label} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #34445c", fontSize: 11 }}>{label}</th>)}</tr></thead>
+            <tbody>{marketPerformance.map(row => <tr key={row.market}>
+              <td style={{ padding: 8 }}>{row.label}</td><td style={{ padding: 8 }}>{row.samples}</td><td style={{ padding: 8 }}>{row.evaluated}</td><td style={{ padding: 8 }}>{row.evaluated ? `${row.accuracy.toFixed(2)}%` : "—"}</td><td style={{ padding: 8, color: row.status.includes("ABOVE") ? "#35d6a2" : row.status.includes("BELOW") ? "#ff8997" : "#f0bb65", fontSize: 11 }}>{row.status}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>}
+
+        <div style={{ marginTop: 12, padding: 12, borderRadius: 9, background: "#17263a", color: "#91a3bc", fontSize: 11, lineHeight: 1.6 }}>
+          Recent 100 forecast accuracy: <strong style={{ color: "#fff" }}>{recentDigitPerformance.total ? `${recentDigitPerformance.accuracy.toFixed(2)}%` : "No evaluated forecasts yet"}</strong>. Results are retained separately by market in this browser. Clearing browser storage removes this local validation history.
         </div>
 
         <h4 style={{ margin: "18px 0 8px" }}>
