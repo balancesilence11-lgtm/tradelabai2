@@ -1,558 +1,131 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 
-/*
- * TradeLab AI — Deriv Bot Builder
- * Replace: src/DerivBotBuilder.jsx
- *
- * Contract choices are populated ONLY from Deriv contracts_for data supplied
- * through availableContracts. This component does not invent market options.
- * Execution remains proposal-first and requires a separate user confirmation.
- */
-
-const GROUPS = [
-  {
-    id: "all",
-    label: "All available"
-  },
-  {
-    id: "direction",
-    label: "Up / Down",
-    types: ["CALL", "PUT"]
-  },
-  {
-    id: "digits",
-    label: "Digits",
-    types: ["DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"]
-  },
-  {
-    id: "evenodd",
-    label: "Even / Odd",
-    types: ["DIGITEVEN", "DIGITODD"]
-  },
-  {
-    id: "touch",
-    label: "Touch",
-    types: ["ONETOUCH", "NOTOUCH"]
-  },
-  {
-    id: "higherlower",
-    label: "Higher / Lower",
-    types: ["HIGHER", "LOWER"]
-  },
-  {
-    id: "range",
-    label: "Range",
-    types: ["RANGE", "EXPIRYRANGE"]
-  }
+const BLUE = "#0866e9";
+const INK = "#172b4d";
+const MUTED = "#64748b";
+const BORDER = "#e2e8f0";
+const contracts = [
+  { value: "DIGITMATCH", label: "Matches" },
+  { value: "DIGITDIFF", label: "Differs" },
+  { value: "DIGITOVER", label: "Over" },
+  { value: "DIGITUNDER", label: "Under" },
+  { value: "DIGITEVEN", label: "Even" },
+  { value: "DIGITODD", label: "Odd" }
 ];
-
-const CONTRACT_LABELS = {
-  CALL: "Rise",
-  PUT: "Fall",
-  DIGITMATCH: "Matches",
-  DIGITDIFF: "Differs",
-  DIGITOVER: "Over",
-  DIGITUNDER: "Under",
-  DIGITEVEN: "Even",
-  DIGITODD: "Odd",
-  ONETOUCH: "Touches",
-  NOTOUCH: "Does Not Touch",
-  HIGHER: "Higher",
-  LOWER: "Lower",
-  RANGE: "Stays Between",
-  EXPIRYRANGE: "Ends Between"
-};
-
-const DIGIT_TYPES = new Set([
-  "DIGITMATCH",
-  "DIGITDIFF",
-  "DIGITOVER",
-  "DIGITUNDER"
-]);
-
-const PRICE_BARRIER_TYPES = new Set([
-  "ONETOUCH",
-  "NOTOUCH",
-  "HIGHER",
-  "LOWER"
-]);
-
-const RANGE_TYPES = new Set(["RANGE", "EXPIRYRANGE"]);
-
-const inputStyle = {
-  width: "100%",
-  boxSizing: "border-box",
-  background: "#0b1422",
-  color: "#e7edf7",
-  border: "1px solid #34445c",
-  borderRadius: 8,
-  padding: "11px 12px",
-  outline: "none"
-};
-
-const labelStyle = {
-  display: "block",
-  color: "#aebbd0",
-  fontSize: 12,
-  marginBottom: 7
-};
-
-const buttonStyle = {
-  border: 0,
-  borderRadius: 8,
-  padding: "11px 16px",
-  fontWeight: 700,
-  cursor: "pointer"
-};
-
-function normalizeContracts(items) {
-  if (!Array.isArray(items)) return [];
-
-  const seen = new Set();
-
-  return items
-    .filter(item => item && typeof item.contract_type === "string")
-    .map(item => ({
-      ...item,
-      contract_type: item.contract_type.toUpperCase()
-    }))
-    .filter(item => {
-      if (seen.has(item.contract_type)) return false;
-      seen.add(item.contract_type);
-      return true;
-    });
-}
-
-function getContractLabel(type) {
-  return CONTRACT_LABELS[type] || type.replaceAll("_", " ");
-}
+const baseCard = { background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 14, padding: 16, boxShadow: "0 2px 10px rgba(15,23,42,.04)" };
+const field = { width: "100%", boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 9, padding: "11px 12px", background: "#fff", color: INK, fontSize: 14 };
 
 export default function DerivBotBuilder({
-  connected = false,
-  symbol = "",
-  changeMarket = () => {},
-  contractType = "CALL",
-  setContractType = () => {},
-  duration = "5",
-  setDuration = () => {},
-  durationUnit = "m",
-  setDurationUnit = () => {},
-  stake = "1",
-  setStake = () => {},
-  availableContracts = [],
-  contractsLoading = false,
-  onPrepareTrade = () => {},
-  onExecuteTrade = () => {},
-  proposal = null,
-  orderLoading = false,
-  proposalLoading = false,
-  currency = "USD",
-  selectedDigit = "5",
-  onSelectedDigitChange = () => {},
-  marketOptions = [],
-  error = "",
-  notice = ""
+  connected, symbol, changeMarket, contractType, setContractType,
+  duration, setDuration, durationUnit, setDurationUnit, stake, setStake,
+  availableContracts = [], contractsLoading = false, marketOptions = [],
+  onPrepareTrade, onExecuteTrade, proposal, orderLoading = false,
+  proposalLoading = false, currency = "USD", selectedDigit = "5",
+  onSelectedDigitChange, tick, digitAnalysis
 }) {
-  const [group, setGroup] = useState("digits");
-  const [barrier, setBarrier] = useState(String(selectedDigit));
-
-  useEffect(() => {
-    if (DIGIT_TYPES.has(String(contractType || "").toUpperCase())) {
-      setBarrier(String(selectedDigit));
-    }
-  }, [selectedDigit, contractType]);
-  const [barrier2, setBarrier2] = useState("");
   const [localError, setLocalError] = useState("");
+  const supported = useMemo(() => new Set(availableContracts.map(x => String(x.contract_type || "").toUpperCase())), [availableContracts]);
+  const hasContractList = availableContracts.length > 0;
+  const quote = Number(tick?.quote);
+  const quoteText = Number.isFinite(quote) ? quote.toFixed(Number.isInteger(Number(tick?.pip_size)) ? Number(tick.pip_size) : 2) : "—";
+  const distribution = digitAnalysis?.distribution || [];
+  const probabilities = Array.from({ length: 10 }, (_, digit) => {
+    const found = distribution.find(item => Number(item.digit) === digit);
+    return { digit, probability: Number(found?.probability || 0) };
+  });
+  const selectedContract = contracts.find(x => x.value === contractType)?.label || contractType;
+  const needsDigit = ["DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"].includes(contractType);
+  const isDigitContract = contractType.startsWith("DIGIT");
 
-  const contracts = useMemo(
-    () => normalizeContracts(availableContracts),
-    [availableContracts]
-  );
-
-  const activeContract = contracts.find(
-    item => item.contract_type === String(contractType).toUpperCase()
-  );
-
-  const selectedGroup = GROUPS.find(item => item.id === group);
-
-  const filteredContracts = useMemo(() => {
-    if (!selectedGroup || !selectedGroup.types) return contracts;
-    return contracts.filter(item =>
-      selectedGroup.types.includes(item.contract_type)
-    );
-  }, [contracts, selectedGroup]);
-
-  const type = String(contractType || "").toUpperCase();
-  const needsDigit = DIGIT_TYPES.has(type);
-  const needsPriceBarrier = PRICE_BARRIER_TYPES.has(type);
-  const needsRange = RANGE_TYPES.has(type);
-  const needsBarrier = needsDigit || needsPriceBarrier || needsRange;
-
-  function handleGroupChange(nextGroup) {
-    setGroup(nextGroup);
+  function prepare() {
     setLocalError("");
-
-    const groupDefinition = GROUPS.find(item => item.id === nextGroup);
-    if (!groupDefinition || !groupDefinition.types) return;
-
-    const firstAvailable = contracts.find(item =>
-      groupDefinition.types.includes(item.contract_type)
-    );
-
-    if (firstAvailable) setContractType(firstAvailable.contract_type);
-  }
-
-  function handleContractChange(nextType) {
-    setContractType(nextType);
-    setLocalError("");
-  }
-
-  function prepareProposal() {
-    setLocalError("");
-
-    if (!connected) {
-      setLocalError("Connect your Deriv demo account first.");
-      return;
-    }
-
-    if (!activeContract) {
-      setLocalError("Select a contract type currently offered for this market.");
-      return;
-    }
-
     const amount = Number(stake);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 10) {
-      setLocalError("Demo stake must be greater than zero and no more than 10.");
-      return;
-    }
-
-    const requestOptions = {};
-
-    if (needsDigit) {
-      const digit = Number(selectedDigit);
-      if (!Number.isInteger(digit) || digit < 0 || digit > 9) {
-        setLocalError("Enter a digit barrier from 0 to 9.");
-        return;
-      }
-      requestOptions.barrier = String(digit);
-    } else if (needsPriceBarrier) {
-      const priceBarrier = Number(barrier);
-      if (!Number.isFinite(priceBarrier) || barrier.trim() === "") {
-        setLocalError("Enter a valid numeric price barrier.");
-        return;
-      }
-      requestOptions.barrier = String(priceBarrier);
-    } else if (needsRange) {
-      const lower = Number(barrier);
-      const upper = Number(barrier2);
-
-      if (
-        barrier.trim() === "" ||
-        barrier2.trim() === "" ||
-        !Number.isFinite(lower) ||
-        !Number.isFinite(upper) ||
-        lower >= upper
-      ) {
-        setLocalError("Enter two valid price barriers; the lower barrier must be below the upper barrier.");
-        return;
-      }
-
-      requestOptions.barrier = String(lower);
-      requestOptions.barrier2 = String(upper);
-    }
-
-    onPrepareTrade(requestOptions);
+    const length = Number(duration);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 10) return setLocalError("Stake must be greater than zero and no more than 10.");
+    if (!Number.isInteger(length) || length < 1) return setLocalError("Enter a whole-number duration of at least 1.");
+    const params = needsDigit ? { barrier: String(selectedDigit) } : {};
+    onPrepareTrade?.(params);
   }
 
-  const canPrepare =
-    connected &&
-    !contractsLoading &&
-    !proposalLoading &&
-    Boolean(activeContract);
-
-  return (
-    <section
-      style={{
-        background: "#111c2d",
-        border: "1px solid #26364d",
-        borderRadius: 14,
-        padding: 18,
-        color: "#e7edf7",
-        display: "grid",
-        gap: 16
-      }}
-    >
-      <div style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        flexWrap: "wrap",
-        gap: 10
-      }}>
-        <div>
-          <h3 style={{ margin: 0 }}>Deriv Bot Builder</h3>
-          <p style={{ color: "#91a3bc", fontSize: 12, margin: "6px 0 0" }}>
-            Configure a contract, review its quote, then confirm a demo order.
-          </p>
-        </div>
-        <span style={{
-          padding: "7px 10px",
-          borderRadius: 20,
-          background: connected ? "#103d32" : "#342b1b",
-          color: connected ? "#35d6a2" : "#f0bb65",
-          fontSize: 11,
-          fontWeight: 800
-        }}>
-          {connected ? "DEMO CONNECTED" : "NOT CONNECTED"}
-        </span>
+  return <section style={{ ...baseCard, padding: 18, color: INK, display: "grid", gap: 16 }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+      <div>
+        <div style={{ color: BLUE, fontWeight: 800, fontSize: 11, letterSpacing: 1.1 }}>TRADELAB AI · DIGIT TRADING</div>
+        <h2 style={{ margin: "4px 0 0", fontSize: 22, color: INK }}>Digit Contracts</h2>
+        <div style={{ marginTop: 4, color: MUTED, fontSize: 12 }}>Live market feed · statistical digit analysis · demo execution</div>
       </div>
+      <span style={{ padding: "7px 11px", borderRadius: 30, background: connected ? "#eaf8f0" : "#fff7e6", color: connected ? "#16834a" : "#9a6700", fontSize: 11, fontWeight: 800 }}>{connected ? "● DEMO CONNECTED" : "● NOT CONNECTED"}</span>
+    </div>
 
-      {(error || notice || localError) && (
-        <div
-          role={localError || error ? "alert" : "status"}
-          style={{
-            padding: 11,
-            borderRadius: 8,
-            background: "#0b1422",
-            border: `1px solid ${(localError || error) ? "#a94353" : "#1d8c70"}`,
-            color: (localError || error) ? "#ff8997" : "#50d6aa",
-            fontSize: 12
-          }}
-        >
-          {localError || error || notice}
-        </div>
-      )}
-
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
-        gap: 13
-      }}>
-        {marketOptions.length > 0 && (
-          <div>
-            <label style={labelStyle}>Market</label>
-            <select
-              style={inputStyle}
-              value={symbol}
-              disabled={!connected}
-              onChange={event => changeMarket(event.target.value)}
-            >
-              {marketOptions.map(item => (
-                <option key={item.value} value={item.value}>
-                  {item.label || item.value}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        <div>
-          <label style={labelStyle}>Contract category</label>
-          <select
-            style={inputStyle}
-            value={group}
-            disabled={!connected || contractsLoading || contracts.length === 0}
-            onChange={event => handleGroupChange(event.target.value)}
-          >
-            {GROUPS.map(item => (
-              <option key={item.id} value={item.id}>{item.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label style={labelStyle}>Contract type</label>
-          <select
-            style={inputStyle}
-            value={activeContract ? type : ""}
-            disabled={!connected || contractsLoading || filteredContracts.length === 0}
-            onChange={event => handleContractChange(event.target.value)}
-          >
-            {!activeContract && <option value="">Choose available contract</option>}
-            {filteredContracts.map(item => (
-              <option key={item.contract_type} value={item.contract_type}>
-                {getContractLabel(item.contract_type)}
-              </option>
-            ))}
-          </select>
-          <small style={{ color: "#91a3bc", display: "block", marginTop: 6 }}>
-            {contractsLoading
-              ? "Loading options from Deriv…"
-              : `${contracts.length} contract type(s) returned for this market.`}
-          </small>
-        </div>
-
-        <div>
-          <label style={labelStyle}>Stake ({currency})</label>
-          <input
-            style={inputStyle}
-            type="number"
-            min="0.01"
-            max="10"
-            step="0.01"
-            value={stake}
-            disabled={!connected}
-            onChange={event => setStake(event.target.value)}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle}>Duration</label>
-          <input
-            style={inputStyle}
-            type="number"
-            min="1"
-            step="1"
-            value={duration}
-            disabled={!connected}
-            onChange={event => setDuration(event.target.value)}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle}>Duration unit</label>
-          <select
-            style={inputStyle}
-            value={durationUnit}
-            disabled={!connected}
-            onChange={event => setDurationUnit(event.target.value)}
-          >
-            <option value="t">Ticks</option>
-            <option value="s">Seconds</option>
-            <option value="m">Minutes</option>
-            <option value="h">Hours</option>
-            <option value="d">Days</option>
-          </select>
-        </div>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(130px,.8fr)", gap: 12 }}>
+      <label style={{ color: MUTED, fontSize: 12, fontWeight: 700 }}>MARKET
+        <select value={symbol} onChange={e => changeMarket(e.target.value)} style={{ ...field, display: "block", marginTop: 6, fontWeight: 700 }}>
+          {marketOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+      </label>
+      <div style={{ ...baseCard, padding: "9px 12px", background: "#f8fbff" }}>
+        <div style={{ color: MUTED, fontSize: 11, fontWeight: 700 }}>LIVE PRICE</div>
+        <div style={{ color: INK, fontSize: 22, fontWeight: 850, marginTop: 5, fontVariantNumeric: "tabular-nums" }}>{quoteText}</div>
+        <div style={{ color: MUTED, fontSize: 10 }}>{tick?.epoch ? new Date(tick.epoch * 1000).toLocaleTimeString() : "Waiting for tick"}</div>
       </div>
+    </div>
 
-      {needsBarrier && (
-        <div style={{
-          border: "1px solid #34445c",
-          borderRadius: 10,
-          padding: 14,
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
-          gap: 13
-        }}>
-          <div style={{ gridColumn: "1 / -1" }}>
-            <strong style={{ fontSize: 13 }}>Contract barrier settings</strong>
-            <p style={{ color: "#91a3bc", fontSize: 11, margin: "5px 0 0" }}>
-              {needsDigit
-                ? "Digit contracts require a final-digit barrier from 0 to 9."
-                : needsRange
-                  ? "Enter the lower and upper price barriers for this range contract."
-                  : "Enter the numeric price level required by this contract."}
-            </p>
-          </div>
-
-          <div>
-            <label style={labelStyle}>
-              {needsRange ? "Lower barrier" : needsDigit ? "Digit barrier (0–9)" : "Price barrier"}
-            </label>
-            <input
-              style={inputStyle}
-              type="number"
-              min={needsDigit ? "0" : undefined}
-              max={needsDigit ? "9" : undefined}
-              step={needsDigit ? "1" : "any"}
-              value={needsDigit ? String(selectedDigit) : barrier}
-              onChange={event => {
-                setBarrier(event.target.value);
-                if (needsDigit && /^[0-9]$/.test(event.target.value)) onSelectedDigitChange(event.target.value);
-              }}
-            />
-          </div>
-
-          {needsRange && (
-            <div>
-              <label style={labelStyle}>Upper barrier</label>
-              <input
-                style={inputStyle}
-                type="number"
-                step="any"
-                value={barrier2}
-                onChange={event => setBarrier2(event.target.value)}
-              />
-            </div>
-          )}
-        </div>
-      )}
-
-      <div style={{
-        background: "#0b1422",
-        border: "1px solid #26364d",
-        borderRadius: 9,
-        padding: 12,
-        fontSize: 12,
-        lineHeight: 1.6,
-        color: "#aebbd0"
-      }}>
-        <strong style={{ color: "#f0bb65" }}>Demo safeguards</strong>
-        <div>Maximum stake per proposal: {currency} 10.</div>
-        <div>Only contract types returned by Deriv for the selected market can be requested.</div>
-        <div>Preparing a proposal does not place an order. A separate confirmation is required.</div>
+    <div>
+      <div style={{ color: MUTED, fontSize: 11, fontWeight: 800, marginBottom: 8 }}>CONTRACT TYPE</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 7 }}>
+        {contracts.map(item => {
+          const active = contractType === item.value;
+          const unavailable = hasContractList && !supported.has(item.value);
+          return <button key={item.value} type="button" disabled={unavailable || contractsLoading || orderLoading} onClick={() => { setContractType(item.value); setLocalError(""); }} style={{ border: `1px solid ${active ? BLUE : BORDER}`, borderRadius: 9, padding: "10px 5px", background: active ? "#eaf2ff" : "#fff", color: unavailable ? "#aab4c2" : active ? BLUE : INK, fontWeight: 800, fontSize: 12, cursor: unavailable ? "not-allowed" : "pointer" }}>{item.label}</button>;
+        })}
       </div>
+      {contractsLoading && <small style={{ color: MUTED }}>Loading contracts available for this market…</small>}
+    </div>
 
-      <button
-        type="button"
-        style={{
-          ...buttonStyle,
-          background: "#087d69",
-          color: "#fff",
-          opacity: canPrepare ? 1 : 0.55
-        }}
-        disabled={!canPrepare}
-        onClick={prepareProposal}
-      >
-        {proposalLoading ? "Requesting Deriv quote…" : "Prepare trade proposal"}
-      </button>
+    <div style={{ ...baseCard, background: "#f8fbff", padding: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: INK, fontWeight: 800 }}>LAST-DIGIT DISTRIBUTION</div>
+        <div style={{ fontSize: 10, color: MUTED }}>{digitAnalysis?.sampleSize || 0} observations</div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 7 }}>
+        {probabilities.map(item => {
+          const active = needsDigit && String(item.digit) === String(selectedDigit);
+          const recommended = digitAnalysis?.ready && Number(item.digit) === Number(digitAnalysis.predictedDigit);
+          return <button key={item.digit} type="button" onClick={() => onSelectedDigitChange?.(String(item.digit))} style={{ minWidth: 0, border: `1px solid ${active ? BLUE : recommended ? "#8bb7ff" : BORDER}`, borderRadius: 9, background: active ? BLUE : recommended ? "#eef5ff" : "#fff", color: active ? "#fff" : INK, padding: "9px 3px", cursor: "pointer" }}>
+            <div style={{ fontSize: 18, lineHeight: 1.1, fontWeight: 850 }}>{item.digit}</div>
+            <div style={{ fontSize: 10, marginTop: 5, color: active ? "#e8f1ff" : MUTED }}>{(item.probability * 100).toFixed(1)}%</div>
+          </button>;
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginTop: 9, fontSize: 10, color: MUTED }}>
+        <span>Blue = selected digit</span><span>Outlined = AI top-ranked digit</span>
+      </div>
+    </div>
 
-      {proposal && (
-        <div style={{
-          border: "1px solid #087d69",
-          borderRadius: 10,
-          padding: 14,
-          display: "grid",
-          gap: 12
-        }}>
-          <div>
-            <strong>Proposal ready for review</strong>
-            <p style={{ color: "#91a3bc", fontSize: 11, margin: "5px 0 0" }}>
-              {getContractLabel(type)} · {symbol} · {duration} {durationUnit}
-              {proposal.longcode ? ` · ${proposal.longcode}` : ""}
-            </p>
-          </div>
+    {needsDigit && <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, border: `1px solid ${BORDER}`, borderRadius: 10, padding: "10px 12px" }}>
+      <div><div style={{ fontSize: 12, fontWeight: 800 }}>TARGET DIGIT</div><div style={{ color: MUTED, fontSize: 11 }}>{contractType === "DIGITMATCH" ? "The final digit must match." : contractType === "DIGITDIFF" ? "The final digit must differ." : contractType === "DIGITOVER" ? "The final digit must be greater than the barrier." : "The final digit must be less than the barrier."}</div></div>
+      <select value={selectedDigit} onChange={e => onSelectedDigitChange?.(e.target.value)} style={{ ...field, width: 82, fontSize: 19, fontWeight: 850, textAlign: "center" }}>{Array.from({ length: 10 }, (_, n) => <option key={n} value={String(n)}>{n}</option>)}</select>
+    </div>}
 
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))",
-            gap: 12
-          }}>
-            <div>
-              <small style={{ color: "#91a3bc" }}>Stake / purchase price</small>
-              <div style={{ fontWeight: 800 }}>
-                {Number(proposal.ask_price ?? proposal.amount).toFixed(2)} {currency}
-              </div>
-            </div>
-            <div>
-              <small style={{ color: "#91a3bc" }}>Potential payout</small>
-              <div style={{ fontWeight: 800 }}>
-                {Number(proposal.payout).toFixed(2)} {currency}
-              </div>
-            </div>
-          </div>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 9 }}>
+      <label style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>STAKE ({currency})<input type="number" min="0.35" max="10" step="0.01" value={stake} onChange={e => setStake(e.target.value)} style={{ ...field, display: "block", marginTop: 6 }} /></label>
+      <label style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>DURATION<input type="number" min="1" step="1" value={duration} onChange={e => setDuration(e.target.value)} style={{ ...field, display: "block", marginTop: 6 }} /></label>
+      <label style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>UNIT<select value={durationUnit} onChange={e => setDurationUnit(e.target.value)} style={{ ...field, display: "block", marginTop: 6 }}>{[["t", "Ticks"], ["s", "Seconds"], ["m", "Minutes"], ["h", "Hours"], ["d", "Days"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+    </div>
 
-          <button
-            type="button"
-            style={{ ...buttonStyle, background: "#087d69", color: "#fff" }}
-            disabled={!connected || orderLoading}
-            onClick={onExecuteTrade}
-          >
-            {orderLoading ? "Placing demo order…" : "Confirm & place demo order"}
-          </button>
-        </div>
-      )}
-    </section>
-  );
+    {localError && <div role="alert" style={{ color: "#b42318", background: "#fff1f0", border: "1px solid #ffd0cc", borderRadius: 8, padding: 10, fontSize: 12 }}>{localError}</div>}
+
+    {proposal && <div style={{ border: "1px solid #b7d2ff", background: "#f3f8ff", borderRadius: 10, padding: 13, display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 9 }}>
+      <div><div style={{ color: MUTED, fontSize: 10 }}>CONTRACT</div><strong>{selectedContract}</strong></div>
+      <div><div style={{ color: MUTED, fontSize: 10 }}>QUOTE / ASK PRICE</div><strong>{Number(proposal.ask_price).toFixed(2)} {currency}</strong></div>
+      <div><div style={{ color: MUTED, fontSize: 10 }}>POTENTIAL PAYOUT</div><strong>{Number(proposal.payout || 0).toFixed(2)} {currency}</strong></div>
+      <div><div style={{ color: MUTED, fontSize: 10 }}>PROPOSAL STATUS</div><strong style={{ color: "#16834a" }}>Quote received</strong></div>
+    </div>}
+
+    <div style={{ display: "grid", gridTemplateColumns: proposal ? "1fr 1fr" : "1fr", gap: 9 }}>
+      <button type="button" onClick={prepare} disabled={!connected || proposalLoading || orderLoading || contractsLoading} style={{ ...field, border: 0, background: BLUE, color: "#fff", fontWeight: 850, padding: 14, cursor: !connected ? "not-allowed" : "pointer", opacity: !connected ? .55 : 1 }}>{proposalLoading ? "Requesting quote…" : "Get Proposal"}</button>
+      {proposal && <button type="button" onClick={onExecuteTrade} disabled={!connected || orderLoading || proposalLoading} style={{ ...field, border: 0, background: "#0756c9", color: "#fff", fontWeight: 850, padding: 14, cursor: "pointer" }}>{orderLoading ? "Placing demo order…" : `Buy ${Number(proposal.ask_price || stake).toFixed(2)} ${currency} (DEMO)`}</button>}
+    </div>
+    <div style={{ color: MUTED, fontSize: 10, lineHeight: 1.5 }}>AI probabilities are historical estimates, not guaranteed outcomes. Orders are restricted to demo accounts and a maximum stake of 10. A fresh quote is requested again when you confirm a purchase.</div>
+  </section>;
 }
