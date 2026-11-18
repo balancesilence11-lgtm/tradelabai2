@@ -53,10 +53,10 @@ const SYMBOLS = [
   { value: "R_100", label: "Volatility 100" }
 ];
 
-const panelStyle = { color: "#e7edf7", width: "100%", display: "grid", gap: 18 };
-const cardStyle = { background: "#111c2d", border: "1px solid #26364d", borderRadius: 14, padding: 18 };
-const buttonStyle = { border: 0, borderRadius: 8, padding: "11px 16px", fontWeight: 700, cursor: "pointer" };
-const inputStyle = { width: "100%", background: "#0b1422", color: "#e7edf7", border: "1px solid #34445c", borderRadius: 8, padding: "11px 12px", outline: "none", boxSizing: "border-box" };
+const panelStyle = { color: "#172b4d", width: "100%", display: "grid", gap: 18, fontFamily: "Inter, system-ui, sans-serif" };
+const cardStyle = { background: "#ffffff", color: "#172b4d", border: "1px solid #e2e8f0", borderRadius: 14, padding: 18, boxShadow: "0 2px 10px rgba(15, 23, 42, 0.04)" };
+const buttonStyle = { border: 0, borderRadius: 9, padding: "11px 16px", fontWeight: 700, cursor: "pointer" };
+const inputStyle = { width: "100%", background: "#ffffff", color: "#172b4d", border: "1px solid #cbd5e1", borderRadius: 9, padding: "11px 12px", outline: "none", boxSizing: "border-box" };
 
 const money = (value, currency = "USD") => {
   const number = Number(value);
@@ -106,12 +106,12 @@ function DerivLivePanel() {
   const [livePositions, setLivePositions] = useState({});
   const [history, setHistory] = useState([]);
 
-  const [symbol, setSymbol] = useState("frxEURUSD");
+  const [symbol, setSymbol] = useState("1HZ100V");
   const [tick, setTick] = useState(null);
   const [stake, setStake] = useState("1");
   const [contractType, setContractType] = useState("DIGITMATCH");
   const [duration, setDuration] = useState("5");
-  const [durationUnit, setDurationUnit] = useState("m");
+  const [durationUnit, setDurationUnit] = useState("t");
 
   const [availableContracts, setAvailableContracts] = useState([]);
   const [contractsLoading, setContractsLoading] = useState(false);
@@ -437,55 +437,55 @@ function DerivLivePanel() {
       setError("Demo account is not connected.");
       return;
     }
+    if (orderLoading) return;
 
-    const p = proposalParameters;
+    // Freeze the exact parameters that the user reviewed. The quote used to buy
+    // is deliberately refreshed immediately before the confirmation prompt.
+    const p = { ...proposalParameters };
     const marketLabel = SYMBOLS.find(item => item.value === p.symbol)?.label || p.symbol;
     const barrierText = p.barrier !== undefined
       ? `Barrier: ${p.barrier}${p.barrier2 !== undefined ? ` to ${p.barrier2}` : ""}`
       : "";
-    const confirmed = window.confirm([
-      "CONFIRM DEMO TRADE",
-      "",
-      `Market: ${marketLabel}`,
-      `Contract: ${getContractTypeLabel(p.contractType)} (${p.contractType})`,
-      barrierText,
-      `Stake: ${money(proposal.amount ?? p.amount, p.currency)}`,
-      `Potential payout: ${money(proposal.payout, p.currency)}`,
-      `Duration: ${p.duration} ${p.durationUnit}`,
-      "",
-      "This will place a DEMO trade on Deriv.",
-      "Do you want to continue?"
-    ].filter(Boolean).join("\n"));
 
-    if (!confirmed) return;
     setOrderLoading(true);
     setError("");
-    setNotice("");
+    setNotice("Requesting a fresh Deriv quote before purchase…");
     try {
-      // Always request a fresh proposal immediately before buying.
-if (!proposalParameters) {
-throw new Error("Trade parameters are missing. Request a new quote.");
-}
+      const freshProposal = await clientRef.current.getProposal(p);
+      if (!freshProposal?.id || !Number.isFinite(Number(freshProposal.ask_price)) || Number(freshProposal.ask_price) <= 0) {
+        throw new Error("Deriv returned an invalid fresh proposal. Request another quote.");
+      }
 
-const freshProposal = await clientRef.current.getProposal({
-...proposalParameters
-});
+      // Keep the visible quote synchronized with the exact proposal about to be bought.
+      setProposal(freshProposal);
+      const confirmed = window.confirm([
+        "CONFIRM DEMO TRADE — FRESH QUOTE",
+        "",
+        `Market: ${marketLabel}`,
+        `Contract: ${getContractTypeLabel(p.contractType)} (${p.contractType})`,
+        barrierText,
+        `Stake: ${money(freshProposal.ask_price, p.currency)} maximum purchase price`,
+        `Potential payout: ${money(freshProposal.payout, p.currency)}`,
+        `Duration: ${p.duration} ${p.durationUnit}`,
+        "",
+        "This is a DEMO trade. The displayed fresh quote will be used for purchase.",
+        "Do you want to continue?"
+      ].filter(Boolean).join("\n"));
 
-if (!freshProposal?.id || !Number.isFinite(Number(freshProposal.ask_price))) {
-throw new Error("Deriv returned an invalid proposal. Please request another quote.");
-}
+      if (!confirmed) {
+        setNotice("Purchase cancelled. The refreshed quote remains available.");
+        return;
+      }
 
-// Update the displayed proposal.
-setProposal(freshProposal);
+      // Buy exactly the fresh proposal ID; never reuse the older displayed ID.
+      const result = await clientRef.current.buyDemoProposal(
+        freshProposal.id,
+        freshProposal.ask_price,
+        { confirmed: true }
+      );
 
-// Purchase using the fresh proposal ID and price.
-const result = await clientRef.current.buyDemoProposal(
-freshProposal.id,
-freshProposal.ask_price,
-{ confirmed: true }
-);
-      // The purchase is confirmed at this point. Follow-up refresh failures must
-      // not incorrectly report that the order itself failed.
+      // Deriv has confirmed the purchase. Later refresh failures must not
+      // incorrectly report that the order itself failed.
       setLastOrder(result);
       setProposal(null);
       setProposalParameters(null);
@@ -544,7 +544,7 @@ freshProposal.ask_price,
   }, { totalPnl: 0, profitable: 0, losing: 0 });
 
   return (
-    <div style={panelStyle}>
+    <div className="tradelab-digit-workspace" style={panelStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
         <div>
           <h2 style={{ margin: 0 }}>Deriv Live Trading</h2>
@@ -672,6 +672,8 @@ freshProposal.ask_price,
         currency={currency}
         selectedDigit={selectedTargetDigit}
         onSelectedDigitChange={updateSelectedTargetDigit}
+        tick={tick}
+        digitAnalysis={digitAnalysis}
       />
 
       {lastOrder && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Latest Demo Order</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{lastOrder.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Purchase Price</span><strong>{money(lastOrder.buy_price, currency)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Potential Payout</span><strong>{money(lastOrder.payout, currency)}</strong></div></section>}
