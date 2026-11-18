@@ -462,7 +462,28 @@ function DerivLivePanel() {
     setError("");
     setNotice("");
     try {
-      const result = await clientRef.current.buyDemoProposal(proposal.id, proposal.ask_price, { confirmed: true });
+      // Always request a fresh proposal immediately before buying.
+if (!proposalParameters) {
+throw new Error("Trade parameters are missing. Request a new quote.");
+}
+
+const freshProposal = await clientRef.current.getProposal({
+...proposalParameters
+});
+
+if (!freshProposal?.id || !Number.isFinite(Number(freshProposal.ask_price))) {
+throw new Error("Deriv returned an invalid proposal. Please request another quote.");
+}
+
+// Update the displayed proposal.
+setProposal(freshProposal);
+
+// Purchase using the fresh proposal ID and price.
+const result = await clientRef.current.buyDemoProposal(
+freshProposal.id,
+freshProposal.ask_price,
+{ confirmed: true }
+);
       // The purchase is confirmed at this point. Follow-up refresh failures must
       // not incorrectly report that the order itself failed.
       setLastOrder(result);
