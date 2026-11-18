@@ -265,28 +265,35 @@ function DerivLivePanel() {
           );
 
           if (digit !== null) {
-            const evaluation = predictor.evaluate(digit);
+            // Add only a genuinely new tick. Evaluate the previous forecast
+            // against this newly observed digit, then create the next forecast.
+            const accepted = predictor.addTick(incomingTick);
 
-            if (evaluation) {
-              setDigitHistory(previous => [
-                {
-                  ...evaluation,
-                  quote: incomingTick.quote
-                },
-                ...previous
-              ].slice(0, 50));
+            if (accepted) {
+              const evaluation = predictor.evaluate(digit);
+
+              if (evaluation) {
+                setDigitHistory(previous => [
+                  {
+                    ...evaluation,
+                    quote: incomingTick.quote
+                  },
+                  ...previous
+                ].slice(0, 50));
+              }
+
+              const prediction = predictor.predict();
+
+              setDigitAnalysis(prediction);
+
+              const performance = predictor.getPerformance();
+              setDigitPerformance({
+                total: performance.total,
+                wins: performance.correct,
+                losses: performance.incorrect,
+                accuracy: performance.accuracy
+              });
             }
-
-            predictor.addTick(incomingTick);
-
-            const prediction = predictor.predict();
-
-            setDigitAnalysis({
-              ...prediction,
-              currentDigit: digit
-            });
-
-            setDigitPerformance(predictor.getPerformance());
           }
         }
 
@@ -1149,7 +1156,7 @@ function DerivLivePanel() {
             fontSize: 11,
             fontWeight: 800
           }}>
-            {digitAnalysis?.ready
+            {(digitAnalysis?.samples >= 200)
               ? "MODEL ACTIVE"
               : "COLLECTING TICKS"}
           </span>
@@ -1243,15 +1250,15 @@ function DerivLivePanel() {
               color: "#35d6a2",
               marginTop: 5
             }}>
-              {digitAnalysis?.ready
+              {(digitAnalysis?.samples >= 200)
                 ? digitAnalysis.predictedDigit
                 : "—"}
             </div>
 
             <small style={{ color: "#91a3bc" }}>
               Second candidate:{" "}
-              {digitAnalysis?.ready
-                ? digitAnalysis.secondBest
+              {(digitAnalysis?.samples >= 200)
+                ? digitAnalysis.ranking?.[1]?.digit ?? "—"
                 : "—"}
             </small>
           </div>
@@ -1266,7 +1273,7 @@ function DerivLivePanel() {
               fontWeight: 800,
               marginTop: 9
             }}>
-              {digitAnalysis?.ready
+              {(digitAnalysis?.samples >= 200)
                 ? `${(digitAnalysis.probability * 100).toFixed(2)}%`
                 : "Pending"}
             </div>
@@ -1286,7 +1293,7 @@ function DerivLivePanel() {
               fontWeight: 800,
               marginTop: 9
             }}>
-              {digitAnalysis?.sampleSize || 0}
+              {digitAnalysis?.samples || 0}
             </div>
 
             <small style={{ color: "#91a3bc" }}>
@@ -1295,7 +1302,7 @@ function DerivLivePanel() {
           </div>
         </div>
 
-        {!digitAnalysis?.ready && (
+        {!(digitAnalysis?.samples >= 200) && (
           <div style={{
             marginTop: 14,
             padding: 13,
@@ -1362,7 +1369,7 @@ function DerivLivePanel() {
                 )
               ).map(item => {
                 const isTop =
-                  digitAnalysis?.ready &&
+                  (digitAnalysis?.samples >= 200) &&
                   item.digit === digitAnalysis.predictedDigit;
 
                 return (
@@ -1399,7 +1406,7 @@ function DerivLivePanel() {
               display: "block",
               marginTop: 10
             }}>
-              Historical frequency across collected ticks.
+              Smoothed historical frequency; not a next-tick guarantee.
             </small>
           </div>
 
@@ -1407,10 +1414,10 @@ function DerivLivePanel() {
 
           <div style={{ ...cardStyle, padding: 14 }}>
             <h4 style={{ margin: "0 0 12px" }}>
-              Top Model Rankings
+              Weighted Ensemble Ranking
             </h4>
 
-            {(digitAnalysis?.rankings || [])
+            {(digitAnalysis?.ranking || [])
               .slice(0, 5)
               .map((item, index) => (
                 <div
@@ -1428,7 +1435,7 @@ function DerivLivePanel() {
                     </strong>
 
                     <span style={{ color: "#35d6a2" }}>
-                      {(item.score * 100).toFixed(2)}%
+                      {(item.probability * 100).toFixed(2)}%
                     </span>
                   </div>
 
@@ -1439,7 +1446,7 @@ function DerivLivePanel() {
                     overflow: "hidden"
                   }}>
                     <div style={{
-                      width: `${Math.min(100, item.score * 100)}%`,
+                      width: `${Math.min(100, item.probability * 100)}%`,
                       height: "100%",
                       background: index === 0
                         ? "#35d6a2"
@@ -1449,7 +1456,7 @@ function DerivLivePanel() {
                 </div>
               ))}
 
-            {!digitAnalysis?.ready && (
+            {!(digitAnalysis?.samples >= 200) && (
               <p style={{
                 color: "#91a3bc",
                 fontSize: 12
@@ -1458,6 +1465,67 @@ function DerivLivePanel() {
               </p>
             )}
           </div>
+        </div>
+
+        {/* PHASE 3: MULTI-MODEL BREAKDOWN */}
+
+        <h4 style={{ margin: "20px 0 10px" }}>
+          Phase 3 — Individual Model Intelligence
+        </h4>
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
+          gap: 12
+        }}>
+          {[
+            { name: "Historical Frequency", key: "frequency", description: "Smoothed distribution across all collected ticks." },
+            { name: "Markov Transition", key: "markov", description: "Conditional distribution after the latest observed digit." },
+            { name: "Recent Trend", key: "trend", description: "Compares the recent 100 ticks with the longer 1,000-tick sample." }
+          ].map(model => {
+            const data = digitAnalysis?.modelBreakdown?.[model.key];
+            const values = data?.probabilities || [];
+            const ranked = values.map((probability, digit) => ({ digit, probability }))
+              .sort((a, b) => b.probability - a.probability);
+            const leader = ranked[0];
+
+            return (
+              <div key={model.key} style={{ ...cardStyle, padding: 14, background: "#0b1422", color: "#fff", borderColor: "#26364d" }}>
+                <strong>{model.name}</strong>
+                <div style={{ color: "#91a3bc", fontSize: 11, marginTop: 5 }}>{model.description}</div>
+                <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ color: "#91a3bc", fontSize: 12 }}>Model weight</span>
+                  <strong>{data ? `${(data.weight * 100).toFixed(0)}%` : "—"}</strong>
+                </div>
+                <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ color: "#91a3bc", fontSize: 12 }}>Leading digit</span>
+                  <strong style={{ color: "#35d6a2" }}>{leader ? leader.digit : "—"}</strong>
+                </div>
+                <div style={{ marginTop: 5, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ color: "#91a3bc", fontSize: 12 }}>Model estimate</span>
+                  <strong>{leader ? `${(leader.probability * 100).toFixed(2)}%` : "—"}</strong>
+                </div>
+                {model.key === "markov" && (
+                  <div style={{ marginTop: 5, color: "#91a3bc", fontSize: 11 }}>
+                    Transition observations: {data?.observations ?? 0}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ ...cardStyle, marginTop: 12, background: "#0b1422", color: "#fff", borderColor: "#087d69" }}>
+          <h4 style={{ margin: "0 0 10px" }}>Weighted Ensemble & Reliability Filter</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
+            <div><small style={{ color: "#91a3bc" }}>Top candidate</small><div style={{ fontSize: 25, fontWeight: 800, color: "#35d6a2" }}>{digitAnalysis?.samples >= 200 ? digitAnalysis.predictedDigit : "—"}</div></div>
+            <div><small style={{ color: "#91a3bc" }}>Ensemble estimate — unvalidated</small><div style={{ fontSize: 21, fontWeight: 800 }}>{digitAnalysis ? `${digitAnalysis.percentage.toFixed(2)}%` : "—"}</div></div>
+            <div><small style={{ color: "#91a3bc" }}>Data reliability</small><div style={{ fontSize: 16, fontWeight: 800 }}>{digitAnalysis?.reliability || "COLLECTING DATA"}</div></div>
+            <div><small style={{ color: "#91a3bc" }}>System guidance</small><div style={{ fontSize: 16, fontWeight: 800, color: "#f0bb65" }}>{digitAnalysis?.recommendation || "WAIT"}</div></div>
+          </div>
+          <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>
+            The reliability label describes data availability, not proven forecast accuracy. The ensemble estimate is not a calibrated probability of the next digit and is not a trade instruction.
+          </p>
         </div>
 
         {/* NEW MULTI-WINDOW INTELLIGENCE */}
@@ -1629,11 +1697,11 @@ function DerivLivePanel() {
                 {digitHistory.map((item, index) => (
                   <tr key={`${item.timestamp}-${index}`}>
                     <td style={{ padding: 9 }}>
-                      {item.predicted}
+                      {item.predictedDigit}
                     </td>
 
                     <td style={{ padding: 9 }}>
-                      {item.actual}
+                      {item.actualDigit}
                     </td>
 
                     <td style={{
@@ -1668,7 +1736,7 @@ function DerivLivePanel() {
           lineHeight: 1.6,
           marginBottom: 0
         }}>
-          This model ranks digits using historical frequency, recency-weighted frequency and last-digit transitions. Scores are statistical estimates, not guaranteed outcomes. A 10% random baseline applies to an unbiased ten-digit outcome.
+          This ensemble combines historical frequency, Markov transitions and recent trend estimates. Scores are statistical estimates, not guaranteed outcomes. A 10% random baseline applies to an unbiased ten-digit outcome.
         </p>
       </section>
 
