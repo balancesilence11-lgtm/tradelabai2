@@ -233,7 +233,20 @@ function DerivLivePanel() {
   const [fourTickResults, setFourTickResults] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("tradelab_four_tick_results") || "[]");
-      return Array.isArray(saved) ? saved.slice(0, 1000) : [];
+      if (!Array.isArray(saved)) return [];
+      // Only restore fully evaluated forecasts. Incomplete forecasts are never
+      // written to this ledger and malformed/legacy entries are discarded.
+      return saved.filter(item =>
+        item &&
+        Number.isInteger(Number(item.targetDigit)) &&
+        Number(item.targetDigit) >= 0 && Number(item.targetDigit) <= 9 &&
+        Number.isInteger(Number(item.actualDigit)) &&
+        Number(item.actualDigit) >= 0 && Number(item.actualDigit) <= 9 &&
+        Number.isFinite(Number(item.probability)) &&
+        typeof item.market === "string" &&
+        typeof item.correct === "boolean" &&
+        Number.isFinite(Number(item.timestamp))
+      ).slice(0, 1000);
     } catch {
       return [];
     }
@@ -770,9 +783,10 @@ function DerivLivePanel() {
     setAvailableContracts([]);
 
     activeMarketRef.current = nextSymbol;
+    // Cancel only the in-progress forecast for the previous market. Keep the
+    // completed multi-market results ledger intact across market changes.
     fourTickPendingRef.current = null;
     setFourTickForecast(null);
-    setFourTickResults([]);
     const nextPredictor = getPredictorForMarket(nextSymbol);
     const savedAnalysis = nextPredictor.getLatestAnalysis();
     const savedPerformance = nextPredictor.getPerformance();
