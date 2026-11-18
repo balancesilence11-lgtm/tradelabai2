@@ -168,6 +168,8 @@ function calculateFourTickDigitForecast(history, targetDigit, alpha = 1) {
     targetDigit: recommended.digit,
     recommendedDigit: recommended.digit,
     probability: recommended.probability,
+    secondBestProbability: rankedDigits[1]?.probability ?? 0,
+    probabilityLead: recommended.probability - (rankedDigits[1]?.probability ?? 0),
     probabilities: rankedDigits,
     samples: history.length,
     generatedAt: Date.now()
@@ -1069,6 +1071,33 @@ function DerivLivePanel() {
     }
   }
 
+  const fourTickMarketResults = fourTickResults.filter(item => item.market === symbol);
+  const fourTickRecentResults = fourTickMarketResults.slice(0, 30);
+  const fourTickRecentHitRate = fourTickRecentResults.length
+    ? fourTickRecentResults.filter(item => item.correct).length / fourTickRecentResults.length
+    : 0;
+  const fourTickSignalReady = Boolean(
+    fourTickForecast &&
+    fourTickForecast.market === symbol &&
+    fourTickForecast.samples >= 500 &&
+    fourTickForecast.probability >= 0.12 &&
+    fourTickForecast.probabilityLead >= 0.01 &&
+    fourTickRecentResults.length >= 30 &&
+    fourTickRecentHitRate >= 0.12
+  );
+  const fourTickGateStatus = !fourTickForecast || fourTickForecast.market !== symbol || fourTickForecast.samples < 500
+    ? "COLLECTING DATA"
+    : fourTickRecentResults.length < 30
+      ? "VALIDATING MODEL"
+      : fourTickSignalReady
+        ? "HIGH-CONFIDENCE SETUP"
+        : "NO TRADE";
+  const fourTickGateColor = fourTickGateStatus === "HIGH-CONFIDENCE SETUP"
+    ? "#35d6a2"
+    : fourTickGateStatus === "NO TRADE"
+      ? "#ff8997"
+      : "#f5c76b";
+
   const openPositionStats = portfolio.reduce(
     (stats, position) => {
       const pnl = Number(
@@ -1404,6 +1433,21 @@ function DerivLivePanel() {
             Scans all ten digits and recommends the one with the highest estimated chance of appearing on the fourth future tick—not on ticks one, two, or three.
           </p>
           <div style={{
+            border: `1px solid ${fourTickGateColor}`,
+            borderRadius: 10,
+            padding: 13,
+            marginBottom: 13,
+            background: "rgba(255,255,255,0.035)"
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <strong style={{ color: fourTickGateColor }}>SIGNAL GATE: {fourTickGateStatus}</strong>
+              <strong style={{ color: "#f4f7fb" }}>Recommended digit: {fourTickForecast?.market === symbol ? fourTickForecast.recommendedDigit : "—"}</strong>
+            </div>
+            <p style={{ color: "#cbd5e1", fontSize: 11, lineHeight: 1.6, margin: "8px 0 0" }}>
+              A green setup requires at least 500 historical ticks, an estimated probability of 12% or more, at least a 1 percentage-point lead over the next digit, and 30 validated forecasts with at least a 12% observed hit rate. Otherwise the gate withholds a trade signal. These are screening thresholds, not proof of a winning trade.
+            </p>
+          </div>
+          <div style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
             gap: 12
@@ -1437,6 +1481,24 @@ function DerivLivePanel() {
               </div>
             </div>
           </div>
+          {fourTickForecast?.market === symbol && Array.isArray(fourTickForecast.probabilities) && (
+            <div style={{ marginTop: 14 }}>
+              <strong style={{ fontSize: 12 }}>ALL-DIGIT RANKING — FOURTH TICK</strong>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(115px,1fr))", gap: 8, marginTop: 9 }}>
+                {fourTickForecast.probabilities.map((item, index) => (
+                  <div key={item.digit} style={{ background: "#1b2b40", borderRadius: 8, padding: 9, border: index === 0 ? "1px solid #35d6a2" : "1px solid #34445c" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                      <strong>Digit {item.digit}</strong>
+                      <span>{(item.probability * 100).toFixed(2)}%</span>
+                    </div>
+                    <div style={{ height: 5, background: "#34445c", borderRadius: 5, marginTop: 7, overflow: "hidden" }}>
+                      <div style={{ width: `${Math.max(0, Math.min(100, item.probability * 100))}%`, height: "100%", background: index === 0 ? "#35d6a2" : "#6b91bd" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{
             display: "flex",
             flexWrap: "wrap",
@@ -1459,7 +1521,7 @@ function DerivLivePanel() {
             <span>Random baseline: <strong>10%</strong></span>
           </div>
           <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>
-            The scanner ranks digits 0–9 using a Laplace-smoothed four-step transition model from this market's historical sequence. It recommends the highest-ranked digit and validates it against the actual fourth tick. Requires at least 200 observations. Estimates are not guarantees; use the digit as an analysis aid, not a certainty.
+            The scanner ranks all digits 0–9 using a Laplace-smoothed four-step transition model from this market's historical sequence. The signal gate requires 500 ticks, a 12% estimated probability, a 1-point lead, and 30 validated forecasts with at least a 12% hit rate before showing HIGH-CONFIDENCE SETUP. Estimates are not guarantees; the gate can still be wrong.
           </p>
         </section>
 
