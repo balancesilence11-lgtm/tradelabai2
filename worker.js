@@ -398,6 +398,619 @@ async function handleAuth(request, env, url) {
 }
 
 /* =========================================
+   BILLING CONFIGURATION
+========================================= */
+
+const BILLING_PLAN_ID = "hourly_usd_1";
+const BILLING_AMOUNT_MINOR = 100;
+const BILLING_CURRENCY = "USD";
+const BILLING_INTERVAL_SECONDS = 3600;
+
+const BILLING_ALLOWED_PROVIDERS = new Set([
+  "mpesa",
+  "card"
+]);
+
+/* =========================================
+   BILLING AUDIT HELPER
+========================================= */
+
+async function logBillingEvent(
+  env,
+  userId,
+  subscriptionId,
+  transactionId,
+  eventType,
+  details = {}
+) {
+  await env.DB.prepare(`
+    INSERT INTO billing_audit_log (
+      id,
+      user_id,
+      subscription_id,
+      transaction_id,
+      event_type,
+      details_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(
+    randomId(16),
+    userId || null,
+    subscriptionId || null,
+    transactionId || null,
+    eventType,
+    JSON.stringify(details)
+  ).run();
+}
+
+/* =========================================
+   BILLING STATUS
+========================================= */
+
+async function getBillingStatus(env, user) {
+  const plan = await env.DB.prepare(`
+    SELECT
+      id,
+      name,
+      amount,
+      currency,
+      billing_interval_seconds,
+      active
+    FROM subscription_plans
+    WHERE id = ?
+  `).bind(BILLING_PLAN_ID).first();
+
+  const subscription = await env.DB.prepare(`
+    SELECT
+      s.id,
+      s.plan_id,
+      s.status,
+      s.payment_provider,
+      s.current_period_start,
+      s.current_period_end,
+      s.next_billing_at,
+      s.grace_period_end,
+      s.cancel_at_period_end,
+      s.created_at,
+      p.name AS plan_name,
+      p.amount,
+      p.currency,
+      p.billing_interval_seconds
+    FROM subscriptions s
+    LEFT JOIN subscription_plans p ON p.id = s.plan_id
+    WHERE s.user_id = ?
+    ORDER BY
+      CASE
+        WHEN s.status = 'active' THEN 1
+        WHEN s.status = 'pending' THEN 2
+        ELSE 3
+      END,
+      s.created_at DESC
+    LIMIT 1
+  `).bind(user.id).first();
+
+  return {
+    ok: true,
+
+    // Billing is not enforced until a real payment provider
+    // and verified webhook integration are completed.
+    billingEnabled: false,
+
+    paymentRequired: subscription?.status !== "active",
+
+    plan: plan ? {
+      id: plan.id,
+      name: plan.name,
+      amount: Number(plan.amount),
+      currency: plan.currency,
+      billingIntervalSeconds: Number(plan.billing_interval_seconds),
+      active: Boolean(plan.active)
+    } : null,
+
+    subscription: subscription ? {
+      id: subscription.id,
+      planId: subscription.plan_id,
+      planName: subscription.plan_name,
+      status: subscription.status,
+      paymentProvider: subscription.payment_provider,
+      amount: Number(subscription.amount || 0),
+      currency: subscription.currency || BILLING_CURRENCY,
+      currentPeriodStart: subscription.current_period_start,
+      currentPeriodEnd: subscription.current_period_end,
+      nextBillingAt: subscription.next_billing_at,
+      gracePeriodEnd: subscription.grace_period_end,
+      cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+      createdAt: subscription.created_at
+    } : null,
+
+    pricing: {
+      amount: 1,
+      currency: "USD",
+      intervalSeconds: 3600,
+      intervalLabel: "1 hour",
+      dailyEquivalent: 24,
+      monthlyEquivalent: 720
+    },
+
+    message: "Payment processing is not yet activated. No subscription charges have been made."
+  };
+}
+
+/* =========================================
+   BILLING TRANSACTION HISTORY
+========================================= */
+
+async function getBillingTransactions(request, env, user) {
+  const url = new URL(request.url);
+
+  const requestedLimit = Number(url.searchParams.get("limit") || 20);
+  const requestedOffset = Number(url.searchParams.get("offset") || 0);
+
+  const limit = Math.min(
+    50,
+    Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 20)
+  );
+
+  const offset = Math.min(
+    100000,
+    Math.max(0, Number.isFinite(requestedOffset) ? Math.floor(requestedOffset) : 0)
+  );
+
+  const result = await env.DB.prepare(`
+    SELECT
+      id,
+      subscription_id,
+      provider,
+      provider_payment_ref,
+      amount_minor,
+      currency,
+      status,
+      description,
+      provider_status,
+      paid_at,
+      created_at,
+      updated_at
+    FROM payment_transactions
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(user.id, limit, offset).all();
+
+  const countResult = await env.DB.prepare(`
+    SELECT COUNT(*) AS total
+    FROM payment_transactions
+    WHERE user_id = ?
+  `).bind(user.id).first();
+
+  const transactions = (result.results || []).map(item => ({
+    id: item.id,
+    subscriptionId: item.subscription_id,
+    provider: item.provider,
+    providerPaymentReference: item.provider_payment_ref,
+    amount: Number(item.amount_minor) / 100,
+    currency: item.currency,
+    status: item.status,
+    description: item.description,
+    providerStatus: item.provider_status,
+    paidAt: item.paid_at,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at
+  }));
+
+  return json({
+    ok: true,
+    transactions,
+    pagination: {
+      limit,
+      offset,
+      total: Number(countResult?.total || 0)
+    }
+  });
+}
+
+/* =========================================
+   CREATE SUBSCRIPTION REQUEST
+========================================= */
+
+async function createBillingSubscription(request, env, user) {
+  let body;
+
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid request body" }, 400);
+  }
+
+  if (body.consent !== true) {
+    return json({
+      error: "Explicit consent is required before creating a subscription request."
+    }, 400);
+  }
+
+  const provider = String(body.provider || "").trim().toLowerCase();
+
+  if (!BILLING_ALLOWED_PROVIDERS.has(provider)) {
+    return json({
+      error: "Unsupported payment provider.",
+      supportedProviders: ["mpesa", "card"],
+      message: "Deriv balance payments are not enabled."
+    }, 400);
+  }
+
+  const plan = await env.DB.prepare(`
+    SELECT id, name, amount, currency, billing_interval_seconds, active
+    FROM subscription_plans
+    WHERE id = ?
+  `).bind(BILLING_PLAN_ID).first();
+
+  if (
+    !plan ||
+    Number(plan.amount) !== 1 ||
+    plan.currency !== "USD" ||
+    Number(plan.billing_interval_seconds) !== BILLING_INTERVAL_SECONDS ||
+    Number(plan.active) !== 1
+  ) {
+    return json({
+      error: "The hourly subscription plan is unavailable or incorrectly configured."
+    }, 503);
+  }
+
+  const existing = await env.DB.prepare(`
+    SELECT id, status
+    FROM subscriptions
+    WHERE user_id = ?
+      AND status IN ('active', 'pending')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).bind(user.id).first();
+
+  if (existing) {
+    return json({
+      error: "An active or pending subscription already exists.",
+      subscription: {
+        id: existing.id,
+        status: existing.status
+      }
+    }, 409);
+  }
+
+  const subscriptionId = randomId(16);
+  const transactionId = randomId(16);
+  const idempotencyKey = randomId(32);
+  const now = new Date().toISOString();
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        INSERT INTO subscriptions (
+          id,
+          user_id,
+          plan_id,
+          status,
+          payment_provider,
+          current_period_start,
+          current_period_end,
+          next_billing_at,
+          cancel_at_period_end,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, 'pending', ?, NULL, NULL, NULL, 0, ?, ?)
+      `).bind(
+        subscriptionId,
+        user.id,
+        BILLING_PLAN_ID,
+        provider,
+        now,
+        now
+      ),
+
+      env.DB.prepare(`
+        INSERT INTO payment_transactions (
+          id,
+          user_id,
+          subscription_id,
+          provider,
+          provider_payment_ref,
+          idempotency_key,
+          amount_minor,
+          currency,
+          status,
+          description,
+          provider_status,
+          paid_at,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'pending',
+          'TradeLab AI hourly subscription',
+          'payment_not_started',
+          NULL, ?, ?)
+      `).bind(
+        transactionId,
+        user.id,
+        subscriptionId,
+        provider,
+        idempotencyKey,
+        BILLING_AMOUNT_MINOR,
+        BILLING_CURRENCY,
+        now,
+        now
+      ),
+
+      env.DB.prepare(`
+        INSERT INTO billing_audit_log (
+          id,
+          user_id,
+          subscription_id,
+          transaction_id,
+          event_type,
+          details_json
+        )
+        VALUES (?, ?, ?, ?, 'subscription_requested', ?)
+      `).bind(
+        randomId(16),
+        user.id,
+        subscriptionId,
+        transactionId,
+        JSON.stringify({
+          provider,
+          amount: 1,
+          currency: "USD",
+          billingIntervalSeconds: 3600,
+          consent: true,
+          paymentStarted: false
+        })
+      )
+    ]);
+
+  } catch (error) {
+    console.error("Billing subscription creation failed:", error.message);
+
+    return json({
+      error: "Unable to create subscription request."
+    }, 500);
+  }
+
+  return json({
+    ok: true,
+    message: "Subscription request created. Payment has not been initiated.",
+    billingEnabled: false,
+    paymentStarted: false,
+    charged: false,
+
+    subscription: {
+      id: subscriptionId,
+      status: "pending",
+      provider,
+      amount: 1,
+      currency: "USD",
+      intervalSeconds: BILLING_INTERVAL_SECONDS
+    },
+
+    transaction: {
+      id: transactionId,
+      status: "pending"
+    }
+  }, 201);
+}
+
+/* =========================================
+   CANCEL SUBSCRIPTION
+========================================= */
+
+async function cancelBillingSubscription(request, env, user) {
+  let body;
+
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid request body" }, 400);
+  }
+
+  const subscriptionId = String(body.subscription_id || "").trim();
+
+  if (!/^[a-f0-9]{32}$/.test(subscriptionId)) {
+    return json({ error: "Invalid subscription ID" }, 400);
+  }
+
+  const subscription = await env.DB.prepare(`
+    SELECT id, user_id, status, cancel_at_period_end
+    FROM subscriptions
+    WHERE id = ? AND user_id = ?
+  `).bind(subscriptionId, user.id).first();
+
+  if (!subscription) {
+    return json({ error: "Subscription not found" }, 404);
+  }
+
+  if (subscription.status === "cancelled") {
+    return json({
+      ok: true,
+      message: "Subscription is already cancelled.",
+      status: "cancelled"
+    });
+  }
+
+  if (subscription.status === "pending") {
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`
+          UPDATE subscriptions
+          SET status = 'cancelled',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ? AND status = 'pending'
+        `).bind(subscriptionId, user.id),
+
+        env.DB.prepare(`
+          UPDATE payment_transactions
+          SET status = 'cancelled',
+              provider_status = 'subscription_cancelled_before_payment',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE subscription_id = ?
+            AND user_id = ?
+            AND status = 'pending'
+        `).bind(subscriptionId, user.id),
+
+        env.DB.prepare(`
+          INSERT INTO billing_audit_log (
+            id, user_id, subscription_id,
+            transaction_id, event_type, details_json
+          )
+          VALUES (?, ?, ?, NULL, 'subscription_cancelled', ?)
+        `).bind(
+          randomId(16),
+          user.id,
+          subscriptionId,
+          JSON.stringify({
+            reason: "User cancelled pending subscription",
+            paymentMade: false
+          })
+        )
+      ]);
+
+      return json({
+        ok: true,
+        message: "Pending subscription cancelled. No payment was taken.",
+        status: "cancelled"
+      });
+
+    } catch (error) {
+      console.error("Pending subscription cancellation failed:", error.message);
+      return json({ error: "Unable to cancel subscription." }, 500);
+    }
+  }
+
+  if (subscription.status === "active") {
+    if (Number(subscription.cancel_at_period_end) === 1) {
+      return json({
+        ok: true,
+        message: "Subscription is already scheduled for cancellation.",
+        status: "active",
+        cancelAtPeriodEnd: true
+      });
+    }
+
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`
+          UPDATE subscriptions
+          SET cancel_at_period_end = 1,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ? AND status = 'active'
+        `).bind(subscriptionId, user.id),
+
+        env.DB.prepare(`
+          INSERT INTO billing_audit_log (
+            id, user_id, subscription_id,
+            transaction_id, event_type, details_json
+          )
+          VALUES (?, ?, ?, NULL, 'subscription_cancellation_scheduled', ?)
+        `).bind(
+          randomId(16),
+          user.id,
+          subscriptionId,
+          JSON.stringify({
+            cancelAtPeriodEnd: true
+          })
+        )
+      ]);
+
+      return json({
+        ok: true,
+        message: "Cancellation scheduled for the end of the current billing period.",
+        status: "active",
+        cancelAtPeriodEnd: true
+      });
+
+    } catch (error) {
+      console.error("Active subscription cancellation failed:", error.message);
+      return json({ error: "Unable to schedule subscription cancellation." }, 500);
+    }
+  }
+
+  return json({
+    error: "This subscription cannot be cancelled in its current state.",
+    status: subscription.status
+  }, 409);
+}
+
+/* =========================================
+   BILLING ROUTES
+========================================= */
+
+async function handleBilling(request, env, url) {
+  const path = url.pathname;
+
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required"
+    }, 401);
+  }
+
+  if (request.method === "POST" && !validOrigin(request, url)) {
+    return json({ error: "Request origin rejected" }, 403);
+  }
+
+  if (path === "/api/billing/status") {
+    if (request.method !== "GET") {
+      return json({ error: "Method not allowed" }, 405, {
+        Allow: "GET"
+      });
+    }
+
+    try {
+      return json(await getBillingStatus(env, user));
+    } catch (error) {
+      console.error("Billing status error:", error.message);
+      return json({ error: "Unable to retrieve billing status." }, 500);
+    }
+  }
+
+  if (path === "/api/billing/transactions") {
+    if (request.method !== "GET") {
+      return json({ error: "Method not allowed" }, 405, {
+        Allow: "GET"
+      });
+    }
+
+    try {
+      return await getBillingTransactions(request, env, user);
+    } catch (error) {
+      console.error("Billing transactions error:", error.message);
+      return json({ error: "Unable to retrieve payment history." }, 500);
+    }
+  }
+
+  if (path === "/api/billing/subscribe") {
+    if (request.method !== "POST") {
+      return json({ error: "Method not allowed" }, 405, {
+        Allow: "POST"
+      });
+    }
+
+    return createBillingSubscription(request, env, user);
+  }
+
+  if (path === "/api/billing/cancel") {
+    if (request.method !== "POST") {
+      return json({ error: "Method not allowed" }, 405, {
+        Allow: "POST"
+      });
+    }
+
+    return cancelBillingSubscription(request, env, user);
+  }
+
+  return json({
+    error: "Billing route not found"
+  }, 404);
+}
+
+/* =========================================
    TWELVE DATA MARKET CONNECTION
 ========================================= */
 
@@ -1503,6 +2116,12 @@ export default {
 
       if (path.startsWith("/api/auth/")) {
         return await handleAuth(request, env, url);
+      }
+
+      /* BILLING ROUTES */
+
+      if (path.startsWith("/api/billing/")) {
+        return await handleBilling(request, env, url);
       }
 
       /* DERIV OAUTH ROUTES */
