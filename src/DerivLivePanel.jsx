@@ -53,16 +53,54 @@ const SYMBOLS = [
   { value: "R_100", label: "Volatility 100" }
 ];
 
-const panelStyle = { color: "#172b4d", width: "100%", display: "grid", gap: 18, fontFamily: "Inter, system-ui, sans-serif" };
-const cardStyle = { background: "#ffffff", color: "#172b4d", border: "1px solid #e2e8f0", borderRadius: 14, padding: 18, boxShadow: "0 2px 10px rgba(15, 23, 42, 0.04)" };
-const buttonStyle = { border: 0, borderRadius: 9, padding: "11px 16px", fontWeight: 700, cursor: "pointer" };
-const inputStyle = { width: "100%", background: "#ffffff", color: "#172b4d", border: "1px solid #cbd5e1", borderRadius: 9, padding: "11px 12px", outline: "none", boxSizing: "border-box" };
+const panelStyle = {
+  color: "#172b4d",
+  width: "100%",
+  display: "grid",
+  gap: 18,
+  fontFamily: "Inter, system-ui, sans-serif"
+};
+
+const cardStyle = {
+  background: "#ffffff",
+  color: "#172b4d",
+  border: "1px solid #e2e8f0",
+  borderRadius: 14,
+  padding: 18,
+  boxShadow: "0 2px 10px rgba(15, 23, 42, 0.04)"
+};
+
+const buttonStyle = {
+  border: 0,
+  borderRadius: 9,
+  padding: "11px 16px",
+  fontWeight: 700,
+  cursor: "pointer"
+};
+
+const inputStyle = {
+  width: "100%",
+  background: "#ffffff",
+  color: "#172b4d",
+  border: "1px solid #cbd5e1",
+  borderRadius: 9,
+  padding: "11px 12px",
+  outline: "none",
+  boxSizing: "border-box"
+};
 
 const money = (value, currency = "USD") => {
   const number = Number(value);
+
   if (!Number.isFinite(number)) return "—";
+
   try {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(number);
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(number);
   } catch {
     return `${currency} ${number.toFixed(2)}`;
   }
@@ -73,34 +111,67 @@ function getAccountId(account) {
 }
 
 function getAccountLabel(account) {
-  return [getAccountId(account), account?.currency || "USD", "DEMO"].filter(Boolean).join(" · ");
+  return [
+    getAccountId(account),
+    account?.currency || "USD",
+    "DEMO"
+  ].filter(Boolean).join(" · ");
 }
 
 function DerivLivePanel() {
   const clientRef = useRef(null);
-  const digitPredictorRef = useRef(new DigitMatchPredictor({ maxHistory: 5000, minSamples: 200 }));
+
+  const digitPredictorRef = useRef(
+    new DigitMatchPredictor({
+      maxHistory: 5000,
+      minSamples: 200
+    })
+  );
+
   const contractsRequestRef = useRef(0);
   const proposalRequestRef = useRef(0);
   const monitoredContractIdsRef = useRef(new Set());
 
   const [digitAnalysis, setDigitAnalysis] = useState(null);
+
   const [selectedTargetDigit, setSelectedTargetDigit] = useState(() => {
-    const saved = Number(localStorage.getItem("tradelab_selected_target_digit"));
-    return Number.isInteger(saved) && saved >= 0 && saved <= 9 ? String(saved) : "5";
+    const saved = Number(
+      localStorage.getItem("tradelab_selected_target_digit")
+    );
+
+    return Number.isInteger(saved) && saved >= 0 && saved <= 9
+      ? String(saved)
+      : "5";
   });
 
   function updateSelectedTargetDigit(value) {
     const digit = String(value);
+
     if (!/^[0-9]$/.test(digit)) return;
+
     setSelectedTargetDigit(digit);
-    try { localStorage.setItem("tradelab_selected_target_digit", digit); } catch {}
+
+    try {
+      localStorage.setItem("tradelab_selected_target_digit", digit);
+    } catch {}
   }
-  const [digitPerformance, setDigitPerformance] = useState({ total: 0, wins: 0, losses: 0, accuracy: 0 });
+
+  const [digitPerformance, setDigitPerformance] = useState({
+    total: 0,
+    wins: 0,
+    losses: 0,
+    accuracy: 0
+  });
+
   const [digitHistory, setDigitHistory] = useState([]);
 
   const [status, setStatus] = useState("disconnected");
   const [accounts, setAccounts] = useState([]);
-  const [accountId, setAccountId] = useState(() => localStorage.getItem("tradelab_deriv_selected_account") || "");
+
+  const [accountId, setAccountId] = useState(
+    () => localStorage.getItem("tradelab_deriv_selected_account") || ""
+  );
+
   const [balance, setBalance] = useState(null);
   const [portfolio, setPortfolio] = useState([]);
   const [livePositions, setLivePositions] = useState({});
@@ -109,133 +180,248 @@ function DerivLivePanel() {
   const [symbol, setSymbol] = useState("1HZ100V");
   const [tick, setTick] = useState(null);
   const [stake, setStake] = useState("1");
+
   const [contractType, setContractType] = useState("DIGITMATCH");
   const [duration, setDuration] = useState("5");
   const [durationUnit, setDurationUnit] = useState("t");
 
   const [availableContracts, setAvailableContracts] = useState([]);
   const [contractsLoading, setContractsLoading] = useState(false);
+
   const [proposal, setProposal] = useState(null);
   const [proposalParameters, setProposalParameters] = useState(null);
+
   const [lastOrder, setLastOrder] = useState(null);
   const [monitoredContract, setMonitoredContract] = useState(null);
 
   const [loading, setLoading] = useState(false);
   const [proposalLoading, setProposalLoading] = useState(false);
   const [orderLoading, setOrderLoading] = useState(false);
+
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const connected = status === "connected";
-  const currency = accounts.find(a => getAccountId(a) === accountId)?.currency || balance?.currency || "USD";
+
+  const currency =
+    accounts.find(a => getAccountId(a) === accountId)?.currency ||
+    balance?.currency ||
+    "USD";
+
+  const selectedMarketLabel =
+    SYMBOLS.find(item => item.value === symbol)?.label || symbol;
 
   useEffect(() => {
     const client = new DerivClient({
       onStatus: event => {
         setStatus(event.state || "disconnected");
-        if (event.state === "error") setError(event.error || "Deriv connection error.");
+
+        if (event.state === "error") {
+          setError(event.error || "Deriv connection error.");
+        }
+
         if (event.state === "disconnected") {
-          // Invalidate any asynchronous quote/contract response from the old session.
           contractsRequestRef.current += 1;
           proposalRequestRef.current += 1;
+
           setBalance(null);
           setPortfolio([]);
           setLivePositions({});
+
           monitoredContractIdsRef.current.clear();
+
           setTick(null);
           setProposal(null);
           setProposalParameters(null);
           setAvailableContracts([]);
+
           setContractsLoading(false);
           setProposalLoading(false);
         }
       },
+
       onMessage: data => {
-        if (data.msg_type === "balance" && data.balance) setBalance(data.balance);
+        if (data.msg_type === "balance" && data.balance) {
+          setBalance(data.balance);
+        }
+
         if (data.msg_type === "portfolio" && data.portfolio) {
           const contracts = data.portfolio.contracts || [];
+
           setPortfolio(contracts);
           monitorPortfolioPositions(contracts);
         }
 
         if (data.msg_type === "tick" && data.tick) {
           const incomingTick = data.tick;
+
           setTick(incomingTick);
+
           const predictor = digitPredictorRef.current;
-          const digit = predictor.extractDigit(incomingTick.quote, incomingTick.pip_size);
+
+          const digit = predictor.extractDigit(
+            incomingTick.quote,
+            incomingTick.pip_size
+          );
+
           if (digit !== null) {
             const evaluation = predictor.evaluate(digit);
+
             if (evaluation) {
-              setDigitHistory(previous => [{ ...evaluation, quote: incomingTick.quote }, ...previous].slice(0, 50));
+              setDigitHistory(previous => [
+                {
+                  ...evaluation,
+                  quote: incomingTick.quote
+                },
+                ...previous
+              ].slice(0, 50));
             }
+
             predictor.addTick(incomingTick);
+
             const prediction = predictor.predict();
-            setDigitAnalysis({ ...prediction, currentDigit: digit });
+
+            setDigitAnalysis({
+              ...prediction,
+              currentDigit: digit
+            });
+
             setDigitPerformance(predictor.getPerformance());
           }
         }
 
-        if (data.msg_type === "proposal_open_contract" && data.proposal_open_contract) {
+        if (
+          data.msg_type === "proposal_open_contract" &&
+          data.proposal_open_contract
+        ) {
           const contract = data.proposal_open_contract;
+
           const contractId = String(contract.contract_id || "");
+
           if (contractId) {
-            setLivePositions(previous => ({ ...previous, [contractId]: { ...previous[contractId], ...contract } }));
-            setPortfolio(previous => previous.map(item => String(item.contract_id) === contractId ? { ...item, ...contract } : item));
+            setLivePositions(previous => ({
+              ...previous,
+              [contractId]: {
+                ...previous[contractId],
+                ...contract
+              }
+            }));
+
+            setPortfolio(previous =>
+              previous.map(item =>
+                String(item.contract_id) === contractId
+                  ? { ...item, ...contract }
+                  : item
+              )
+            );
           }
+
           setMonitoredContract(contract);
+
           if (contract.is_sold) {
             monitoredContractIdsRef.current.delete(contractId);
-            setPortfolio(previous => previous.filter(item => String(item.contract_id) !== contractId));
-            setNotice(`Contract ${contract.contract_id} has settled. Final P/L: ${money(contract.profit, contract.currency || currency)}.`);
+
+            setPortfolio(previous =>
+              previous.filter(
+                item => String(item.contract_id) !== contractId
+              )
+            );
+
+            setNotice(
+              `Contract ${contract.contract_id} has settled. Final P/L: ${money(
+                contract.profit,
+                contract.currency || currency
+              )}.`
+            );
+
             Promise.all([
               client.refreshAccount().then(snapshot => {
                 setBalance(snapshot.balance);
                 setPortfolio(snapshot.portfolio || []);
-                monitorPortfolioPositions(snapshot.portfolio || []);
+
+                monitorPortfolioPositions(
+                  snapshot.portfolio || []
+                );
               }),
+
               loadHistory()
-            ]).catch(err => console.warn("Post-settlement refresh failed:", err));
+            ]).catch(err =>
+              console.warn("Post-settlement refresh failed:", err)
+            );
           }
         }
-        if (data.error) setError(data.error.message || "Deriv API error.");
+
+        if (data.error) {
+          setError(data.error.message || "Deriv API error.");
+        }
       }
     });
 
     clientRef.current = client;
+
     loadAccounts();
+
     return () => {
       client.disconnect();
       clientRef.current = null;
     };
-    // The client is intentionally initialized once for this mounted panel.
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function monitorPortfolioPositions(contracts = []) {
-    if (!clientRef.current?.connected || !Array.isArray(contracts)) return;
+    if (!clientRef.current?.connected || !Array.isArray(contracts)) {
+      return;
+    }
+
     for (const item of contracts) {
       const id = String(item?.contract_id || "");
-      if (!/^\d+$/.test(id) || monitoredContractIdsRef.current.has(id)) continue;
+
+      if (!/^\d+$/.test(id) || monitoredContractIdsRef.current.has(id)) {
+        continue;
+      }
+
       monitoredContractIdsRef.current.add(id);
+
       clientRef.current.monitorContract(id).catch(err => {
         monitoredContractIdsRef.current.delete(id);
-        console.warn(`Unable to monitor contract ${id}:`, err.message);
+
+        console.warn(
+          `Unable to monitor contract ${id}:`,
+          err.message
+        );
       });
     }
   }
 
   async function loadAccounts() {
     if (!clientRef.current) return;
+
     setLoading(true);
     setError("");
+
     try {
       const list = await clientRef.current.getAccounts();
+
       const demoAccounts = list.filter(account => {
-        const type = String(account.account_type || account.type || "").toLowerCase();
-        return type === "demo" || type === "virtual" || account.is_virtual === 1 || account.is_virtual === true;
+        const type = String(
+          account.account_type || account.type || ""
+        ).toLowerCase();
+
+        return (
+          type === "demo" ||
+          type === "virtual" ||
+          account.is_virtual === 1 ||
+          account.is_virtual === true
+        );
       });
+
       setAccounts(demoAccounts);
-      if (accountId && !demoAccounts.some(a => getAccountId(a) === accountId)) {
+
+      if (
+        accountId &&
+        !demoAccounts.some(a => getAccountId(a) === accountId)
+      ) {
         setAccountId("");
         localStorage.removeItem("tradelab_deriv_selected_account");
       }
@@ -250,39 +436,69 @@ function DerivLivePanel() {
     if (!clientRef.current?.connected) return [];
 
     const requestId = ++contractsRequestRef.current;
+
     setContractsLoading(true);
     setError("");
 
     try {
-      const contracts = await clientRef.current.getAvailableContracts(market, { force: true });
+      const contracts =
+        await clientRef.current.getAvailableContracts(
+          market,
+          { force: true }
+        );
 
-      // Ignore a late response from a market that the user has already left.
-      if (requestId !== contractsRequestRef.current) return contracts;
+      if (requestId !== contractsRequestRef.current) {
+        return contracts;
+      }
 
       setAvailableContracts(contracts);
-      const types = contracts.map(item => String(item.contract_type || "").toUpperCase());
+
+      const types = contracts.map(item =>
+        String(item.contract_type || "").toUpperCase()
+      );
+
       if (!types.includes(String(contractType).toUpperCase())) {
-        const preferred = types.includes("CALL") ? "CALL" : (types[0] || "");
+        const preferred = types.includes("CALL")
+          ? "CALL"
+          : (types[0] || "");
+
         if (preferred) setContractType(preferred);
       }
+
       return contracts;
     } catch (err) {
       if (requestId === contractsRequestRef.current) {
         setAvailableContracts([]);
-        setError(err.message || `Unable to load contracts for ${market}.`);
+
+        setError(
+          err.message || `Unable to load contracts for ${market}.`
+        );
       }
+
       return [];
     } finally {
-      if (requestId === contractsRequestRef.current) setContractsLoading(false);
+      if (requestId === contractsRequestRef.current) {
+        setContractsLoading(false);
+      }
     }
   }
 
   async function loadHistory() {
     if (!clientRef.current?.connected) return;
+
     try {
-      const result = await clientRef.current.getProfitTable({ limit: 50, offset: 0 });
-      const transactions = result.transactions || result.profit_table || [];
-      setHistory(Array.isArray(transactions) ? transactions : []);
+      const result =
+        await clientRef.current.getProfitTable({
+          limit: 50,
+          offset: 0
+        });
+
+      const transactions =
+        result.transactions || result.profit_table || [];
+
+      setHistory(
+        Array.isArray(transactions) ? transactions : []
+      );
     } catch (err) {
       console.warn("Profit table unavailable:", err.message);
     }
@@ -293,22 +509,37 @@ function DerivLivePanel() {
       setError("Select a demo account first.");
       return;
     }
+
     setLoading(true);
     setError("");
     setNotice("");
+
     setProposal(null);
     setProposalParameters(null);
+
     try {
-      const result = await clientRef.current.connect(accountId);
+      const result =
+        await clientRef.current.connect(accountId);
+
       setBalance(result.balance);
       setPortfolio(result.portfolio || []);
       setLivePositions({});
+
       monitorPortfolioPositions(result.portfolio || []);
-      localStorage.setItem("tradelab_deriv_selected_account", accountId);
+
+      localStorage.setItem(
+        "tradelab_deriv_selected_account",
+        accountId
+      );
+
       await loadHistory();
       await loadAvailableContracts(symbol);
+
       await clientRef.current.subscribeTicks(symbol);
-      setNotice("Deriv demo account connected. Market contracts and live ticks are loaded.");
+
+      setNotice(
+        "Deriv demo account connected. Market contracts and live ticks are loaded."
+      );
     } catch (err) {
       setError(err.message || "Unable to connect Deriv account.");
     } finally {
@@ -319,42 +550,68 @@ function DerivLivePanel() {
   function disconnectAccount() {
     proposalRequestRef.current += 1;
     contractsRequestRef.current += 1;
+
     clientRef.current?.disconnect();
+
     setBalance(null);
     setPortfolio([]);
     setLivePositions({});
+
     monitoredContractIdsRef.current.clear();
+
     setHistory([]);
     setTick(null);
+
     setProposal(null);
     setProposalParameters(null);
     setAvailableContracts([]);
+
     setMonitoredContract(null);
     setLastOrder(null);
+
     setNotice("Deriv account disconnected.");
     setError("");
   }
 
   async function changeMarket(nextSymbol) {
     if (!nextSymbol || nextSymbol === symbol) return;
+
     proposalRequestRef.current += 1;
+
     setProposalLoading(false);
     setSymbol(nextSymbol);
     setTick(null);
+
     setProposal(null);
     setProposalParameters(null);
     setAvailableContracts([]);
+
     digitPredictorRef.current.reset();
+
     setDigitAnalysis(null);
     setDigitHistory([]);
-    setDigitPerformance({ total: 0, wins: 0, losses: 0, accuracy: 0 });
+
+    setDigitPerformance({
+      total: 0,
+      wins: 0,
+      losses: 0,
+      accuracy: 0
+    });
+
     if (!clientRef.current?.connected) return;
+
     try {
       await Promise.all([
         loadAvailableContracts(nextSymbol),
         clientRef.current.subscribeTicks(nextSymbol)
       ]);
-      setNotice(`Market changed to ${SYMBOLS.find(item => item.value === nextSymbol)?.label || nextSymbol}.`);
+
+      setNotice(
+        `Market changed to ${
+          SYMBOLS.find(item => item.value === nextSymbol)?.label ||
+          nextSymbol
+        }.`
+      );
     } catch (err) {
       setError(err.message || "Unable to switch market.");
     }
@@ -362,14 +619,21 @@ function DerivLivePanel() {
 
   async function refreshAccount() {
     if (!connected) return;
+
     setLoading(true);
     setError("");
+
     try {
-      const snapshot = await clientRef.current.refreshAccount();
+      const snapshot =
+        await clientRef.current.refreshAccount();
+
       setBalance(snapshot.balance);
       setPortfolio(snapshot.portfolio || []);
+
       monitorPortfolioPositions(snapshot.portfolio || []);
+
       await loadHistory();
+
       setNotice("Account information refreshed.");
     } catch (err) {
       setError(err.message || "Account refresh failed.");
@@ -378,23 +642,46 @@ function DerivLivePanel() {
     }
   }
 
+  async function refreshAccountAfterTrade() {
+    const snapshot =
+      await clientRef.current.refreshAccount();
+
+    setBalance(snapshot.balance);
+    setPortfolio(snapshot.portfolio || []);
+
+    monitorPortfolioPositions(snapshot.portfolio || []);
+  }
+
   async function requestProposal(parameters = {}) {
     if (!connected) {
       setError("Connect your demo account first.");
       return;
     }
+
     setError("");
     setNotice("");
+
     setProposal(null);
     setProposalParameters(null);
 
     const amount = Number(stake);
     const tradeDuration = Number(duration);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_STAKE) {
-      setError(`Stake must be greater than zero and not exceed ${MAX_STAKE}.`);
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      amount > MAX_STAKE
+    ) {
+      setError(
+        `Stake must be greater than zero and not exceed ${MAX_STAKE}.`
+      );
       return;
     }
-    if (!Number.isInteger(tradeDuration) || tradeDuration < 1) {
+
+    if (
+      !Number.isInteger(tradeDuration) ||
+      tradeDuration < 1
+    ) {
       setError("Enter a valid whole-number trade duration.");
       return;
     }
@@ -406,25 +693,42 @@ function DerivLivePanel() {
       currency,
       duration: tradeDuration,
       durationUnit,
-      ...(parameters.barrier !== undefined && parameters.barrier !== "" ? { barrier: parameters.barrier } : {}),
-      ...(parameters.barrier2 !== undefined && parameters.barrier2 !== "" ? { barrier2: parameters.barrier2 } : {})
+
+      ...(parameters.barrier !== undefined &&
+      parameters.barrier !== ""
+        ? { barrier: parameters.barrier }
+        : {}),
+
+      ...(parameters.barrier2 !== undefined &&
+      parameters.barrier2 !== ""
+        ? { barrier2: parameters.barrier2 }
+        : {})
     };
 
     const requestId = ++proposalRequestRef.current;
+
     setProposalLoading(true);
+
     try {
-      const quote = await clientRef.current.getProposal(params);
-      // Do not show a quote if the user changed market or settings while it loaded.
+      const quote =
+        await clientRef.current.getProposal(params);
+
       if (requestId !== proposalRequestRef.current) return;
+
       setProposal(quote);
       setProposalParameters({ ...params });
-      setNotice("Proposal received. Review the contract type, barriers and quote before confirming.");
+
+      setNotice(
+        "Proposal received. Review the contract type, barriers and quote before confirming."
+      );
     } catch (err) {
       if (requestId === proposalRequestRef.current) {
         setError(err.message || "Unable to obtain proposal.");
       }
     } finally {
-      if (requestId === proposalRequestRef.current) setProposalLoading(false);
+      if (requestId === proposalRequestRef.current) {
+        setProposalLoading(false);
+      }
     }
   }
 
@@ -433,31 +737,52 @@ function DerivLivePanel() {
       setError("Request a proposal before placing an order.");
       return;
     }
+
     if (!connected) {
       setError("Demo account is not connected.");
       return;
     }
+
     if (orderLoading) return;
 
-    // Freeze the exact parameters that the user reviewed. The quote used to buy
-    // is deliberately refreshed immediately before the confirmation prompt.
     const p = { ...proposalParameters };
-    const marketLabel = SYMBOLS.find(item => item.value === p.symbol)?.label || p.symbol;
-    const barrierText = p.barrier !== undefined
-      ? `Barrier: ${p.barrier}${p.barrier2 !== undefined ? ` to ${p.barrier2}` : ""}`
-      : "";
+
+    const marketLabel =
+      SYMBOLS.find(item => item.value === p.symbol)?.label ||
+      p.symbol;
+
+    const barrierText =
+      p.barrier !== undefined
+        ? `Barrier: ${p.barrier}${
+            p.barrier2 !== undefined
+              ? ` to ${p.barrier2}`
+              : ""
+          }`
+        : "";
 
     setOrderLoading(true);
     setError("");
-    setNotice("Requesting a fresh Deriv quote before purchase…");
+
+    setNotice(
+      "Requesting a fresh Deriv quote before purchase…"
+    );
+
     try {
-      const freshProposal = await clientRef.current.getProposal(p);
-      if (!freshProposal?.id || !Number.isFinite(Number(freshProposal.ask_price)) || Number(freshProposal.ask_price) <= 0) {
-        throw new Error("Deriv returned an invalid fresh proposal. Request another quote.");
+      const freshProposal =
+        await clientRef.current.getProposal(p);
+
+      if (
+        !freshProposal?.id ||
+        !Number.isFinite(Number(freshProposal.ask_price)) ||
+        Number(freshProposal.ask_price) <= 0
+      ) {
+        throw new Error(
+          "Deriv returned an invalid fresh proposal. Request another quote."
+        );
       }
 
-      // Keep the visible quote synchronized with the exact proposal about to be bought.
       setProposal(freshProposal);
+
       const confirmed = window.confirm([
         "CONFIRM DEMO TRADE — FRESH QUOTE",
         "",
@@ -468,199 +793,923 @@ function DerivLivePanel() {
         `Potential payout: ${money(freshProposal.payout, p.currency)}`,
         `Duration: ${p.duration} ${p.durationUnit}`,
         "",
-        "This is a DEMO trade. The displayed fresh quote will be used for purchase.",
+        "This is a DEMO trade.",
         "Do you want to continue?"
       ].filter(Boolean).join("\n"));
 
       if (!confirmed) {
-        setNotice("Purchase cancelled. The refreshed quote remains available.");
+        setNotice(
+          "Purchase cancelled. The refreshed quote remains available."
+        );
         return;
       }
 
-      // Buy exactly the fresh proposal ID; never reuse the older displayed ID.
-      const result = await clientRef.current.buyDemoProposal(
-        freshProposal.id,
-        freshProposal.ask_price,
-        { confirmed: true }
-      );
+      const result =
+        await clientRef.current.buyDemoProposal(
+          freshProposal.id,
+          freshProposal.ask_price,
+          { confirmed: true }
+        );
 
-      // Deriv has confirmed the purchase. Later refresh failures must not
-      // incorrectly report that the order itself failed.
       setLastOrder(result);
+
       setProposal(null);
       setProposalParameters(null);
 
       if (result.contract_id) {
-        setMonitoredContract({ contract_id: result.contract_id, status: "Monitoring", is_sold: 0 });
-        monitoredContractIdsRef.current.add(String(result.contract_id));
+        setMonitoredContract({
+          contract_id: result.contract_id,
+          status: "Monitoring",
+          is_sold: 0
+        });
+
+        monitoredContractIdsRef.current.add(
+          String(result.contract_id)
+        );
+
         try {
-          await clientRef.current.monitorContract(result.contract_id);
+          await clientRef.current.monitorContract(
+            result.contract_id
+          );
         } catch (monitorError) {
-          monitoredContractIdsRef.current.delete(String(result.contract_id));
-          console.warn("Contract monitoring could not start:", monitorError);
+          monitoredContractIdsRef.current.delete(
+            String(result.contract_id)
+          );
+
+          console.warn(
+            "Contract monitoring could not start:",
+            monitorError
+          );
         }
       }
 
       const followUpWarnings = [];
+
       try {
         await refreshAccountAfterTrade();
       } catch (refreshError) {
         followUpWarnings.push("account refresh is pending");
-        console.warn("Post-trade account refresh failed:", refreshError);
+        console.warn(
+          "Post-trade account refresh failed:",
+          refreshError
+        );
       }
+
       try {
         await loadHistory();
       } catch (historyError) {
-        followUpWarnings.push("trade history may need refreshing");
-        console.warn("Post-trade history refresh failed:", historyError);
+        followUpWarnings.push(
+          "trade history may need refreshing"
+        );
+
+        console.warn(
+          "Post-trade history refresh failed:",
+          historyError
+        );
       }
 
-      setNotice(`Demo order successfully placed. Contract ID: ${result.contract_id}${followUpWarnings.length ? ` (${followUpWarnings.join("; ")})` : ""}`);
+      setNotice(
+        followUpWarnings.length
+          ? `Demo purchase confirmed. ${followUpWarnings.join("; ")}.`
+          : "Demo purchase confirmed successfully."
+      );
     } catch (err) {
-      setError(err.message || "Demo order failed.");
+      setError(
+        err.message || "Demo purchase failed."
+      );
     } finally {
       setOrderLoading(false);
     }
   }
 
-  async function refreshAccountAfterTrade() {
-    const snapshot = await clientRef.current.refreshAccount();
-    setBalance(snapshot.balance);
-    setPortfolio(snapshot.portfolio || []);
-    monitorPortfolioPositions(snapshot.portfolio || []);
-  }
+  const openPositionStats = portfolio.reduce(
+    (stats, position) => {
+      const pnl = Number(
+        position.profit ??
+        (Number(position.bid_price) - Number(position.buy_price))
+      );
 
-  const selectedMarketLabel = SYMBOLS.find(item => item.value === symbol)?.label || symbol;
-  const openPositionStats = portfolio.reduce((stats, item) => {
-    const live = livePositions[String(item.contract_id || "")] || {};
-    const position = { ...item, ...live };
-    const pnl = Number(position.profit ?? (Number(position.bid_price) - Number(position.buy_price)));
-    if (Number.isFinite(pnl)) {
-      stats.totalPnl += pnl;
-      if (pnl > 0) stats.profitable += 1;
-      else if (pnl < 0) stats.losing += 1;
+      if (Number.isFinite(pnl)) {
+        stats.totalPnl += pnl;
+
+        if (pnl > 0) stats.profitable += 1;
+        else if (pnl < 0) stats.losing += 1;
+      }
+
+      return stats;
+    },
+    {
+      totalPnl: 0,
+      profitable: 0,
+      losing: 0
     }
-    return stats;
-  }, { totalPnl: 0, profitable: 0, losing: 0 });
+  );
 
   return (
-    <div className="tradelab-digit-workspace" style={panelStyle}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+    <div
+      className="tradelab-digit-workspace"
+      style={panelStyle}
+    >
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 12
+      }}>
         <div>
           <h2 style={{ margin: 0 }}>Deriv Live Trading</h2>
-          <p style={{ color: "#91a3bc", margin: "6px 0 0" }}>Authenticated Deriv connection · Forex · Volatility · AI analysis</p>
+
+          <p style={{
+            color: "#91a3bc",
+            margin: "6px 0 0"
+          }}>
+            Authenticated Deriv connection · Forex · Volatility · AI analysis
+          </p>
         </div>
-        <span style={{ padding: "8px 12px", borderRadius: 20, background: connected ? "#103d32" : "#342b1b", color: connected ? "#35d6a2" : "#f0bb65", fontSize: 12, fontWeight: 800 }}>
+
+        <span style={{
+          padding: "8px 12px",
+          borderRadius: 20,
+          background: connected ? "#103d32" : "#342b1b",
+          color: connected ? "#35d6a2" : "#f0bb65",
+          fontSize: 12,
+          fontWeight: 800
+        }}>
           ● {connected ? "CONNECTED — DEMO" : status.toUpperCase()}
         </span>
       </div>
 
-      {error && <div role="alert" style={{ ...cardStyle, borderColor: "#a94353", color: "#ff8997" }}>{error}</div>}
-      {notice && <div role="status" style={{ ...cardStyle, borderColor: "#1d8c70", color: "#50d6aa" }}>{notice}</div>}
+      {error && (
+        <div
+          role="alert"
+          style={{
+            ...cardStyle,
+            borderColor: "#a94353",
+            color: "#ff8997"
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {notice && (
+        <div
+          role="status"
+          style={{
+            ...cardStyle,
+            borderColor: "#1d8c70",
+            color: "#50d6aa"
+          }}
+        >
+          {notice}
+        </div>
+      )}
 
       <section style={cardStyle}>
-        <h3 style={{ marginTop: 0 }}>Demo Account Connection</h3>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
+        <h3 style={{ marginTop: 0 }}>
+          Demo Account Connection
+        </h3>
+
+        <div style={{
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          alignItems: "end"
+        }}>
           <div style={{ flex: "1 1 250px" }}>
-            <label style={{ display: "block", marginBottom: 8 }}>Select Deriv demo account</label>
-            <select style={inputStyle} value={accountId} disabled={connected || loading} onChange={event => setAccountId(event.target.value)}>
+            <label style={{
+              display: "block",
+              marginBottom: 8
+            }}>
+              Select Deriv demo account
+            </label>
+
+            <select
+              style={inputStyle}
+              value={accountId}
+              disabled={connected || loading}
+              onChange={event =>
+                setAccountId(event.target.value)
+              }
+            >
               <option value="">Select demo account</option>
-              {accounts.map(account => <option key={getAccountId(account)} value={getAccountId(account)}>{getAccountLabel(account)}</option>)}
+
+              {accounts.map(account => (
+                <option
+                  key={getAccountId(account)}
+                  value={getAccountId(account)}
+                >
+                  {getAccountLabel(account)}
+                </option>
+              ))}
             </select>
           </div>
+
           {!connected ? (
-            <button style={{ ...buttonStyle, background: "#087d69", color: "#fff" }} disabled={loading || !accountId} onClick={connectAccount}>{loading ? "Connecting..." : "Connect Demo Account"}</button>
-          ) : <>
-            <button style={{ ...buttonStyle, background: "#263b55", color: "#fff" }} disabled={loading} onClick={refreshAccount}>Refresh Account</button>
-            <button style={{ ...buttonStyle, background: "#92384b", color: "#fff" }} onClick={disconnectAccount}>Disconnect</button>
-          </>}
-          <button style={{ ...buttonStyle, background: "#263b55", color: "#fff" }} onClick={loadAccounts} disabled={loading || connected}>Reload Accounts</button>
+            <button
+              style={{
+                ...buttonStyle,
+                background: "#087d69",
+                color: "#fff"
+              }}
+              disabled={loading || !accountId}
+              onClick={connectAccount}
+            >
+              {loading ? "Connecting..." : "Connect Demo Account"}
+            </button>
+          ) : (
+            <>
+              <button
+                style={{
+                  ...buttonStyle,
+                  background: "#263b55",
+                  color: "#fff"
+                }}
+                disabled={loading}
+                onClick={refreshAccount}
+              >
+                Refresh Account
+              </button>
+
+              <button
+                style={{
+                  ...buttonStyle,
+                  background: "#92384b",
+                  color: "#fff"
+                }}
+                onClick={disconnectAccount}
+              >
+                Disconnect
+              </button>
+            </>
+          )}
+
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#263b55",
+              color: "#fff"
+            }}
+            onClick={loadAccounts}
+            disabled={loading || connected}
+          >
+            Reload Accounts
+          </button>
         </div>
-        <p style={{ color: "#91a3bc", fontSize: 12, marginBottom: 0 }}>Only Deriv demo accounts are permitted. Real-money execution is disabled.</p>
+
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 12,
+          marginBottom: 0
+        }}>
+          Only Deriv demo accounts are permitted. Real-money execution is disabled.
+        </p>
       </section>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
-        <div style={cardStyle}><div style={{ color: "#91a3bc", fontSize: 12 }}>Account Balance</div><h2 style={{ marginBottom: 0 }}>{balance ? money(balance.balance, balance.currency) : "—"}</h2></div>
-        <div style={cardStyle}><div style={{ color: "#91a3bc", fontSize: 12 }}>Open Positions</div><h2 style={{ marginBottom: 0 }}>{portfolio.length}</h2></div>
-        <div style={cardStyle}><div style={{ color: "#91a3bc", fontSize: 12 }}>Current Market</div><h2 style={{ marginBottom: 0 }}>{selectedMarketLabel}</h2></div>
-        <div style={cardStyle}><div style={{ color: "#91a3bc", fontSize: 12 }}>Live Price</div><h2 style={{ marginBottom: 0 }}>{tick?.quote !== undefined ? Number(tick.quote).toFixed(5) : "—"}</h2></div>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+        gap: 12
+      }}>
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>
+            Account Balance
+          </div>
+          <h2 style={{ marginBottom: 0 }}>
+            {balance
+              ? money(balance.balance, balance.currency)
+              : "—"}
+          </h2>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>
+            Open Positions
+          </div>
+          <h2 style={{ marginBottom: 0 }}>
+            {portfolio.length}
+          </h2>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>
+            Current Market
+          </div>
+          <h2 style={{ marginBottom: 0 }}>
+            {selectedMarketLabel}
+          </h2>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ color: "#91a3bc", fontSize: 12 }}>
+            Live Price
+          </div>
+          <h2 style={{ marginBottom: 0 }}>
+            {tick?.quote !== undefined
+              ? Number(tick.quote).toFixed(5)
+              : "—"}
+          </h2>
+        </div>
       </div>
 
-      <section style={{ ...cardStyle, borderColor: "#087d69", background: "linear-gradient(145deg,#111c2d 0%,#0d1a29 100%)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+      {/* AI DIGIT MATCH PREDICTOR */}
+
+      <section style={{
+        ...cardStyle,
+        borderColor: "#087d69",
+        background: "linear-gradient(145deg,#111c2d 0%,#0d1a29 100%)"
+      }}>
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 10
+        }}>
           <div>
-            <h3 style={{ margin: 0 }}>AI Digit Match Predictor</h3>
-            <p style={{ color: "#91a3bc", fontSize: 12, margin: "6px 0 0" }}>Live Deriv tick analysis · Weighted digit model · Historical validation</p>
+            <h3 style={{ margin: 0 }}>
+              AI Digit Match Predictor
+            </h3>
+
+            <p style={{
+              color: "#91a3bc",
+              fontSize: 12,
+              margin: "6px 0 0"
+            }}>
+              Live Deriv tick analysis · Statistical digit model · Historical validation
+            </p>
           </div>
-          <span style={{ border: "1px solid #236b5a", color: "#35d6a2", borderRadius: 20, padding: "6px 11px", fontSize: 11, fontWeight: 800 }}>
-            {digitAnalysis?.ready ? "MODEL ACTIVE" : "COLLECTING TICKS"}
+
+          <span style={{
+            border: "1px solid #236b5a",
+            color: "#35d6a2",
+            borderRadius: 20,
+            padding: "6px 11px",
+            fontSize: 11,
+            fontWeight: 800
+          }}>
+            {digitAnalysis?.ready
+              ? "MODEL ACTIVE"
+              : "COLLECTING TICKS"}
           </span>
         </div>
 
-        <div style={{ ...cardStyle, marginTop: 14, padding: 14, borderColor: "#087d69", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
-          <div><strong>MY TARGET DIGIT TO MATCH</strong><div style={{ color: "#91a3bc", fontSize: 12, marginTop: 5 }}>Choose the exact final digit for the Deriv Matches contract. This is separate from the AI recommendation.</div></div>
-          <select aria-label="Target digit to match" value={selectedTargetDigit} onChange={event => updateSelectedTargetDigit(event.target.value)} style={{ ...inputStyle, width: 110, fontSize: 20, fontWeight: 800, textAlign: "center" }}>
-            {Array.from({ length: 10 }, (_, digit) => <option key={digit} value={String(digit)}>{digit}</option>)}
+        {/* TARGET DIGIT */}
+
+        <div style={{
+          ...cardStyle,
+          marginTop: 14,
+          padding: 14,
+          borderColor: "#087d69",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 14,
+          flexWrap: "wrap"
+        }}>
+          <div>
+            <strong>MY TARGET DIGIT TO MATCH</strong>
+
+            <div style={{
+              color: "#91a3bc",
+              fontSize: 12,
+              marginTop: 5
+            }}>
+              Choose the exact final digit for the Deriv Matches contract. This is separate from the AI recommendation.
+            </div>
+          </div>
+
+          <select
+            aria-label="Target digit to match"
+            value={selectedTargetDigit}
+            onChange={event =>
+              updateSelectedTargetDigit(event.target.value)
+            }
+            style={{
+              ...inputStyle,
+              width: 110,
+              fontSize: 20,
+              fontWeight: 800,
+              textAlign: "center"
+            }}
+          >
+            {Array.from({ length: 10 }, (_, digit) => (
+              <option key={digit} value={String(digit)}>
+                {digit}
+              </option>
+            ))}
           </select>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12, marginTop: 16 }}>
-          <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>LATEST DIGIT</small><div style={{ fontSize: 32, fontWeight: 800, marginTop: 5 }}>{digitAnalysis?.currentDigit ?? "—"}</div><small style={{ color: "#91a3bc" }}>From latest live tick</small></div>
-          <div style={{ ...cardStyle, padding: 14, borderColor: "#087d69" }}><small style={{ color: "#91a3bc" }}>TOP MATCH CANDIDATE</small><div style={{ fontSize: 32, fontWeight: 800, color: "#35d6a2", marginTop: 5 }}>{digitAnalysis?.ready ? digitAnalysis.predictedDigit : "—"}</div><small style={{ color: "#91a3bc" }}>Second candidate: {digitAnalysis?.ready ? digitAnalysis.secondBest : "—"}</small></div>
-          <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>MODEL SCORE</small><div style={{ fontSize: 25, fontWeight: 800, marginTop: 9 }}>{digitAnalysis?.ready ? `${(digitAnalysis.probability * 100).toFixed(2)}%` : "Pending"}</div><small style={{ color: "#91a3bc" }}>Random baseline: 10%</small></div>
-          <div style={{ ...cardStyle, padding: 14 }}><small style={{ color: "#91a3bc" }}>TICK OBSERVATIONS</small><div style={{ fontSize: 25, fontWeight: 800, marginTop: 9 }}>{digitAnalysis?.sampleSize || 0}</div><small style={{ color: "#91a3bc" }}>Minimum required: 200</small></div>
+        {/* MAIN PREDICTION CARDS */}
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))",
+          gap: 12,
+          marginTop: 16
+        }}>
+          <div style={{ ...cardStyle, padding: 14 }}>
+            <small style={{ color: "#91a3bc" }}>
+              LATEST DIGIT
+            </small>
+
+            <div style={{
+              fontSize: 32,
+              fontWeight: 800,
+              marginTop: 5
+            }}>
+              {digitAnalysis?.currentDigit ?? "—"}
+            </div>
+
+            <small style={{ color: "#91a3bc" }}>
+              From latest live tick
+            </small>
+          </div>
+
+          <div style={{
+            ...cardStyle,
+            padding: 14,
+            borderColor: "#087d69"
+          }}>
+            <small style={{ color: "#91a3bc" }}>
+              TOP MATCH CANDIDATE
+            </small>
+
+            <div style={{
+              fontSize: 32,
+              fontWeight: 800,
+              color: "#35d6a2",
+              marginTop: 5
+            }}>
+              {digitAnalysis?.ready
+                ? digitAnalysis.predictedDigit
+                : "—"}
+            </div>
+
+            <small style={{ color: "#91a3bc" }}>
+              Second candidate:{" "}
+              {digitAnalysis?.ready
+                ? digitAnalysis.secondBest
+                : "—"}
+            </small>
+          </div>
+
+          <div style={{ ...cardStyle, padding: 14 }}>
+            <small style={{ color: "#91a3bc" }}>
+              MODEL ESTIMATE — UNVALIDATED
+            </small>
+
+            <div style={{
+              fontSize: 25,
+              fontWeight: 800,
+              marginTop: 9
+            }}>
+              {digitAnalysis?.ready
+                ? `${(digitAnalysis.probability * 100).toFixed(2)}%`
+                : "Pending"}
+            </div>
+
+            <small style={{ color: "#91a3bc" }}>
+              Statistical estimate, not proven accuracy
+            </small>
+          </div>
+
+          <div style={{ ...cardStyle, padding: 14 }}>
+            <small style={{ color: "#91a3bc" }}>
+              TICK OBSERVATIONS
+            </small>
+
+            <div style={{
+              fontSize: 25,
+              fontWeight: 800,
+              marginTop: 9
+            }}>
+              {digitAnalysis?.sampleSize || 0}
+            </div>
+
+            <small style={{ color: "#91a3bc" }}>
+              Minimum required: 200
+            </small>
+          </div>
         </div>
 
-        {!digitAnalysis?.ready && <div style={{ marginTop: 14, padding: 13, borderRadius: 9, background: "#241f16", border: "1px solid #66502a", color: "#f0bb65", fontSize: 12 }}>
-          Collecting observations. The statistical model becomes available after at least 200 valid ticks. Current progress: {digitAnalysis?.samples || 0} / {digitAnalysis?.required || 200}.
-          <div style={{ height: 7, borderRadius: 8, background: "#3a3020", marginTop: 9, overflow: "hidden" }}><div style={{ width: `${Math.min(100, ((digitAnalysis?.samples || 0) / (digitAnalysis?.required || 200)) * 100)}%`, height: "100%", background: "#e5a83e" }} /></div>
-        </div>}
+        {!digitAnalysis?.ready && (
+          <div style={{
+            marginTop: 14,
+            padding: 13,
+            borderRadius: 9,
+            background: "#241f16",
+            border: "1px solid #66502a",
+            color: "#f0bb65",
+            fontSize: 12
+          }}>
+            Collecting observations. The statistical model becomes available after at least 200 valid ticks.
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginTop: 16 }}>
+            Current progress:{" "}
+            {digitAnalysis?.samples || 0} /{" "}
+            {digitAnalysis?.required || 200}.
+
+            <div style={{
+              height: 7,
+              borderRadius: 8,
+              background: "#3a3020",
+              marginTop: 9,
+              overflow: "hidden"
+            }}>
+              <div style={{
+                width: `${
+                  Math.min(
+                    100,
+                    ((digitAnalysis?.samples || 0) /
+                      (digitAnalysis?.required || 200)) * 100
+                  )
+                }%`,
+                height: "100%",
+                background: "#e5a83e"
+              }} />
+            </div>
+          </div>
+        )}
+
+        {/* HISTORICAL DIGIT DISTRIBUTION */}
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))",
+          gap: 14,
+          marginTop: 16
+        }}>
           <div style={{ ...cardStyle, padding: 14 }}>
-            <h4 style={{ margin: "0 0 12px" }}>Digit Probability Distribution</h4>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 7 }}>
-              {(digitAnalysis?.distribution || Array.from({ length: 10 }, (_, digit) => ({ digit, probability: 0 }))).map(item => {
-                const isTop = digitAnalysis?.ready && item.digit === digitAnalysis.predictedDigit;
-                return <div key={item.digit} style={{ padding: "9px 5px", borderRadius: 8, textAlign: "center", background: isTop ? "#103d32" : "#0b1422", border: isTop ? "1px solid #35d6a2" : "1px solid #26364d" }}>
-                  <strong style={{ fontSize: 17 }}>{item.digit}</strong><div style={{ color: isTop ? "#35d6a2" : "#91a3bc", fontSize: 11, marginTop: 4 }}>{(item.probability * 100).toFixed(1)}%</div>
-                </div>;
+            <h4 style={{ margin: "0 0 12px" }}>
+              Digit Probability Distribution
+            </h4>
+
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(5,minmax(0,1fr))",
+              gap: 7
+            }}>
+              {(
+                digitAnalysis?.distribution ||
+                Array.from(
+                  { length: 10 },
+                  (_, digit) => ({
+                    digit,
+                    probability: 0
+                  })
+                )
+              ).map(item => {
+                const isTop =
+                  digitAnalysis?.ready &&
+                  item.digit === digitAnalysis.predictedDigit;
+
+                return (
+                  <div
+                    key={item.digit}
+                    style={{
+                      padding: "9px 5px",
+                      borderRadius: 8,
+                      textAlign: "center",
+                      background: isTop ? "#103d32" : "#0b1422",
+                      border: isTop
+                        ? "1px solid #35d6a2"
+                        : "1px solid #26364d"
+                    }}
+                  >
+                    <strong style={{ fontSize: 17 }}>
+                      {item.digit}
+                    </strong>
+
+                    <div style={{
+                      color: isTop ? "#35d6a2" : "#91a3bc",
+                      fontSize: 11,
+                      marginTop: 4
+                    }}>
+                      {(item.probability * 100).toFixed(1)}%
+                    </div>
+                  </div>
+                );
               })}
             </div>
-            <small style={{ color: "#91a3bc", display: "block", marginTop: 10 }}>Historical frequency across collected ticks.</small>
+
+            <small style={{
+              color: "#91a3bc",
+              display: "block",
+              marginTop: 10
+            }}>
+              Historical frequency across collected ticks.
+            </small>
           </div>
+
+          {/* MODEL RANKINGS */}
+
           <div style={{ ...cardStyle, padding: 14 }}>
-            <h4 style={{ margin: "0 0 12px" }}>Top Model Rankings</h4>
-            {(digitAnalysis?.rankings || []).slice(0, 5).map((item, index) => <div key={item.digit} style={{ marginBottom: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5 }}><strong>#{index + 1} · Digit {item.digit}</strong><span style={{ color: "#35d6a2" }}>{(item.score * 100).toFixed(2)}%</span></div>
-              <div style={{ height: 7, borderRadius: 8, background: "#26364d", overflow: "hidden" }}><div style={{ width: `${Math.min(100, item.score * 100)}%`, height: "100%", background: index === 0 ? "#35d6a2" : "#477f91" }} /></div>
-            </div>)}
-            {!digitAnalysis?.ready && <p style={{ color: "#91a3bc", fontSize: 12 }}>Rankings will appear when the model has enough observations.</p>}
+            <h4 style={{ margin: "0 0 12px" }}>
+              Top Model Rankings
+            </h4>
+
+            {(digitAnalysis?.rankings || [])
+              .slice(0, 5)
+              .map((item, index) => (
+                <div
+                  key={item.digit}
+                  style={{ marginBottom: 10 }}
+                >
+                  <div style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: 12,
+                    marginBottom: 5
+                  }}>
+                    <strong>
+                      #{index + 1} · Digit {item.digit}
+                    </strong>
+
+                    <span style={{ color: "#35d6a2" }}>
+                      {(item.score * 100).toFixed(2)}%
+                    </span>
+                  </div>
+
+                  <div style={{
+                    height: 7,
+                    borderRadius: 8,
+                    background: "#26364d",
+                    overflow: "hidden"
+                  }}>
+                    <div style={{
+                      width: `${Math.min(100, item.score * 100)}%`,
+                      height: "100%",
+                      background: index === 0
+                        ? "#35d6a2"
+                        : "#477f91"
+                    }} />
+                  </div>
+                </div>
+              ))}
+
+            {!digitAnalysis?.ready && (
+              <p style={{
+                color: "#91a3bc",
+                fontSize: 12
+              }}>
+                Rankings will appear when the model has enough observations.
+              </p>
+            )}
           </div>
         </div>
 
-        <h4 style={{ margin: "18px 0 10px" }}>Prediction Performance</h4>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))", gap: 10 }}>
-          {[["Evaluated", digitPerformance.total], ["Correct", digitPerformance.wins], ["Incorrect", digitPerformance.losses], ["Historical accuracy", `${digitPerformance.accuracy.toFixed(2)}%`]].map(([label, value]) => <div key={label} style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>{label}</small><div style={{ fontSize: 21, fontWeight: 800, marginTop: 5 }}>{value}</div></div>)}
+        {/* NEW MULTI-WINDOW INTELLIGENCE */}
+
+        <h4 style={{ margin: "20px 0 10px" }}>
+          Multi-Window Probability Intelligence
+        </h4>
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
+          gap: 12
+        }}>
+          {(digitAnalysis?.windows || []).map(windowData => {
+            const topDigit = [
+              ...(windowData.distribution || [])
+            ].sort(
+              (a, b) => b.probability - a.probability
+            )[0];
+
+            return (
+              <div
+                key={windowData.window}
+                style={{
+                  ...cardStyle,
+                  padding: 14
+                }}
+              >
+                <div style={{
+                  color: "#91a3bc",
+                  fontSize: 12,
+                  fontWeight: 700
+                }}>
+                  LAST {windowData.window.toLocaleString()} TICKS
+                </div>
+
+                <div style={{
+                  fontSize: 23,
+                  fontWeight: 800,
+                  marginTop: 8
+                }}>
+                  {windowData.samples.toLocaleString()}
+                </div>
+
+                <small style={{ color: "#91a3bc" }}>
+                  Observations collected
+                </small>
+
+                {topDigit && (
+                  <div style={{
+                    marginTop: 12,
+                    paddingTop: 10,
+                    borderTop: "1px solid #26364d"
+                  }}>
+                    <div style={{
+                      color: "#91a3bc",
+                      fontSize: 11
+                    }}>
+                      MOST FREQUENT DIGIT
+                    </div>
+
+                    <strong style={{
+                      fontSize: 25,
+                      color: "#35d6a2"
+                    }}>
+                      {topDigit.digit}
+                    </strong>
+
+                    <div style={{ fontSize: 13 }}>
+                      Historical frequency:{" "}
+                      {(topDigit.probability * 100).toFixed(2)}%
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
-        <h4 style={{ margin: "18px 0 8px" }}>Recent Evaluated Predictions</h4>
-        {digitHistory.length === 0 ? <p style={{ color: "#91a3bc", fontSize: 12 }}>No evaluated predictions yet. Results will appear after a prediction is compared with the next observed tick.</p> : <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 430 }}><thead><tr>{["Predicted", "Actual", "Outcome", "Time"].map(label => <th key={label} style={{ textAlign: "left", padding: 9, borderBottom: "1px solid #34445c", fontSize: 12 }}>{label}</th>)}</tr></thead><tbody>{digitHistory.map((item, index) => <tr key={`${item.timestamp}-${index}`}><td style={{ padding: 9 }}>{item.predicted}</td><td style={{ padding: 9 }}>{item.actual}</td><td style={{ padding: 9, color: item.correct ? "#35d6a2" : "#ff8997", fontWeight: 700 }}>{item.correct ? "CORRECT" : "INCORRECT"}</td><td style={{ padding: 9, color: "#91a3bc", fontSize: 11 }}>{new Date(item.timestamp).toLocaleTimeString()}</td></tr>)}</tbody></table></div>}
-        <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>This model ranks digits using historical frequency, recency-weighted frequency and last-digit transitions. Scores are statistical estimates, not guaranteed outcomes. A 10% random baseline applies to an unbiased ten-digit outcome.</p>
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 11,
+          lineHeight: 1.6
+        }}>
+          These windows compare historical digit frequencies over different sample sizes. A frequent digit is not necessarily more likely to appear on the next tick.
+        </p>
+
+        {/* PREDICTION PERFORMANCE */}
+
+        <h4 style={{ margin: "18px 0 10px" }}>
+          Prediction Performance
+        </h4>
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))",
+          gap: 10
+        }}>
+          {[
+            ["Evaluated", digitPerformance.total],
+            ["Correct", digitPerformance.wins],
+            ["Incorrect", digitPerformance.losses],
+            [
+              "Historical accuracy",
+              `${digitPerformance.accuracy.toFixed(2)}%`
+            ]
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              style={{ ...cardStyle, padding: 12 }}
+            >
+              <small style={{ color: "#91a3bc" }}>
+                {label}
+              </small>
+
+              <div style={{
+                fontSize: 21,
+                fontWeight: 800,
+                marginTop: 5
+              }}>
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <h4 style={{ margin: "18px 0 8px" }}>
+          Recent Evaluated Predictions
+        </h4>
+
+        {digitHistory.length === 0 ? (
+          <p style={{
+            color: "#91a3bc",
+            fontSize: 12
+          }}>
+            No evaluated predictions yet. Results will appear after a prediction is compared with the next observed tick.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 430
+            }}>
+              <thead>
+                <tr>
+                  {[
+                    "Predicted",
+                    "Actual",
+                    "Outcome",
+                    "Time"
+                  ].map(label => (
+                    <th
+                      key={label}
+                      style={{
+                        textAlign: "left",
+                        padding: 9,
+                        borderBottom: "1px solid #34445c",
+                        fontSize: 12
+                      }}
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody>
+                {digitHistory.map((item, index) => (
+                  <tr key={`${item.timestamp}-${index}`}>
+                    <td style={{ padding: 9 }}>
+                      {item.predicted}
+                    </td>
+
+                    <td style={{ padding: 9 }}>
+                      {item.actual}
+                    </td>
+
+                    <td style={{
+                      padding: 9,
+                      color: item.correct
+                        ? "#35d6a2"
+                        : "#ff8997",
+                      fontWeight: 700
+                    }}>
+                      {item.correct ? "CORRECT" : "INCORRECT"}
+                    </td>
+
+                    <td style={{
+                      padding: 9,
+                      color: "#91a3bc",
+                      fontSize: 11
+                    }}>
+                      {new Date(
+                        item.timestamp
+                      ).toLocaleTimeString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 11,
+          lineHeight: 1.6,
+          marginBottom: 0
+        }}>
+          This model ranks digits using historical frequency, recency-weighted frequency and last-digit transitions. Scores are statistical estimates, not guaranteed outcomes. A 10% random baseline applies to an unbiased ten-digit outcome.
+        </p>
       </section>
+
+      {/* DERIV BOT BUILDER */}
 
       <DerivBotBuilder
         connected={connected}
         symbol={symbol}
         changeMarket={changeMarket}
         contractType={contractType}
-        setContractType={value => { proposalRequestRef.current += 1; setContractType(value); setProposal(null); setProposalParameters(null); setProposalLoading(false); }}
+        setContractType={value => {
+          proposalRequestRef.current += 1;
+          setContractType(value);
+          setProposal(null);
+          setProposalParameters(null);
+          setProposalLoading(false);
+        }}
         duration={duration}
-        setDuration={value => { proposalRequestRef.current += 1; setDuration(value); setProposal(null); setProposalParameters(null); setProposalLoading(false); }}
+        setDuration={value => {
+          proposalRequestRef.current += 1;
+          setDuration(value);
+          setProposal(null);
+          setProposalParameters(null);
+          setProposalLoading(false);
+        }}
         durationUnit={durationUnit}
-        setDurationUnit={value => { proposalRequestRef.current += 1; setDurationUnit(value); setProposal(null); setProposalParameters(null); setProposalLoading(false); }}
+        setDurationUnit={value => {
+          proposalRequestRef.current += 1;
+          setDurationUnit(value);
+          setProposal(null);
+          setProposalParameters(null);
+          setProposalLoading(false);
+        }}
         stake={stake}
-        setStake={value => { proposalRequestRef.current += 1; setStake(value); setProposal(null); setProposalParameters(null); setProposalLoading(false); }}
+        setStake={value => {
+          proposalRequestRef.current += 1;
+          setStake(value);
+          setProposal(null);
+          setProposalParameters(null);
+          setProposalLoading(false);
+        }}
         availableContracts={availableContracts}
         contractsLoading={contractsLoading}
         marketOptions={SYMBOLS}
@@ -676,48 +1725,469 @@ function DerivLivePanel() {
         digitAnalysis={digitAnalysis}
       />
 
-      {lastOrder && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Latest Demo Order</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{lastOrder.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Purchase Price</span><strong>{money(lastOrder.buy_price, currency)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Potential Payout</span><strong>{money(lastOrder.payout, currency)}</strong></div></section>}
+      {/* LATEST DEMO ORDER */}
 
-      {monitoredContract && <section style={cardStyle}><h3 style={{ marginTop: 0 }}>Contract Monitoring</h3><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Contract ID</span><strong>{monitoredContract.contract_id}</strong></div><div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Status</span><strong>{monitoredContract.is_sold ? "SETTLED" : "OPEN / MONITORING"}</strong></div>{monitoredContract.profit !== undefined && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Profit / Loss</span><strong style={{ color: Number(monitoredContract.profit) >= 0 ? "#35d6a2" : "#ff8997" }}>{money(monitoredContract.profit, currency)}</strong></div>}{monitoredContract.exit_tick !== undefined && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0" }}><span>Exit Price</span><strong>{monitoredContract.exit_tick}</strong></div>}</section>}
+      {lastOrder && (
+        <section style={cardStyle}>
+          <h3 style={{ marginTop: 0 }}>
+            Latest Demo Order
+          </h3>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            padding: "7px 0"
+          }}>
+            <span>Contract ID</span>
+            <strong>{lastOrder.contract_id}</strong>
+          </div>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            padding: "7px 0"
+          }}>
+            <span>Purchase Price</span>
+            <strong>
+              {money(lastOrder.buy_price, currency)}
+            </strong>
+          </div>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            padding: "7px 0"
+          }}>
+            <span>Potential Payout</span>
+            <strong>
+              {money(lastOrder.payout, currency)}
+            </strong>
+          </div>
+        </section>
+      )}
+
+      {/* CONTRACT MONITORING */}
+
+      {monitoredContract && (
+        <section style={cardStyle}>
+          <h3 style={{ marginTop: 0 }}>
+            Contract Monitoring
+          </h3>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            padding: "7px 0"
+          }}>
+            <span>Contract ID</span>
+            <strong>{monitoredContract.contract_id}</strong>
+          </div>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            padding: "7px 0"
+          }}>
+            <span>Status</span>
+            <strong>
+              {monitoredContract.is_sold
+                ? "SETTLED"
+                : "OPEN / MONITORING"}
+            </strong>
+          </div>
+
+          {monitoredContract.profit !== undefined && (
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              padding: "7px 0"
+            }}>
+              <span>Profit / Loss</span>
+
+              <strong style={{
+                color: Number(monitoredContract.profit) >= 0
+                  ? "#35d6a2"
+                  : "#ff8997"
+              }}>
+                {money(
+                  monitoredContract.profit,
+                  currency
+                )}
+              </strong>
+            </div>
+          )}
+
+          {monitoredContract.exit_tick !== undefined && (
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              padding: "7px 0"
+            }}>
+              <span>Exit Price</span>
+              <strong>{monitoredContract.exit_tick}</strong>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* OPEN POSITIONS */}
 
       <section style={cardStyle}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <div><h3 style={{ margin: 0 }}>Open Positions</h3><small style={{ color: "#91a3bc" }}>Live contract values and unrealised profit/loss from Deriv</small></div>
-          <button style={{ ...buttonStyle, background: "#263b55", color: "#fff" }} disabled={!connected || loading} onClick={refreshAccount}>Refresh Positions</button>
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap"
+        }}>
+          <div>
+            <h3 style={{ margin: 0 }}>
+              Open Positions
+            </h3>
+
+            <small style={{ color: "#91a3bc" }}>
+              Live contract values and unrealised profit/loss from Deriv
+            </small>
+          </div>
+
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#263b55",
+              color: "#fff"
+            }}
+            disabled={!connected || loading}
+            onClick={refreshAccount}
+          >
+            Refresh Positions
+          </button>
         </div>
-        {portfolio.length > 0 && <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, marginTop: 14 }}>
-          <div style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>Total open P/L</small><div style={{ fontSize: 20, fontWeight: 800, color: openPositionStats.totalPnl >= 0 ? "#35d6a2" : "#ff8997", marginTop: 5 }}>{money(openPositionStats.totalPnl, currency)}</div></div>
-          <div style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>Profitable positions</small><div style={{ fontSize: 20, fontWeight: 800, color: "#35d6a2", marginTop: 5 }}>{openPositionStats.profitable}</div></div>
-          <div style={{ ...cardStyle, padding: 12 }}><small style={{ color: "#91a3bc" }}>Losing positions</small><div style={{ fontSize: 20, fontWeight: 800, color: "#ff8997", marginTop: 5 }}>{openPositionStats.losing}</div></div>
-        </div>}
-        {portfolio.length === 0 ? <p style={{ color: "#91a3bc" }}>No open positions returned by Deriv.</p> : <div style={{ overflowX: "auto", marginTop: 12 }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 850 }}><thead><tr>{["Contract ID", "Market", "Contract", "Stake", "Current Value", "Profit / Loss", "Position Status"].map(label => <th key={label} style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #34445c", whiteSpace: "nowrap" }}>{label}</th>)}</tr></thead><tbody>{portfolio.map((item, index) => {
-          const id = String(item.contract_id || "");
-          const live = livePositions[id] || {};
-          const position = { ...item, ...live };
-          const pnl = Number(position.profit ?? (Number(position.bid_price) - Number(position.buy_price)));
-          const hasPnl = Number.isFinite(pnl);
-          const statusLabel = position.is_sold ? "SETTLED" : !hasPnl ? "UPDATING" : pnl > 0 ? "PROFITABLE" : pnl < 0 ? "LOSING" : "BREAK-EVEN";
-          const pnlColor = !hasPnl ? "#91a3bc" : pnl >= 0 ? "#35d6a2" : "#ff8997";
-          const marketName = SYMBOLS.find(option => option.value === (position.underlying || position.symbol))?.label || position.underlying || position.symbol || "—";
-          return <tr key={id || index}>
-            <td style={{ padding: 10, whiteSpace: "nowrap" }}>{id || "—"}</td>
-            <td style={{ padding: 10 }}>{marketName}</td>
-            <td style={{ padding: 10 }}>{getContractTypeLabel(position.contract_type || position.contract_type_name || "—")}</td>
-            <td style={{ padding: 10 }}>{money(position.buy_price, position.currency || currency)}</td>
-            <td style={{ padding: 10 }}>{position.bid_price !== undefined ? money(position.bid_price, position.currency || currency) : "Waiting for live update…"}</td>
-            <td style={{ padding: 10, color: pnlColor, fontWeight: 800 }}>{hasPnl ? money(pnl, position.currency || currency) : "Waiting for live update…"}</td>
-            <td style={{ padding: 10, color: position.is_sold ? "#91a3bc" : pnlColor, fontWeight: 800 }}>{statusLabel}</td>
-          </tr>;
-        })}</tbody></table></div>}
-        <p style={{ color: "#91a3bc", fontSize: 11, marginBottom: 0 }}>Profit/loss is unrealised while a contract is open and can change until settlement. Deriv's final result is shown in Trade History after the contract closes.</p>
+
+        {portfolio.length > 0 && (
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+            gap: 10,
+            marginTop: 14
+          }}>
+            <div style={{ ...cardStyle, padding: 12 }}>
+              <small style={{ color: "#91a3bc" }}>
+                Total open P/L
+              </small>
+
+              <div style={{
+                fontSize: 20,
+                fontWeight: 800,
+                color: openPositionStats.totalPnl >= 0
+                  ? "#35d6a2"
+                  : "#ff8997",
+                marginTop: 5
+              }}>
+                {money(openPositionStats.totalPnl, currency)}
+              </div>
+            </div>
+
+            <div style={{ ...cardStyle, padding: 12 }}>
+              <small style={{ color: "#91a3bc" }}>
+                Profitable positions
+              </small>
+
+              <div style={{
+                fontSize: 20,
+                fontWeight: 800,
+                color: "#35d6a2",
+                marginTop: 5
+              }}>
+                {openPositionStats.profitable}
+              </div>
+            </div>
+
+            <div style={{ ...cardStyle, padding: 12 }}>
+              <small style={{ color: "#91a3bc" }}>
+                Losing positions
+              </small>
+
+              <div style={{
+                fontSize: 20,
+                fontWeight: 800,
+                color: "#ff8997",
+                marginTop: 5
+              }}>
+                {openPositionStats.losing}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {portfolio.length === 0 ? (
+          <p style={{ color: "#91a3bc" }}>
+            No open positions returned by Deriv.
+          </p>
+        ) : (
+          <div style={{
+            overflowX: "auto",
+            marginTop: 12
+          }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 850
+            }}>
+              <thead>
+                <tr>
+                  {[
+                    "Contract ID",
+                    "Market",
+                    "Contract",
+                    "Stake",
+                    "Current Value",
+                    "Profit / Loss",
+                    "Position Status"
+                  ].map(label => (
+                    <th
+                      key={label}
+                      style={{
+                        textAlign: "left",
+                        padding: 10,
+                        borderBottom: "1px solid #34445c",
+                        whiteSpace: "nowrap"
+                      }}
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody>
+                {portfolio.map((item, index) => {
+                  const id = String(item.contract_id || "");
+                  const live = livePositions[id] || {};
+
+                  const position = {
+                    ...item,
+                    ...live
+                  };
+
+                  const pnl = Number(
+                    position.profit ??
+                    (
+                      Number(position.bid_price) -
+                      Number(position.buy_price)
+                    )
+                  );
+
+                  const hasPnl = Number.isFinite(pnl);
+
+                  const statusLabel = position.is_sold
+                    ? "SETTLED"
+                    : !hasPnl
+                      ? "UPDATING"
+                      : pnl > 0
+                        ? "PROFITABLE"
+                        : pnl < 0
+                          ? "LOSING"
+                          : "BREAK-EVEN";
+
+                  const pnlColor = !hasPnl
+                    ? "#91a3bc"
+                    : pnl >= 0
+                      ? "#35d6a2"
+                      : "#ff8997";
+
+                  const marketName =
+                    SYMBOLS.find(
+                      option =>
+                        option.value ===
+                        (position.underlying || position.symbol)
+                    )?.label ||
+                    position.underlying ||
+                    position.symbol ||
+                    "—";
+
+                  return (
+                    <tr key={id || index}>
+                      <td style={{
+                        padding: 10,
+                        whiteSpace: "nowrap"
+                      }}>
+                        {id || "—"}
+                      </td>
+
+                      <td style={{ padding: 10 }}>
+                        {marketName}
+                      </td>
+
+                      <td style={{ padding: 10 }}>
+                        {getContractTypeLabel(
+                          position.contract_type ||
+                          position.contract_type_name ||
+                          "—"
+                        )}
+                      </td>
+
+                      <td style={{ padding: 10 }}>
+                        {money(
+                          position.buy_price,
+                          position.currency || currency
+                        )}
+                      </td>
+
+                      <td style={{ padding: 10 }}>
+                        {position.bid_price !== undefined
+                          ? money(
+                              position.bid_price,
+                              position.currency || currency
+                            )
+                          : "Waiting for live update…"}
+                      </td>
+
+                      <td style={{
+                        padding: 10,
+                        color: pnlColor,
+                        fontWeight: 800
+                      }}>
+                        {hasPnl
+                          ? money(
+                              pnl,
+                              position.currency || currency
+                            )
+                          : "Waiting for live update…"}
+                      </td>
+
+                      <td style={{
+                        padding: 10,
+                        color: position.is_sold
+                          ? "#91a3bc"
+                          : pnlColor,
+                        fontWeight: 800
+                      }}>
+                        {statusLabel}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p style={{
+          color: "#91a3bc",
+          fontSize: 11,
+          marginBottom: 0
+        }}>
+          Profit/loss is unrealised while a contract is open and can change until settlement. Deriv's final result is shown in Trade History after the contract closes.
+        </p>
       </section>
+
+      {/* TRADE HISTORY */}
 
       <section style={cardStyle}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h3>Trade History</h3><button style={{ ...buttonStyle, background: "#263b55", color: "#fff" }} disabled={!connected} onClick={loadHistory}>Refresh History</button></div>
-        {history.length === 0 ? <p style={{ color: "#91a3bc" }}>No completed trades returned yet.</p> : <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 550 }}><thead><tr>{["Contract", "Market", "Buy Price", "Sell Price", "Profit"].map(label => <th key={label} style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #34445c" }}>{label}</th>)}</tr></thead><tbody>{history.map((item, index) => <tr key={item.contract_id || index}><td style={{ padding: 10 }}>{item.contract_id || "—"}</td><td style={{ padding: 10 }}>{item.underlying || item.symbol || "—"}</td><td style={{ padding: 10 }}>{money(item.buy_price, currency)}</td><td style={{ padding: 10 }}>{money(item.sell_price, currency)}</td><td style={{ padding: 10, color: Number(item.profit) >= 0 ? "#35d6a2" : "#ff8997" }}>{money(item.profit, currency)}</td></tr>)}</tbody></table></div>}
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center"
+        }}>
+          <h3>Trade History</h3>
+
+          <button
+            style={{
+              ...buttonStyle,
+              background: "#263b55",
+              color: "#fff"
+            }}
+            disabled={!connected}
+            onClick={loadHistory}
+          >
+            Refresh History
+          </button>
+        </div>
+
+        {history.length === 0 ? (
+          <p style={{ color: "#91a3bc" }}>
+            No completed trades returned yet.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 550
+            }}>
+              <thead>
+                <tr>
+                  {[
+                    "Contract",
+                    "Market",
+                    "Buy Price",
+                    "Sell Price",
+                    "Profit"
+                  ].map(label => (
+                    <th
+                      key={label}
+                      style={{
+                        textAlign: "left",
+                        padding: 10,
+                        borderBottom: "1px solid #34445c"
+                      }}
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody>
+                {history.map((item, index) => (
+                  <tr key={item.contract_id || index}>
+                    <td style={{ padding: 10 }}>
+                      {item.contract_id || "—"}
+                    </td>
+
+                    <td style={{ padding: 10 }}>
+                      {item.underlying || item.symbol || "—"}
+                    </td>
+
+                    <td style={{ padding: 10 }}>
+                      {money(item.buy_price, currency)}
+                    </td>
+
+                    <td style={{ padding: 10 }}>
+                      {money(item.sell_price, currency)}
+                    </td>
+
+                    <td style={{
+                      padding: 10,
+                      color: Number(item.profit) >= 0
+                        ? "#35d6a2"
+                        : "#ff8997"
+                    }}>
+                      {money(item.profit, currency)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
-      <div style={{ ...cardStyle, borderColor: "#755c2b", color: "#f0bb65", fontSize: 12, lineHeight: 1.7 }}><strong>Demo Trading Safeguards</strong><p style={{ marginBottom: 0 }}>TradeLab currently restricts this interface to demo accounts and a maximum $10 stake. Server-side execution controls must also enforce these limits. Real-money trading remains disabled.</p></div>
+      {/* SAFEGUARDS */}
+
+      <div style={{
+        ...cardStyle,
+        borderColor: "#755c2b",
+        color: "#f0bb65",
+        fontSize: 12,
+        lineHeight: 1.7
+      }}>
+        <strong>Demo Trading Safeguards</strong>
+
+        <p style={{ marginBottom: 0 }}>
+          TradeLab currently restricts this interface to demo accounts and a maximum $10 stake. Server-side execution controls must also enforce these limits. Real-money trading remains disabled.
+        </p>
+      </div>
     </div>
   );
 }
