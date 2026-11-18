@@ -1577,14 +1577,44 @@ function DerivLivePanel() {
           })}
         </div>
 
-        <div style={{ ...cardStyle, marginTop: 12, background: "#0b1422", color: "#fff", borderColor: "#087d69" }}>
+       <div style={{ ...cardStyle, marginTop: 12, background: "#0b1422", color: "#fff", borderColor: "#087d69" }}>
           <h4 style={{ margin: "0 0 10px" }}>Weighted Ensemble & Reliability Filter</h4>
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
-            <div><small style={{ color: "#91a3bc" }}>Top candidate</small><div style={{ fontSize: 25, fontWeight: 800, color: "#35d6a2" }}>{digitAnalysis?.samples >= 200 ? digitAnalysis.predictedDigit : "—"}</div></div>
-            <div><small style={{ color: "#91a3bc" }}>Ensemble estimate — unvalidated</small><div style={{ fontSize: 21, fontWeight: 800 }}>{digitAnalysis ? `${digitAnalysis.percentage.toFixed(2)}%` : "—"}</div></div>
-            <div><small style={{ color: "#91a3bc" }}>Data reliability</small><div style={{ fontSize: 16, fontWeight: 800 }}>{digitAnalysis?.reliability || "COLLECTING DATA"}</div></div>
-            <div><small style={{ color: "#91a3bc" }}>System guidance</small><div style={{ fontSize: 16, fontWeight: 800, color: "#f0bb65" }}>{digitAnalysis?.recommendation || "WAIT"}</div></div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Top candidate</small>
+              <div style={{ fontSize: 25, fontWeight: 800, color: "#35d6a2" }}>
+                {digitAnalysis?.samples >= 200 ? digitAnalysis.predictedDigit : "—"}
+              </div>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Ensemble estimate — unvalidated</small>
+              <div style={{ fontSize: 21, fontWeight: 800 }}>
+                {typeof digitAnalysis?.percentage === "number" &&
+                Number.isFinite(digitAnalysis.percentage)
+                  ? `${digitAnalysis.percentage.toFixed(2)}%`
+                  : "Collecting data..."}
+              </div>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>Data reliability</small>
+              <div style={{ fontSize: 16, fontWeight: 800 }}>
+                {digitAnalysis?.reliability || "COLLECTING DATA"}
+              </div>
+            </div>
+
+            <div>
+              <small style={{ color: "#91a3bc" }}>System guidance</small>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#f0bb65" }}>
+                {digitAnalysis?.recommendation || "WAIT"}
+              </div>
+            </div>
+
           </div>
+
           <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>
             The reliability label describes data availability, not proven forecast accuracy. The ensemble estimate is not a calibrated probability of the next digit and is not a trade instruction.
           </p>
