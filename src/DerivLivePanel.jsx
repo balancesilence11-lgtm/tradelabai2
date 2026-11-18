@@ -230,7 +230,14 @@ function DerivLivePanel() {
   });
 
   const [fourTickForecast, setFourTickForecast] = useState(null);
-  const [fourTickResults, setFourTickResults] = useState([]);
+  const [fourTickResults, setFourTickResults] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("tradelab_four_tick_results") || "[]");
+      return Array.isArray(saved) ? saved.slice(0, 1000) : [];
+    } catch {
+      return [];
+    }
+  });
   const fourTickPendingRef = useRef(null);
   const selectedTargetDigitRef = useRef(selectedTargetDigit);
 
@@ -380,7 +387,13 @@ function DerivLivePanel() {
                     market,
                     timestamp: Date.now()
                   };
-                  setFourTickResults(previous => [result, ...previous].slice(0, 100));
+                  setFourTickResults(previous => {
+                    const next = [result, ...previous].slice(0, 1000);
+                    try { localStorage.setItem("tradelab_four_tick_results", JSON.stringify(next)); } catch (storageError) {
+                      console.warn("Could not persist four-tick results:", storageError);
+                    }
+                    return next;
+                  });
                   fourTickPendingRef.current = null;
                   setFourTickForecast(null);
                 } else {
@@ -1072,6 +1085,29 @@ function DerivLivePanel() {
   }
 
   const fourTickMarketResults = fourTickResults.filter(item => item.market === symbol);
+  const fourTickWins = fourTickResults.filter(item => item.correct).length;
+  const fourTickLosses = fourTickResults.length - fourTickWins;
+  const fourTickAccuracy = fourTickResults.length ? fourTickWins / fourTickResults.length : 0;
+  const fourTickByDigit = Array.from({ length: 10 }, (_, digit) => {
+    const rows = fourTickResults.filter(item => Number(item.targetDigit) === digit);
+    const wins = rows.filter(item => item.correct).length;
+    return { digit, total: rows.length, wins, accuracy: rows.length ? wins / rows.length : null };
+  });
+  const fourTickByMarket = [...new Set(fourTickResults.map(item => item.market).filter(Boolean))].map(market => {
+    const rows = fourTickResults.filter(item => item.market === market);
+    const wins = rows.filter(item => item.correct).length;
+    return { market, total: rows.length, wins, accuracy: rows.length ? wins / rows.length : 0 };
+  }).sort((a, b) => b.total - a.total);
+  const fourTickCalibration = [
+    { label: "10–12%", min: 0.10, max: 0.12 },
+    { label: "12–15%", min: 0.12, max: 0.15 },
+    { label: "15–20%", min: 0.15, max: 0.20 },
+    { label: "20%+", min: 0.20, max: 1.01 }
+  ].map(bucket => {
+    const rows = fourTickResults.filter(item => Number(item.probability) >= bucket.min && Number(item.probability) < bucket.max);
+    const wins = rows.filter(item => item.correct).length;
+    return { ...bucket, total: rows.length, accuracy: rows.length ? wins / rows.length : null };
+  });
   const fourTickRecentResults = fourTickMarketResults.slice(0, 30);
   const fourTickRecentHitRate = fourTickRecentResults.length
     ? fourTickRecentResults.filter(item => item.correct).length / fourTickRecentResults.length
@@ -1556,6 +1592,44 @@ function DerivLivePanel() {
             </div>
           </section>
         )}
+
+        <section style={{ ...cardStyle, marginTop: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Prediction Performance Dashboard</h3>
+          <p style={{ color: "#91a3bc", fontSize: 12, lineHeight: 1.6 }}>
+            Walk-forward results are saved in this browser and retained across reloads (up to 1,000 completed forecasts). Only forecasts that have reached their exact fourth validation tick are counted.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(135px,1fr))", gap: 10 }}>
+            {[
+              ["Completed forecasts", fourTickResults.length],
+              ["Correct", fourTickWins],
+              ["Incorrect", fourTickLosses],
+              ["Overall accuracy", fourTickResults.length ? `${(fourTickAccuracy * 100).toFixed(2)}%` : "—"],
+              ["Random baseline", "10%"]
+            ].map(([label, value]) => <div key={label} style={{ ...cardStyle, padding: 12 }}>
+              <small style={{ color: "#91a3bc" }}>{label}</small>
+              <div style={{ fontSize: 22, fontWeight: 800, marginTop: 5 }}>{value}</div>
+            </div>)}
+          </div>
+          <h4>Accuracy by recommended digit</h4>
+          <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 430 }}>
+            <thead><tr>{["Digit", "Forecasts", "Correct", "Hit rate"].map(x => <th key={x} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #34445c" }}>{x}</th>)}</tr></thead>
+            <tbody>{fourTickByDigit.map(row => <tr key={row.digit}>
+              <td style={{ padding: 8 }}>{row.digit}</td><td style={{ padding: 8 }}>{row.total}</td><td style={{ padding: 8 }}>{row.wins}</td><td style={{ padding: 8 }}>{row.accuracy === null ? "—" : `${(row.accuracy * 100).toFixed(2)}%`}</td>
+            </tr>)}</tbody>
+          </table></div>
+          <h4>Accuracy by market</h4>
+          {fourTickByMarket.length ? <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 430 }}>
+            <thead><tr>{["Market", "Forecasts", "Correct", "Hit rate"].map(x => <th key={x} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #34445c" }}>{x}</th>)}</tr></thead>
+            <tbody>{fourTickByMarket.map(row => <tr key={row.market}><td style={{ padding: 8 }}>{row.market}</td><td style={{ padding: 8 }}>{row.total}</td><td style={{ padding: 8 }}>{row.wins}</td><td style={{ padding: 8 }}>{(row.accuracy * 100).toFixed(2)}%</td></tr>)}</tbody>
+          </table></div> : <p style={{ color: "#91a3bc", fontSize: 12 }}>No completed market results yet.</p>}
+          <h4>Probability calibration</h4>
+          <p style={{ color: "#91a3bc", fontSize: 11 }}>Compares the model's estimated probability range with the actual hit rate observed in that range.</p>
+          <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 430 }}>
+            <thead><tr>{["Estimated range", "Forecasts", "Observed hit rate"].map(x => <th key={x} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #34445c" }}>{x}</th>)}</tr></thead>
+            <tbody>{fourTickCalibration.map(row => <tr key={row.label}><td style={{ padding: 8 }}>{row.label}</td><td style={{ padding: 8 }}>{row.total}</td><td style={{ padding: 8 }}>{row.accuracy === null ? "—" : `${(row.accuracy * 100).toFixed(2)}%`}</td></tr>)}</tbody>
+          </table></div>
+          <p style={{ color: "#91a3bc", fontSize: 11, marginBottom: 0 }}>Signals withheld by the gate are not counted as completed forecasts, so this dashboard reports validated predictions rather than inventing outcomes for rejected signals. Results are descriptive, not proof of future performance.</p>
+        </section>
 
         {/* MAIN PREDICTION CARDS */}
 
