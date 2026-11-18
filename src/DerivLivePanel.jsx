@@ -157,9 +157,18 @@ function calculateFourTickDigitForecast(history, targetDigit, alpha = 1) {
     distribution = next;
   }
 
+  const rankedDigits = distribution
+    .map((probability, digit) => ({ digit, probability }))
+    .sort((a, b) => b.probability - a.probability);
+  const recommended = rankedDigits[0];
+
   return {
-    targetDigit: target,
-    probability: distribution[target],
+    // The AI scans all ten possible final digits and selects the highest
+    // estimated probability for the fourth future tick.
+    targetDigit: recommended.digit,
+    recommendedDigit: recommended.digit,
+    probability: recommended.probability,
+    probabilities: rankedDigits,
     samples: history.length,
     generatedAt: Date.now()
   };
@@ -410,8 +419,21 @@ function DerivLivePanel() {
                   selectedTargetDigitRef.current
                 );
                 if (forecast) {
+                  // Automatically select the strongest of digits 0–9 for
+                  // this new four-tick forecast. The user can read and enter it.
+                  const recommendedDigit = String(forecast.recommendedDigit);
+                  setSelectedTargetDigit(recommendedDigit);
+                  selectedTargetDigitRef.current = recommendedDigit;
+                  try {
+                    localStorage.setItem(
+                      "tradelab_selected_target_digit",
+                      recommendedDigit
+                    );
+                  } catch {}
+
                   const pendingForecast = {
                     ...forecast,
+                    targetDigit: forecast.recommendedDigit,
                     market,
                     remaining: 4
                   };
@@ -1334,14 +1356,14 @@ function DerivLivePanel() {
           flexWrap: "wrap"
         }}>
           <div>
-            <strong>MY TARGET DIGIT TO MATCH</strong>
+            <strong>AI-RECOMMENDED DIGIT TO ENTER</strong>
 
             <div style={{
               color: "#91a3bc",
               fontSize: 12,
               marginTop: 5
             }}>
-              Choose the exact final digit for the Deriv Matches contract. This is separate from the AI recommendation.
+              The scanner compares all digits 0–9 and automatically selects the strongest estimated digit for the fourth future tick. You can still change it manually.
             </div>
           </div>
 
@@ -1379,8 +1401,7 @@ function DerivLivePanel() {
             4-Tick Digit Match Forecast
           </h3>
           <p style={{ color: "#91a3bc", fontSize: 12, lineHeight: 1.6 }}>
-            Estimates the chance that your selected digit appears on the
-            fourth future tick specifically—not on ticks one, two, or three.
+            Scans all ten digits and recommends the one with the highest estimated chance of appearing on the fourth future tick—not on ticks one, two, or three.
           </p>
           <div style={{
             display: "grid",
@@ -1388,7 +1409,7 @@ function DerivLivePanel() {
             gap: 12
           }}>
             <div style={{ ...cardStyle, padding: 13 }}>
-              <small style={{ color: "#91a3bc" }}>TARGET FINAL DIGIT</small>
+              <small style={{ color: "#91a3bc" }}>AI'S RECOMMENDED DIGIT</small>
               <div style={{ fontSize: 28, fontWeight: 800, marginTop: 6 }}>
                 {selectedTargetDigit}
               </div>
@@ -1438,9 +1459,7 @@ function DerivLivePanel() {
             <span>Random baseline: <strong>10%</strong></span>
           </div>
           <p style={{ color: "#91a3bc", fontSize: 11, lineHeight: 1.6, marginBottom: 0 }}>
-            Uses a Laplace-smoothed four-step transition model from this market's
-            historical digit sequence. Requires at least 200 observations.
-            Forecasts are estimates, not guaranteed outcomes or trading instructions.
+            The scanner ranks digits 0–9 using a Laplace-smoothed four-step transition model from this market's historical sequence. It recommends the highest-ranked digit and validates it against the actual fourth tick. Requires at least 200 observations. Estimates are not guarantees; use the digit as an analysis aid, not a certainty.
           </p>
         </section>
 
