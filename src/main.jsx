@@ -444,42 +444,6 @@ async function logBillingEvent(
 }
 
 /* =========================================
-   SUBSCRIPTION ACCESS CONTROL
-========================================= */
-
-async function hasActiveSubscription(env, userId) {
-  const subscription = await env.DB.prepare(`
-    SELECT s.status, s.plan_id, s.current_period_start, s.current_period_end,
-           p.active AS plan_active
-    FROM subscriptions s
-    LEFT JOIN subscription_plans p ON p.id = s.plan_id
-    WHERE s.user_id = ?
-    ORDER BY
-      CASE WHEN s.status = 'active' THEN 1 WHEN s.status = 'pending' THEN 2 ELSE 3 END,
-      s.created_at DESC
-    LIMIT 1
-  `).bind(userId).first();
-
-  if (!subscription || subscription.status !== 'active') return false;
-  if (subscription.plan_id !== BILLING_PLAN_ID || Number(subscription.plan_active) !== 1) return false;
-
-  const now = Date.now();
-  const start = Date.parse(subscription.current_period_start || '');
-  const end = Date.parse(subscription.current_period_end || '');
-  return Number.isFinite(start) && Number.isFinite(end) && start <= now && now < end;
-}
-
-function paymentRequiredResponse() {
-  return json({
-    ok: false,
-    code: 'PAYMENT_REQUIRED',
-    paymentRequired: true,
-    error: 'An active TradeLab AI subscription is required to use this feature.',
-    billingUrl: '/?tab=billing'
-  }, 402);
-}
-
-/* =========================================
    BILLING STATUS
 ========================================= */
 
@@ -525,23 +489,14 @@ async function getBillingStatus(env, user) {
     LIMIT 1
   `).bind(user.id).first();
 
-  const now = Date.now();
-  const periodStart = Date.parse(subscription?.current_period_start || "");
-  const periodEnd = Date.parse(subscription?.current_period_end || "");
-  const subscriptionActive = Boolean(
-    subscription &&
-    subscription.status === "active" &&
-    subscription.plan_id === BILLING_PLAN_ID &&
-    Number(plan?.active) === 1 &&
-    Number.isFinite(periodStart) &&
-    Number.isFinite(periodEnd) &&
-    periodStart <= now && now < periodEnd
-  );
-
   return {
     ok: true,
-    billingEnabled: true,
-    paymentRequired: !subscriptionActive,
+
+    // Billing is not enforced until a real payment provider
+    // and verified webhook integration are completed.
+    billingEnabled: false,
+
+    paymentRequired: subscription?.status !== "active",
 
     plan: plan ? {
       id: plan.id,
@@ -577,9 +532,7 @@ async function getBillingStatus(env, user) {
       monthlyEquivalent: 720
     },
 
-    message: subscriptionActive
-      ? "Your TradeLab AI subscription is active."
-      : "An active subscription is required to use paid TradeLab AI features."
+    message: "Payment processing is not yet activated. No subscription charges have been made."
   };
 }
 
@@ -790,7 +743,7 @@ async function createBillingSubscription(request, env, user) {
   return json({
     ok: true,
     message: "Flutterwave card checkout is ready. Your subscription activates only after the first payment is verified.",
-    billingEnabled: true,
+    billingEnabled: false,
     paymentStarted: true,
     charged: false,
     checkoutUrl: gatewayResponse.data.link,
@@ -2041,12 +1994,6 @@ async function handleDeriv(request, env, url) {
     return redirectToApp("connected");
   }
 
-  // OAuth callback is allowed to finish so an in-progress connection is not stranded.
-  // All other Deriv operations require a currently paid subscription.
-  if (!(await hasActiveSubscription(env, user.id))) {
-    return paymentRequiredResponse();
-  }
-
   /* CONNECTION STATUS */
 
   if (path === "/api/deriv/status" && request.method === "GET") {
@@ -2287,10 +2234,6 @@ export default {
             ok: false,
             error: "Authentication required"
           }, 401);
-        }
-
-        if (!(await hasActiveSubscription(env, user.id))) {
-          return paymentRequiredResponse();
         }
 
         const marketResponse = await handleMarket(request, env, url);
