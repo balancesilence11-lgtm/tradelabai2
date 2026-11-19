@@ -405,11 +405,11 @@ const BILLING_PLAN_ID = "hourly_usd_1";
 const BILLING_AMOUNT_MINOR = 100;
 const BILLING_CURRENCY = "USD";
 const BILLING_INTERVAL_SECONDS = 3600;
+const FLW_PAYMENT_PLAN_ID = 252752;
 
-const BILLING_ALLOWED_PROVIDERS = new Set([
-  "mpesa",
-  "card"
-]);
+// Flutterwave recurring Payment Plans are card-based. M-Pesa/STK Push and
+// Deriv-wallet debits are intentionally not offered for this subscription.
+const BILLING_ALLOWED_PROVIDERS = new Set(["card"]);
 
 /* =========================================
    BILLING AUDIT HELPER
@@ -614,7 +614,6 @@ async function getBillingTransactions(request, env, user) {
 
 async function createBillingSubscription(request, env, user) {
   let body;
-
   try {
     body = await readJson(request);
   } catch {
@@ -622,177 +621,266 @@ async function createBillingSubscription(request, env, user) {
   }
 
   if (body.consent !== true) {
+    return json({ error: "Explicit consent is required before starting recurring card billing." }, 400);
+  }
+
+  const provider = String(body.provider || "card").trim().toLowerCase();
+  if (!BILLING_ALLOWED_PROVIDERS.has(provider)) {
     return json({
-      error: "Explicit consent is required before creating a subscription request."
+      error: "Only recurring card payments through Flutterwave are supported.",
+      supportedProviders: ["card"],
+      message: "M-Pesa STK Push and Deriv balance payments are not enabled."
     }, 400);
   }
 
-  const provider = String(body.provider || "").trim().toLowerCase();
-
-  if (!BILLING_ALLOWED_PROVIDERS.has(provider)) {
-    return json({
-      error: "Unsupported payment provider.",
-      supportedProviders: ["mpesa", "card"],
-      message: "Deriv balance payments are not enabled."
-    }, 400);
+  if (!env.FLW_SECRET_KEY) {
+    return json({ error: "Card billing is not configured on the server." }, 503);
   }
 
   const plan = await env.DB.prepare(`
     SELECT id, name, amount, currency, billing_interval_seconds, active
-    FROM subscription_plans
-    WHERE id = ?
+    FROM subscription_plans WHERE id = ?
   `).bind(BILLING_PLAN_ID).first();
 
-  if (
-    !plan ||
-    Number(plan.amount) !== 1 ||
-    plan.currency !== "USD" ||
-    Number(plan.billing_interval_seconds) !== BILLING_INTERVAL_SECONDS ||
-    Number(plan.active) !== 1
-  ) {
-    return json({
-      error: "The hourly subscription plan is unavailable or incorrectly configured."
-    }, 503);
+  if (!plan || Number(plan.amount) !== 1 || plan.currency !== "USD" ||
+      Number(plan.billing_interval_seconds) !== BILLING_INTERVAL_SECONDS || Number(plan.active) !== 1) {
+    return json({ error: "The TradeLab hourly USD 1 subscription plan is unavailable or incorrectly configured." }, 503);
   }
 
   const existing = await env.DB.prepare(`
-    SELECT id, status
-    FROM subscriptions
-    WHERE user_id = ?
-      AND status IN ('active', 'pending')
-    ORDER BY created_at DESC
-    LIMIT 1
+    SELECT id, status FROM subscriptions
+    WHERE user_id = ? AND status IN ('active', 'pending')
+    ORDER BY created_at DESC LIMIT 1
   `).bind(user.id).first();
 
   if (existing) {
     return json({
       error: "An active or pending subscription already exists.",
-      subscription: {
-        id: existing.id,
-        status: existing.status
-      }
+      subscription: { id: existing.id, status: existing.status }
     }, 409);
   }
 
   const subscriptionId = randomId(16);
   const transactionId = randomId(16);
-  const idempotencyKey = randomId(32);
+  const txRef = `TL-${user.id}-${randomId(12)}`;
   const now = new Date().toISOString();
 
   try {
     await env.DB.batch([
       env.DB.prepare(`
         INSERT INTO subscriptions (
-          id,
-          user_id,
-          plan_id,
-          status,
-          payment_provider,
-          current_period_start,
-          current_period_end,
-          next_billing_at,
-          cancel_at_period_end,
-          created_at,
-          updated_at
-        )
-        VALUES (?, ?, ?, 'pending', ?, NULL, NULL, NULL, 0, ?, ?)
-      `).bind(
-        subscriptionId,
-        user.id,
-        BILLING_PLAN_ID,
-        provider,
-        now,
-        now
-      ),
-
+          id, user_id, plan_id, status, payment_provider,
+          current_period_start, current_period_end, next_billing_at,
+          cancel_at_period_end, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending', 'flutterwave', NULL, NULL, NULL, 0, ?, ?)
+      `).bind(subscriptionId, user.id, BILLING_PLAN_ID, now, now),
       env.DB.prepare(`
         INSERT INTO payment_transactions (
-          id,
-          user_id,
-          subscription_id,
-          provider,
-          provider_payment_ref,
-          idempotency_key,
-          amount_minor,
-          currency,
-          status,
-          description,
-          provider_status,
-          paid_at,
-          created_at,
-          updated_at
-        )
-        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'pending',
-          'TradeLab AI hourly subscription',
-          'payment_not_started',
-          NULL, ?, ?)
-      `).bind(
-        transactionId,
-        user.id,
-        subscriptionId,
-        provider,
-        idempotencyKey,
-        BILLING_AMOUNT_MINOR,
-        BILLING_CURRENCY,
-        now,
-        now
-      ),
-
+          id, user_id, subscription_id, provider, provider_payment_ref,
+          idempotency_key, amount_minor, currency, status, description,
+          provider_status, paid_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 'flutterwave', ?, ?, ?, ?, 'pending',
+          'TradeLab AI hourly subscription', 'checkout_initializing', NULL, ?, ?)
+      `).bind(transactionId, user.id, subscriptionId, txRef, randomId(32),
+        BILLING_AMOUNT_MINOR, BILLING_CURRENCY, now, now),
       env.DB.prepare(`
-        INSERT INTO billing_audit_log (
-          id,
-          user_id,
-          subscription_id,
-          transaction_id,
-          event_type,
-          details_json
-        )
-        VALUES (?, ?, ?, ?, 'subscription_requested', ?)
-      `).bind(
-        randomId(16),
-        user.id,
-        subscriptionId,
-        transactionId,
-        JSON.stringify({
-          provider,
-          amount: 1,
-          currency: "USD",
-          billingIntervalSeconds: 3600,
-          consent: true,
-          paymentStarted: false
-        })
-      )
+        INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json)
+        VALUES (?, ?, ?, ?, 'subscription_checkout_started', ?)
+      `).bind(randomId(16), user.id, subscriptionId, transactionId,
+        JSON.stringify({ provider: "flutterwave", txRef, paymentPlanId: FLW_PAYMENT_PLAN_ID, amount: 1, currency: "USD", intervalSeconds: 3600, consent: true }))
     ]);
-
   } catch (error) {
     console.error("Billing subscription creation failed:", error.message);
-
-    return json({
-      error: "Unable to create subscription request."
-    }, 500);
+    return json({ error: "Unable to create subscription checkout." }, 500);
   }
+
+  const checkoutPayload = {
+    tx_ref: txRef,
+    amount: "1",
+    currency: "USD",
+    redirect_url: `${new URL(request.url).origin}/?billing=complete`,
+    payment_options: "card",
+    payment_plan: FLW_PAYMENT_PLAN_ID,
+    customer: {
+      email: user.email,
+      name: user.email.split("@")[0]
+    },
+    customizations: {
+      title: "TradeLab AI",
+      description: "USD 1 recurring hourly subscription"
+    },
+    meta: { tradelab_subscription_id: subscriptionId, tradelab_user_id: user.id }
+  };
+
+  let gatewayResponse;
+  try {
+    const response = await fetch("https://api.flutterwave.com/v3/payments", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.FLW_SECRET_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(checkoutPayload)
+    });
+    gatewayResponse = await response.json();
+    if (!response.ok || gatewayResponse.status !== "success" || !gatewayResponse.data?.link) {
+      throw new Error(gatewayResponse.message || `Flutterwave checkout returned HTTP ${response.status}`);
+    }
+  } catch (error) {
+    console.error("Flutterwave checkout initialization failed:", error.message);
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE payment_transactions SET status = 'failed', provider_status = 'checkout_initialization_failed', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), transactionId),
+      env.DB.prepare(`UPDATE subscriptions SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'pending'`).bind(new Date().toISOString(), subscriptionId),
+      env.DB.prepare(`INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json) VALUES (?, ?, ?, ?, 'checkout_initialization_failed', ?)`)
+        .bind(randomId(16), user.id, subscriptionId, transactionId, JSON.stringify({ message: error.message }))
+    ]);
+    return json({ error: "Flutterwave could not start the card checkout. No payment was taken." }, 502);
+  }
+
+  await env.DB.prepare(`UPDATE payment_transactions SET provider_status = 'checkout_created', updated_at = ? WHERE id = ?`)
+    .bind(new Date().toISOString(), transactionId).run();
 
   return json({
     ok: true,
-    message: "Subscription request created. Payment has not been initiated.",
+    message: "Flutterwave card checkout is ready. Your subscription activates only after the first payment is verified.",
     billingEnabled: false,
-    paymentStarted: false,
+    paymentStarted: true,
     charged: false,
-
-    subscription: {
-      id: subscriptionId,
-      status: "pending",
-      provider,
-      amount: 1,
-      currency: "USD",
-      intervalSeconds: BILLING_INTERVAL_SECONDS
-    },
-
-    transaction: {
-      id: transactionId,
-      status: "pending"
-    }
+    checkoutUrl: gatewayResponse.data.link,
+    tx_ref: txRef,
+    subscription: { id: subscriptionId, status: "pending", provider: "flutterwave", amount: 1, currency: "USD", intervalSeconds: BILLING_INTERVAL_SECONDS },
+    transaction: { id: transactionId, status: "pending" }
   }, 201);
+}
+
+/* =========================================
+   FLUTTERWAVE WEBHOOK AND VERIFICATION
+========================================= */
+
+function constantTimeStringEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function handleFlutterwaveWebhook(request, env) {
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
+  if (!env.FLW_SECRET_KEY || !env.FLW_WEBHOOK_HASH) {
+    console.error("Flutterwave webhook secrets are missing.");
+    return json({ error: "Webhook is not configured" }, 503);
+  }
+
+  const suppliedHash = request.headers.get("verif-hash") || "";
+  if (!constantTimeStringEqual(suppliedHash, env.FLW_WEBHOOK_HASH)) {
+    return json({ error: "Invalid webhook signature" }, 401);
+  }
+
+  let event;
+  try { event = await request.json(); }
+  catch { return json({ error: "Invalid webhook payload" }, 400); }
+
+  if (event.event !== "charge.completed" || !event.data?.id) {
+    // Other event types do not grant access. Acknowledge them to avoid retries.
+    return json({ ok: true, ignored: true });
+  }
+
+  let verified;
+  try {
+    const response = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(event.data.id)}/verify`, {
+      headers: { Authorization: `Bearer ${env.FLW_SECRET_KEY}`, "Content-Type": "application/json" }
+    });
+    const result = await response.json();
+    if (!response.ok || result.status !== "success" || !result.data) throw new Error(result.message || "Transaction verification failed");
+    verified = result.data;
+  } catch (error) {
+    console.error("Flutterwave transaction verification failed:", error.message);
+    return json({ error: "Unable to verify payment" }, 503);
+  }
+
+  const txRef = String(verified.tx_ref || "");
+  const gatewayStatus = String(verified.status || "").toLowerCase();
+  const currency = String(verified.currency || "").toUpperCase();
+  const amount = Number(verified.amount);
+  if (!txRef || currency !== "USD" || !Number.isFinite(amount) || Math.round(amount * 100) !== BILLING_AMOUNT_MINOR) {
+    console.warn("Flutterwave payment did not meet activation checks", { txRef, gatewayStatus, currency, amount });
+    return json({ ok: true, ignored: true, reason: "Amount or currency mismatch" });
+  }
+
+  if (gatewayStatus !== "successful") {
+    const pending = await env.DB.prepare(`SELECT id, user_id, subscription_id FROM payment_transactions WHERE provider = 'flutterwave' AND provider_payment_ref = ? AND status = 'pending' LIMIT 1`).bind(txRef).first();
+    if (pending) {
+      const failedAt = new Date().toISOString();
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE payment_transactions SET status = 'failed', provider_status = ?, updated_at = ? WHERE id = ? AND status = 'pending'`).bind(gatewayStatus || 'failed', failedAt, pending.id),
+        env.DB.prepare(`UPDATE subscriptions SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'pending'`).bind(failedAt, pending.subscription_id),
+        env.DB.prepare(`INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json) VALUES (?, ?, ?, ?, 'flutterwave_payment_failed', ?)`)
+          .bind(randomId(16), pending.user_id, pending.subscription_id, pending.id, JSON.stringify({ txRef, gatewayStatus }))
+      ]);
+    }
+    return json({ ok: true, ignored: true, reason: "Payment was not successful" });
+  }
+
+  const paidAt = verified.created_at && !Number.isNaN(Date.parse(verified.created_at))
+    ? new Date(verified.created_at).toISOString() : new Date().toISOString();
+  const existingTransaction = await env.DB.prepare(`
+    SELECT id, user_id, subscription_id, status, amount_minor, currency
+    FROM payment_transactions WHERE provider = 'flutterwave' AND provider_payment_ref = ? LIMIT 1
+  `).bind(txRef).first();
+
+  // A repeated webhook for the same verified charge must never extend access twice.
+  if (existingTransaction?.status === "successful") return json({ ok: true, duplicate: true });
+
+  let userId = existingTransaction?.user_id || null;
+  let subscriptionId = existingTransaction?.subscription_id || null;
+  if (!userId) {
+    const email = String(verified.customer?.email || event.data?.customer?.email || "").trim().toLowerCase();
+    if (!email) return json({ ok: true, ignored: true, reason: "Customer email missing" });
+    const account = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active' LIMIT 1`).bind(email).first();
+    if (!account) return json({ ok: true, ignored: true, reason: "TradeLab account not found" });
+    userId = account.id;
+    const activeSub = await env.DB.prepare(`
+      SELECT id FROM subscriptions WHERE user_id = ? AND payment_provider = 'flutterwave' AND status = 'active'
+      ORDER BY created_at DESC LIMIT 1
+    `).bind(userId).first();
+    if (!activeSub) return json({ ok: true, ignored: true, reason: "No active Flutterwave subscription for renewal" });
+    subscriptionId = activeSub.id;
+  }
+
+  const now = new Date().toISOString();
+  const transactionId = existingTransaction?.id || randomId(16);
+  const amountMinor = Math.round(amount * 100);
+  try {
+    if (existingTransaction) {
+      await env.DB.prepare(`UPDATE payment_transactions SET status = 'successful', provider_status = ?, amount_minor = ?, currency = 'USD', paid_at = ?, updated_at = ? WHERE id = ?`)
+        .bind(gatewayStatus, amountMinor, paidAt, now, transactionId).run();
+    } else {
+      await env.DB.prepare(`
+        INSERT INTO payment_transactions (id, user_id, subscription_id, provider, provider_payment_ref, idempotency_key, amount_minor, currency, status, description, provider_status, paid_at, created_at, updated_at)
+        VALUES (?, ?, ?, 'flutterwave', ?, ?, ?, 'USD', 'successful', 'TradeLab AI hourly subscription renewal', ?, ?, ?, ?)
+      `).bind(transactionId, userId, subscriptionId, txRef, randomId(32), amountMinor, gatewayStatus, paidAt, now, now).run();
+    }
+
+    const subscription = await env.DB.prepare(`SELECT current_period_end, status FROM subscriptions WHERE id = ? AND user_id = ?`)
+      .bind(subscriptionId, userId).first();
+    if (!subscription) return json({ error: "Subscription record not found" }, 500);
+    const previousEnd = subscription.current_period_end ? Date.parse(subscription.current_period_end) : 0;
+    const periodStartMs = Math.max(Date.parse(paidAt), Number.isFinite(previousEnd) ? previousEnd : 0);
+    const periodStart = new Date(periodStartMs).toISOString();
+    const periodEnd = new Date(periodStartMs + BILLING_INTERVAL_SECONDS * 1000).toISOString();
+
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE subscriptions SET status = 'active', payment_provider = 'flutterwave', current_period_start = ?, current_period_end = ?, next_billing_at = ?, grace_period_end = NULL, updated_at = ? WHERE id = ? AND user_id = ?`)
+        .bind(periodStart, periodEnd, periodEnd, now, subscriptionId, userId),
+      env.DB.prepare(`INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json) VALUES (?, ?, ?, ?, 'flutterwave_payment_verified', ?)`)
+        .bind(randomId(16), userId, subscriptionId, transactionId, JSON.stringify({ txRef, amount, currency, gatewayTransactionId: String(verified.id), paidAt }))
+    ]);
+  } catch (error) {
+    console.error("Unable to record verified Flutterwave payment:", error.message);
+    return json({ error: "Payment verified but subscription update failed" }, 503);
+  }
+
+  return json({ ok: true, verified: true });
 }
 
 /* =========================================
@@ -2118,7 +2206,13 @@ export default {
         return await handleAuth(request, env, url);
       }
 
-      /* BILLING ROUTES */
+      /* PUBLIC FLUTTERWAVE WEBHOOK (signature verified inside handler) */
+
+      if (path === "/api/billing/flutterwave/webhook") {
+        return await handleFlutterwaveWebhook(request, env);
+      }
+
+      /* AUTHENTICATED BILLING ROUTES */
 
       if (path.startsWith("/api/billing/")) {
         return await handleBilling(request, env, url);
