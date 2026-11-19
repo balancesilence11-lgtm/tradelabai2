@@ -258,7 +258,7 @@ async function login(request, env) {
 
   if (!email || email.length > 254 || !password || password.length > 128) {
     return json({ error: "Invalid email or password" }, 400);
-  }
+  } 
 
   const now = Date.now();
 
@@ -444,6 +444,58 @@ async function logBillingEvent(
 }
 
 /* =========================================
+   SUBSCRIPTION ENTITLEMENT / SERVER-SIDE ACCESS CONTROL
+========================================= */
+
+async function getSubscriptionEntitlement(env, user) {
+  if (!user?.id) return { active: false, reason: "unauthenticated" };
+
+  const subscription = await env.DB.prepare(`
+    SELECT s.id, s.plan_id, s.status, s.current_period_end,
+           s.grace_period_end, s.cancel_at_period_end, p.active AS plan_active
+    FROM subscriptions s
+    LEFT JOIN subscription_plans p ON p.id = s.plan_id
+    WHERE s.user_id = ? AND s.plan_id = ?
+    ORDER BY
+      CASE WHEN s.status = 'active' THEN 1 WHEN s.status = 'pending' THEN 2 ELSE 3 END,
+      s.created_at DESC
+    LIMIT 1
+  `).bind(user.id, BILLING_PLAN_ID).first();
+
+  if (!subscription) return { active: false, reason: "no_subscription", subscription: null };
+
+  const now = Date.now();
+  const periodEnd = subscription.current_period_end ? Date.parse(subscription.current_period_end) : 0;
+  const graceEnd = subscription.grace_period_end ? Date.parse(subscription.grace_period_end) : 0;
+  const periodValid = Number.isFinite(periodEnd) && periodEnd > now;
+  const graceValid = Number.isFinite(graceEnd) && graceEnd > now;
+  const active = subscription.status === "active" && Number(subscription.plan_active) === 1 && (periodValid || graceValid);
+
+  return {
+    active,
+    reason: active ? (periodValid ? "active" : "grace_period") : (subscription.status === "active" ? "period_expired" : subscription.status),
+    subscription: {
+      id: subscription.id,
+      status: subscription.status,
+      currentPeriodEnd: subscription.current_period_end,
+      gracePeriodEnd: subscription.grace_period_end,
+      cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end)
+    }
+  };
+}
+
+function paymentRequiredResponse(entitlement) {
+  return json({
+    ok: false,
+    code: "PAYMENT_REQUIRED",
+    paymentRequired: true,
+    error: "An active TradeLab AI subscription is required to use this feature.",
+    billingUrl: "/?page=billing",
+    subscriptionStatus: entitlement?.subscription?.status || "inactive"
+  }, 402);
+}
+
+/* =========================================
    BILLING STATUS
 ========================================= */
 
@@ -465,8 +517,7 @@ async function getBillingStatus(env, user) {
       s.id,
       s.plan_id,
       s.status,
-      s.payment_provider,
-      s.current_period_start,
+      s.payment_provider,  s.current_period_start,
       s.current_period_end,
       s.next_billing_at,
       s.grace_period_end,
@@ -489,14 +540,12 @@ async function getBillingStatus(env, user) {
     LIMIT 1
   `).bind(user.id).first();
 
+  const entitlement = await getSubscriptionEntitlement(env, user);
+
   return {
     ok: true,
-
-    // Billing is not enforced until a real payment provider
-    // and verified webhook integration are completed.
-    billingEnabled: false,
-
-    paymentRequired: subscription?.status !== "active",
+    billingEnabled: true,
+    paymentRequired: !entitlement.active,
 
     plan: plan ? {
       id: plan.id,
@@ -511,7 +560,7 @@ async function getBillingStatus(env, user) {
       id: subscription.id,
       planId: subscription.plan_id,
       planName: subscription.plan_name,
-      status: subscription.status,
+      status: entitlement.reason === "period_expired" ? "expired" : subscription.status,
       paymentProvider: subscription.payment_provider,
       amount: Number(subscription.amount || 0),
       currency: subscription.currency || BILLING_CURRENCY,
@@ -532,7 +581,13 @@ async function getBillingStatus(env, user) {
       monthlyEquivalent: 720
     },
 
-    message: "Payment processing is not yet activated. No subscription charges have been made."
+    entitlement: {
+      active: entitlement.active,
+      reason: entitlement.reason
+    },
+    message: entitlement.active
+      ? "Your TradeLab AI subscription is active."
+      : "An active hourly subscription is required to use paid features."
   };
 }
 
@@ -647,11 +702,40 @@ async function createBillingSubscription(request, env, user) {
     return json({ error: "The TradeLab hourly USD 1 subscription plan is unavailable or incorrectly configured." }, 503);
   }
 
+  const now = new Date().toISOString();
+
+  // Close stale local records before creating a new checkout. Otherwise an
+  // expired row left with status='active' (or an abandoned pending checkout)
+  // would permanently block the user from subscribing again.
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE subscriptions
+      SET status = 'expired', updated_at = ?
+      WHERE user_id = ? AND plan_id = ? AND status = 'active'
+        AND (current_period_end IS NULL OR julianday(current_period_end) <= julianday(?))
+        AND (grace_period_end IS NULL OR julianday(grace_period_end) <= julianday(?))
+    `).bind(now, user.id, BILLING_PLAN_ID, now, now),
+    env.DB.prepare(`
+      UPDATE subscriptions
+      SET status = 'expired', updated_at = ?
+      WHERE user_id = ? AND plan_id = ? AND status = 'pending'
+        AND julianday(created_at) <= julianday(?) - (30.0 / 1440.0)
+    `).bind(now, user.id, BILLING_PLAN_ID, now),
+    env.DB.prepare(`
+      UPDATE payment_transactions
+      SET status = 'failed', provider_status = 'checkout_expired', updated_at = ?
+      WHERE user_id = ? AND status = 'pending'
+        AND subscription_id IN (
+          SELECT id FROM subscriptions WHERE user_id = ? AND plan_id = ? AND status = 'expired'
+        )
+    `).bind(now, user.id, user.id, BILLING_PLAN_ID)
+  ]);
+
   const existing = await env.DB.prepare(`
     SELECT id, status FROM subscriptions
-    WHERE user_id = ? AND status IN ('active', 'pending')
+    WHERE user_id = ? AND plan_id = ? AND status IN ('active', 'pending')
     ORDER BY created_at DESC LIMIT 1
-  `).bind(user.id).first();
+  `).bind(user.id, BILLING_PLAN_ID).first();
 
   if (existing) {
     return json({
@@ -663,7 +747,6 @@ async function createBillingSubscription(request, env, user) {
   const subscriptionId = randomId(16);
   const transactionId = randomId(16);
   const txRef = `TL-${user.id}-${randomId(12)}`;
-  const now = new Date().toISOString();
 
   try {
     await env.DB.batch([
@@ -743,7 +826,7 @@ async function createBillingSubscription(request, env, user) {
   return json({
     ok: true,
     message: "Flutterwave card checkout is ready. Your subscription activates only after the first payment is verified.",
-    billingEnabled: false,
+    billingEnabled: true,
     paymentStarted: true,
     charged: false,
     checkoutUrl: gatewayResponse.data.link,
@@ -780,6 +863,48 @@ async function handleFlutterwaveWebhook(request, env) {
   try { event = await request.json(); }
   catch { return json({ error: "Invalid webhook payload" }, 400); }
 
+  // Flutterwave also sends subscription.cancelled when a customer or the
+  // provider cancels a recurring card subscription. Keep local access through
+  // the already-paid period, but record that no further renewal is expected.
+  if (event.event === "subscription.cancelled") {
+    const email = String(
+      event.data?.customer?.customer_email ||
+      event.data?.customer?.email ||
+      ""
+    ).trim().toLowerCase();
+    const providerPlanId = String(event.data?.plan?.id || "");
+
+    if (!email || (providerPlanId && providerPlanId !== String(FLW_PAYMENT_PLAN_ID))) {
+      return json({ ok: true, ignored: true, reason: "Subscription event did not match this plan" });
+    }
+
+    const account = await env.DB.prepare(
+      `SELECT id FROM users WHERE email = ? AND status = 'active' LIMIT 1`
+    ).bind(email).first();
+    if (!account) return json({ ok: true, ignored: true, reason: "TradeLab account not found" });
+
+    const localSubscription = await env.DB.prepare(`
+      SELECT id, cancel_at_period_end FROM subscriptions
+      WHERE user_id = ? AND plan_id = ? AND payment_provider = 'flutterwave'
+        AND status = 'active'
+      ORDER BY created_at DESC LIMIT 1
+    `).bind(account.id, BILLING_PLAN_ID).first();
+
+    if (!localSubscription) return json({ ok: true, ignored: true, reason: "Active local subscription not found" });
+    if (Number(localSubscription.cancel_at_period_end) === 1) {
+      return json({ ok: true, duplicate: true });
+    }
+
+    const cancelledAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE subscriptions SET cancel_at_period_end = 1, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'active'`)
+        .bind(cancelledAt, localSubscription.id, account.id),
+      env.DB.prepare(`INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json) VALUES (?, ?, ?, NULL, 'flutterwave_subscription_cancelled', ?)`)
+        .bind(randomId(16), account.id, localSubscription.id, JSON.stringify({ providerPlanId: providerPlanId || null, providerStatus: event.data?.status || "cancelled" }))
+    ]);
+    return json({ ok: true, cancellationRecorded: true });
+  }
+
   if (event.event !== "charge.completed" || !event.data?.id) {
     // Other event types do not grant access. Acknowledge them to avoid retries.
     return json({ ok: true, ignored: true });
@@ -801,10 +926,20 @@ async function handleFlutterwaveWebhook(request, env) {
   const txRef = String(verified.tx_ref || "");
   const gatewayStatus = String(verified.status || "").toLowerCase();
   const currency = String(verified.currency || "").toUpperCase();
+  const paymentType = String(verified.payment_type || event.data?.payment_type || "").toLowerCase();
   const amount = Number(verified.amount);
-  if (!txRef || currency !== "USD" || !Number.isFinite(amount) || Math.round(amount * 100) !== BILLING_AMOUNT_MINOR) {
-    console.warn("Flutterwave payment did not meet activation checks", { txRef, gatewayStatus, currency, amount });
-    return json({ ok: true, ignored: true, reason: "Amount or currency mismatch" });
+  if (
+    !txRef ||
+    String(verified.id) !== String(event.data.id) ||
+    paymentType !== "card" ||
+    currency !== "USD" ||
+    !Number.isFinite(amount) ||
+    Math.round(amount * 100) !== BILLING_AMOUNT_MINOR
+  ) {
+    console.warn("Flutterwave payment did not meet activation checks", {
+      txRef, gatewayStatus, paymentType, currency, amount
+    });
+    return json({ ok: true, ignored: true, reason: "Transaction ID, payment method, amount or currency mismatch" });
   }
 
   if (gatewayStatus !== "successful") {
@@ -979,6 +1114,65 @@ async function cancelBillingSubscription(request, env, user) {
       });
     }
 
+    // Cancel this customer's Flutterwave subscription, not the shared payment
+    // plan. The local entitlement remains valid until current_period_end.
+    if (!env.FLW_SECRET_KEY) {
+      return json({ error: "Flutterwave cancellation is not configured. No changes were made." }, 503);
+    }
+
+    let providerSubscription;
+    try {
+      const lookupUrl = new URL("https://api.flutterwave.com/v3/subscriptions");
+      lookupUrl.searchParams.set("email", user.email);
+      lookupUrl.searchParams.set("plan", String(FLW_PAYMENT_PLAN_ID));
+      lookupUrl.searchParams.set("page", "1");
+      const lookupResponse = await fetch(lookupUrl.toString(), {
+        headers: { Authorization: `Bearer ${env.FLW_SECRET_KEY}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(15000)
+      });
+      const lookupData = await lookupResponse.json();
+      if (!lookupResponse.ok || lookupData.status !== "success" || !Array.isArray(lookupData.data)) {
+        throw new Error(lookupData.message || "Unable to locate Flutterwave subscription");
+      }
+
+      const matching = lookupData.data
+        .filter(item =>
+          String(item.customer?.customer_email || "").trim().toLowerCase() === user.email.toLowerCase() &&
+          String(item.plan) === String(FLW_PAYMENT_PLAN_ID)
+        )
+        .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0));
+      providerSubscription = matching.find(item => String(item.status).toLowerCase() === "active") ||
+        matching.find(item => String(item.status).toLowerCase() === "cancelled");
+      if (!providerSubscription?.id) {
+        throw new Error("No matching Flutterwave customer subscription was found");
+      }
+
+      if (String(providerSubscription.status).toLowerCase() === "active") {
+        const cancelResponse = await fetch(
+          `https://api.flutterwave.com/v3/subscriptions/${encodeURIComponent(providerSubscription.id)}/cancel`,
+          {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${env.FLW_SECRET_KEY}`,
+              "Content-Type": "application/json",
+              Accept: "application/json"
+            },
+            signal: AbortSignal.timeout(15000)
+          }
+        );
+        const cancelData = await cancelResponse.json();
+        if (!cancelResponse.ok || cancelData.status !== "success") {
+          throw new Error(cancelData.message || "Flutterwave rejected subscription cancellation");
+        }
+      }
+    } catch (error) {
+      console.error("Flutterwave subscription cancellation failed:", error.message);
+      return json({
+        error: "Flutterwave could not confirm cancellation. Your local subscription was not changed.",
+        message: "Please retry or cancel the subscription from your Flutterwave dashboard."
+      }, 502);
+    }
+
     try {
       await env.DB.batch([
         env.DB.prepare(`
@@ -999,7 +1193,9 @@ async function cancelBillingSubscription(request, env, user) {
           user.id,
           subscriptionId,
           JSON.stringify({
-            cancelAtPeriodEnd: true
+            cancelAtPeriodEnd: true,
+            flutterwaveSubscriptionId: String(providerSubscription.id),
+            providerStatus: String(providerSubscription.status)
           })
         )
       ]);
@@ -1021,9 +1217,7 @@ async function cancelBillingSubscription(request, env, user) {
     error: "This subscription cannot be cancelled in its current state.",
     status: subscription.status
   }, 409);
-}
-
-/* =========================================
+}/* =========================================
    BILLING ROUTES
 ========================================= */
 
@@ -1514,7 +1708,7 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
       ? ""
       : String(payload.barrier2).trim();
     const validBarrier = value =>
-      value !== "" && /^[+-]?\\d{1,12}(\\.\\d{1,8})?$/.test(value);
+      value !== "" && /^[+-]?\d{1,12}(\.\d{1,8})?$/.test(value);
 
     const digitContracts = new Set([
       "DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"
@@ -1720,8 +1914,7 @@ async function handleDerivSocket(request, env, url, user) {
         pendingContractsRequests.set(checked.payload.req_id, {
           symbol: checked.payload.contracts_for,
           createdAt: Date.now()
-        });
-      }
+        }); }
 
       try {
         upstream.send(JSON.stringify(checked.payload));
@@ -1848,6 +2041,18 @@ async function handleDeriv(request, env, url) {
     return json({ error: "Authentication required" }, 401);
   }
 
+  // OAuth callback must complete an already-started handshake. Connection
+  // status and disconnect remain available to the account owner even after
+  // expiry so a user can inspect or revoke stored broker credentials.
+  const accountManagementRoute =
+    isCallback ||
+    path === "/api/deriv/status" ||
+    path === "/api/deriv/disconnect";
+  if (!accountManagementRoute) {
+    const entitlement = await getSubscriptionEntitlement(env, user);
+    if (!entitlement.active) return paymentRequiredResponse(entitlement);
+  }
+
   if (path === "/api/deriv/socket") {
     if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
       return json({ error: "Deriv encryption is not configured" }, 500);
@@ -1888,9 +2093,7 @@ async function handleDeriv(request, env, url) {
         updated_at = excluded.updated_at
     `).bind(user.id, stateHash, verifier, now, now).run();
 
-    const authUrl = new URL(DERIV_AUTH_URL);
-
-    authUrl.searchParams.set("response_type", "code");
+    const authUrl = new URL(DERIV_AUTH_URL); authUrl.searchParams.set("response_type", "code");
     authUrl.searchParams.set("client_id", String(env.DERIV_CLIENT_ID));
     authUrl.searchParams.set("redirect_uri", DERIV_REDIRECT_URI);
     authUrl.searchParams.set("scope", DERIV_SCOPES);
@@ -2068,8 +2271,7 @@ async function handleDeriv(request, env, url) {
 
   if (!token) {
     return json({
-      ok: false,
-      connected: false,
+      ok: false,  connected: false,
       error: "Deriv is not connected or the authorization has expired. Reconnect your account."
     }, 401);
   }
@@ -2200,6 +2402,19 @@ export default {
     const path = url.pathname;
 
     try {
+      /* HEALTH CHECK (kept compatible with the existing Worker) */
+
+      if (path === "/api/health" && request.method === "GET") {
+        return json({
+          ok: true,
+          service: "TradeLab AI",
+          status: "running",
+          authentication: "enabled",
+          billing: "enabled",
+          derivIntegration: "configured"
+        });
+      }
+
       /* AUTHENTICATION ROUTES */
 
       if (path.startsWith("/api/auth/")) {
@@ -2235,6 +2450,9 @@ export default {
             error: "Authentication required"
           }, 401);
         }
+
+        const entitlement = await getSubscriptionEntitlement(env, user);
+        if (!entitlement.active) return paymentRequiredResponse(entitlement);
 
         const marketResponse = await handleMarket(request, env, url);
 
