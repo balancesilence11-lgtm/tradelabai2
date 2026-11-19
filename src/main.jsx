@@ -72,6 +72,7 @@ const navigation = [
   { name: 'Account Overview', icon: Wallet },
   { name: 'Broker Connections', icon: Radio },
   { name: 'Security Centre', icon: LockKeyhole },
+  { name: 'Billing & Subscription', icon: Wallet },
   { name: 'Settings', icon: Settings }
 ];
 
@@ -2697,6 +2698,144 @@ function TradePlannerPage({ selectedMarket }) {
   </>;
 }
 
+
+function BillingSubscriptionPage() {
+  const [status, setStatus] = useState(null);
+  const [transactions, setTransactions] = useState([]);
+  const [consent, setConsent] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+
+  async function loadBilling() {
+    setLoading(true);
+    setError('');
+    try {
+      const [statusResponse, transactionResponse] = await Promise.all([
+        fetch('/api/billing/status'),
+        fetch('/api/billing/transactions?limit=10')
+      ]);
+      const statusData = await statusResponse.json();
+      const transactionData = await transactionResponse.json();
+      if (!statusResponse.ok || statusData.ok === false) throw new Error(statusData.error || 'Could not load subscription status.');
+      if (!transactionResponse.ok || transactionData.ok === false) throw new Error(transactionData.error || 'Could not load payment history.');
+      setStatus(statusData);
+      setTransactions(Array.isArray(transactionData.transactions) ? transactionData.transactions : []);
+    } catch (err) {
+      setError(err.message || 'Unable to load billing information.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadBilling();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('billing') === 'complete') {
+      setMessage('Checkout returned. We are checking for the verified payment; subscription access changes only after server-side verification.');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  async function subscribe() {
+    if (!consent) {
+      setError('Please accept the recurring card-payment terms before continuing.');
+      return;
+    }
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const response = await fetch('/api/billing/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'card', consent: true })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok || !data.checkoutUrl) throw new Error(data.error || data.message || 'Unable to start checkout.');
+      window.location.assign(data.checkoutUrl);
+    } catch (err) {
+      setError(err.message || 'Unable to start Flutterwave checkout.');
+      setBusy(false);
+    }
+  }
+
+  async function cancelSubscription() {
+    if (!status?.subscription?.id) return;
+    if (!window.confirm('Cancel this subscription? If it is active, cancellation will take effect at the end of the current paid period.')) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const response = await fetch('/api/billing/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription_id: status.subscription.id })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Unable to cancel subscription.');
+      setMessage(data.message || 'Cancellation request received.');
+      await loadBilling();
+    } catch (err) {
+      setError(err.message || 'Unable to cancel subscription.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const subscription = status?.subscription;
+  const plan = status?.plan;
+  const dateText = value => value ? new Date(value).toLocaleString() : '—';
+  const money = (amount, currency = 'USD') => `${currency} ${Number(amount || 0).toFixed(2)}`;
+
+  return <>
+    <div className="welcome">
+      <div><h1>Billing & Subscription</h1><div className="muted">Manage your TradeLab AI subscription and recurring card payments.</div></div>
+      <div className="demo-badge">● SECURE CARD BILLING</div>
+    </div>
+    {error && <div className="card" role="alert" style={{borderColor:'#fb7185',color:'#fecdd3',marginBottom:15}}>{error}</div>}
+    {message && <div className="card" role="status" style={{borderColor:'#20d6a1',color:'#a7f3d0',marginBottom:15}}>{message}</div>}
+    {loading ? <div className="card empty">Loading billing information…</div> : <>
+      <div className="dashboard-grid">
+        <div className="card">
+          <div className="card-heading"><h3>TradeLab AI Hourly</h3><span className="tag">SUBSCRIPTION PLAN</span></div>
+          <div className="stat-value">{money(plan?.amount ?? 1, plan?.currency || 'USD')} <span style={{fontSize:13,fontWeight:400,color:'#8492a9'}}>/ hour</span></div>
+          <p className="muted" style={{lineHeight:1.7}}>Recurring card subscription. Your first payment is collected through Flutterwave checkout. Subsequent hourly charges are handled by Flutterwave under the recurring payment authorization.</p>
+          <div className="signal"><span>Payment method</span><strong>Card only</strong></div>
+          <div className="signal"><span>Billing interval</span><strong>Every hour</strong></div>
+          <div className="signal"><span>Payment provider</span><strong>Flutterwave</strong></div>
+          <div className="signal"><span>M-Pesa STK Push</span><strong>Not enabled</strong></div>
+          <div className="signal"><span>Deriv wallet deductions</span><strong>Not supported</strong></div>
+        </div>
+        <div className="card">
+          <div className="card-heading"><h3>Current subscription</h3><span className="tag">{subscription?.status?.toUpperCase() || 'NOT SUBSCRIBED'}</span></div>
+          <div className="signal"><span>Status</span><strong>{subscription?.status || 'No subscription'}</strong></div>
+          <div className="signal"><span>Provider</span><strong>{subscription?.paymentProvider || '—'}</strong></div>
+          <div className="signal"><span>Current period ends</span><strong>{dateText(subscription?.currentPeriodEnd)}</strong></div>
+          <div className="signal"><span>Next billing date</span><strong>{dateText(subscription?.nextBillingAt)}</strong></div>
+          {subscription?.cancelAtPeriodEnd ? <p className="muted">Cancellation is scheduled for the end of the current paid period.</p> : null}
+          {(subscription?.status === 'active' || subscription?.status === 'pending') && !subscription?.cancelAtPeriodEnd && <button className="sell-btn" style={{marginTop:15}} disabled={busy} onClick={cancelSubscription}>Cancel subscription</button>}
+          <button className="period-btn" style={{marginTop:12}} disabled={busy} onClick={loadBilling}>Refresh status</button>
+        </div>
+      </div>
+      {(!subscription || ['cancelled','failed','expired'].includes(subscription.status)) && <div className="card" style={{marginBottom:18}}>
+        <div className="card-heading"><h3>Start your subscription</h3><span className="tag">USD 1 / HOUR</span></div>
+        <p className="muted" style={{lineHeight:1.7}}>You will be redirected to Flutterwave's secure checkout to authorize recurring card payments. Your subscription becomes active only after the first payment is verified by our server.</p>
+        <label style={{display:'flex',alignItems:'flex-start',gap:10,color:'#cbd5e1',fontSize:12,lineHeight:1.7,margin:'18px 0'}}>
+          <input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)} style={{marginTop:3}}/>
+          I authorize TradeLab AI to initiate a USD 1 card payment and recurring USD 1 hourly charges through Flutterwave until I cancel. I understand that charges may continue automatically and that I can request cancellation from this page.
+        </label>
+        <button className="execute-btn" disabled={!consent || busy || !plan?.active} onClick={subscribe}>{busy ? 'Connecting to Flutterwave…' : 'Continue to secure card checkout'}</button>
+        {!plan?.active && <p className="muted" style={{marginTop:10}}>The subscription plan is currently unavailable. Please contact support.</p>}
+      </div>}
+      <div className="card">
+        <div className="card-heading"><h3>Payment history</h3><span className="muted">Latest 10 transactions</span></div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Status</th><th>Provider</th></tr></thead>
+          <tbody>{transactions.length === 0 ? <tr><td colSpan="5" className="empty">No subscription payments recorded yet.</td></tr> : transactions.map(tx=><tr key={tx.id}><td>{dateText(tx.paidAt || tx.createdAt)}</td><td>{tx.description || 'Subscription payment'}</td><td>{money(tx.amount,tx.currency)}</td><td><span className="tag">{String(tx.status || 'unknown').toUpperCase()}</span></td><td>{tx.provider || '—'}</td></tr>)}</tbody>
+        </table></div>
+      </div>
+    </>}
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -3017,7 +3156,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <DerivLivePanel/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <DerivLivePanel/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Billing & Subscription' ? <BillingSubscriptionPage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
