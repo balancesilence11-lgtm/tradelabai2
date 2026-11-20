@@ -53,7 +53,7 @@ const TIMEFRAME_OPTIONS = [
 
 const navigation = [
   { name: 'Dashboard', icon: LayoutDashboard },
-  { name: 'Market Analysis', icon: BarChart3 },
+{ name: 'Historical Data', icon: BarChart3 },  { name: 'Market Analysis', icon: BarChart3 },
   { name: 'Market Watch & Alerts', icon: Bell },
   { name: 'Economic Calendar', icon: CalendarDays },
   { name: 'News & Sentiment', icon: Newspaper },
