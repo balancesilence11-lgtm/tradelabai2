@@ -1,6 +1,6 @@
 import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import TradingViewChart from "./TradingViewChart";import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import {
+import JSZip from 'jszip';import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
   Moon, Radio, Settings, ShieldCheck, SlidersHorizontal, Sparkles,
