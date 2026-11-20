@@ -2990,11 +2990,280 @@ async function handleDeriv(request, env, url) {
 /* =========================================
    MAIN CLOUDFLARE WORKER ENTRY POINT
 ========================================= */
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    try {
+
+/* =========================================
+   CTRADER OAUTH HELPERS
+========================================= */
+
+const CTRADER_REDIRECT_URI =
+  "https://tradelabai2.balancesilence11.workers.dev/api/ctrader/callback";
+
+async function ctraderHash(value) {
+  const data = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+
+  return [...new Uint8Array(hash)]
+    .map(byte => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function ctraderEncrypt(value, secret) {
+  const encoder = new TextEncoder();
+
+  const keyData = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(secret)
+  );
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    keyData,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt"]
+  );
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder.encode(value)
+  );
+
+  const combined = new Uint8Array(iv.length + encrypted.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(encrypted), iv.length);
+
+  let binary = "";
+  combined.forEach(byte => {
+    binary += String.fromCharCode(byte);
+  });
+
+  return btoa(binary);
+}
+
+/* =========================================
+   CTRADER CONNECT
+========================================= */
+
+async function handleCTraderConnect(request, env, url) {
+  try {
+    const user = await getAuthenticatedUser(request, env);
+
+    if (!user) {
+      return json({ error: "Please log in first." }, 401);
+    }
+
+    if (!env.CTRADER_CLIENT_ID) {
+      return json({ error: "cTrader Client ID is missing." }, 500);
+    }
+
+    const stateBytes = crypto.getRandomValues(new Uint8Array(32));
+
+    let state = "";
+    stateBytes.forEach(byte => {
+      state += byte.toString(16).padStart(2, "0");
+    });
+
+    const stateHash = await ctraderHash(state);
+    const expiresAt = Math.floor(Date.now() / 1000) + 600;
+
+    await env.DB.prepare(`
+      INSERT INTO ctrader_oauth_states
+      (state_hash, user_id, expires_at)
+      VALUES (?, ?, ?)
+    `).bind(
+      stateHash,
+      user.id,
+      expiresAt
+    ).run();
+
+    const authorizationURL = new URL(
+      "https://id.ctrader.com/my/settings/openapi/grantingaccess/"
+    );
+
+    authorizationURL.searchParams.set(
+      "client_id",
+      env.CTRADER_CLIENT_ID
+    );
+
+    authorizationURL.searchParams.set(
+      "redirect_uri",
+      CTRADER_REDIRECT_URI
+    );
+
+    authorizationURL.searchParams.set("scope", "accounts");
+    authorizationURL.searchParams.set("product", "web");
+    authorizationURL.searchParams.set("state", state);
+
+    return Response.redirect(authorizationURL.toString(), 302);
+
+  } catch (error) {
+    console.error("cTrader connect error:", error);
+
+    return json({
+      error: "Unable to start cTrader authorization."
+    }, 500);
+  }
+}
+
+/* =========================================
+   CTRADER OAUTH CALLBACK
+========================================= */
+
+async function handleCTraderCallback(request, env, url) {
+  try {
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const oauthError = url.searchParams.get("error");
+
+    if (oauthError) {
+      return Response.redirect(
+        new URL("/?ctrader=denied", url.origin).toString(),
+        302
+      );
+    }
+
+    if (!code || !state) {
+      return json({
+        error: "Missing cTrader authorization code or state."
+      }, 400);
+    }
+
+    if (
+      !env.CTRADER_CLIENT_ID ||
+      !env.CTRADER_CLIENT_SECRET ||
+      !env.CTRADER_TOKEN_ENCRYPTION_KEY
+    ) {
+      return json({
+        error: "cTrader configuration is incomplete."
+      }, 500);
+    }
+
+    const stateHash = await ctraderHash(state);
+    const now = Math.floor(Date.now() / 1000);
+
+    const stateRecord = await env.DB.prepare(`
+      SELECT user_id, expires_at
+      FROM ctrader_oauth_states
+      WHERE state_hash = ?
+      LIMIT 1
+    `).bind(stateHash).first();
+
+    if (!stateRecord || stateRecord.expires_at < now) {
+      return json({
+        error: "Authorization session expired or invalid. Please reconnect."
+      }, 400);
+    }
+
+    await env.DB.prepare(`
+      DELETE FROM ctrader_oauth_states
+      WHERE state_hash = ?
+    `).bind(stateHash).run();
+
+    const tokenURL = new URL(
+      "https://openapi.ctrader.com/apps/token"
+    );
+
+    tokenURL.searchParams.set(
+      "grant_type",
+      "authorization_code"
+    );
+
+    tokenURL.searchParams.set("code", code);
+
+    tokenURL.searchParams.set(
+      "redirect_uri",
+      CTRADER_REDIRECT_URI
+    );
+
+    tokenURL.searchParams.set(
+      "client_id",
+      env.CTRADER_CLIENT_ID
+    );
+
+    tokenURL.searchParams.set(
+      "client_secret",
+      env.CTRADER_CLIENT_SECRET
+    );
+
+    const tokenResponse = await fetch(tokenURL.toString(), {
+      method: "GET",
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (
+      !tokenResponse.ok ||
+      !tokenData.accessToken ||
+      !tokenData.refreshToken
+    ) {
+      console.error(
+        "cTrader token exchange failed:",
+        tokenData.errorCode || tokenResponse.status
+      );
+
+      return json({
+        error: "cTrader authorization could not be completed."
+      }, 400);
+    }
+
+    const encryptedAccessToken = await ctraderEncrypt(
+      tokenData.accessToken,
+      env.CTRADER_TOKEN_ENCRYPTION_KEY
+    );
+
+    const encryptedRefreshToken = await ctraderEncrypt(
+      tokenData.refreshToken,
+      env.CTRADER_TOKEN_ENCRYPTION_KEY
+    );
+
+    const connectionId = crypto.randomUUID();
+
+    const expiresAt =
+      now + Number(tokenData.expiresIn || 2592000);
+
+    await env.DB.prepare(`
+      INSERT INTO ctrader_connections (
+        id,
+        user_id,
+        environment,
+        access_token,
+        refresh_token,
+        token_expires_at
+      )
+      VALUES (?, ?, 'demo', ?, ?, ?)
+    `).bind(
+      connectionId,
+      stateRecord.user_id,
+      encryptedAccessToken,
+      encryptedRefreshToken,
+      expiresAt
+    ).run();
+
+    return Response.redirect(
+      new URL("/?ctrader=connected", url.origin).toString(),
+      302
+    );
+
+  } catch (error) {
+    console.error("cTrader callback error:", error);
+
+    return json({
+      error: "Unable to complete cTrader connection."
+    }, 500);
+  }
+}
 /* =========================================
    CTRADER OAUTH CALLBACK
 ========================================= */
