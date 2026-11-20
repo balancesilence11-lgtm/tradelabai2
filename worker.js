@@ -2995,8 +2995,22 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+/* =========================================
+   CTRADER OAUTH CALLBACK
+========================================= */
 
-    try {
+if (
+  path === "/api/ctrader/callback" &&
+  request.method === "GET"
+) {
+  return await handleCTraderCallback(request, env, url);
+}
+ if (
+  path === "/api/ctrader/connect" &&
+  request.method === "GET"
+) {
+  return await handleCTraderConnect(request, env, url);
+}   try {
       /* HEALTH CHECK (kept compatible with the existing Worker) */
 
       if (path === "/api/health" && request.method === "GET") {
