@@ -1480,7 +1480,7 @@ async function handleMarket(request, env, url) {
    - Subscription entitlement enforcement
 ========================================= */
 
-const HISTORICAL_MAX_CANDLES = 100000;
+const HISTORICAL_MAX_CANDLES = 110000;
 const HISTORICAL_MAX_BATCH = 100;
 const HISTORICAL_MAX_BODY = 65536;
 
