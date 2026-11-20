@@ -2902,55 +2902,59 @@ function HistoricalDataPage() {
       .toLowerCase();
   }
 
-  function parseMT5CSV(text) {
-    const lines = text
-      .replace(/^\uFEFF/, "")
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(Boolean);
+ function parseMT5CSV(text) {
+  const lines = text
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
 
-    if (lines.length < 2) {
-      throw new Error("The CSV file contains insufficient data.");
-    }
+  if (!lines.length) {
+    throw new Error("CSV file is empty.");
+  }
 
-    const sample = lines.slice(0, 5).join("\n");
+  const sample = lines.slice(0, 5).join("\n");
 
-    const delimiters = ["\t", ";", ","].sort(
-      (a, b) =>
-        sample.split(b).length - sample.split(a).length
+  const delimiters = ["\t", ";", ","].sort(
+    (a, b) =>
+      sample.split(b).length - sample.split(a).length
+  );
+
+  const delimiter = delimiters[0];
+
+  const firstColumns = lines[0]
+    .split(delimiter)
+    .map(value => value.trim());
+
+  const hasHeader = firstColumns.some(value =>
+    /date|time|open|high|low|close|volume/i.test(value.replace(/[<>]/g, ""))
+  );
+
+  let dataStart = hasHeader ? 1 : 0;
+
+  let dateIndex = 0;
+  let timeIndex = -1;
+  let openIndex = 1;
+  let highIndex = 2;
+  let lowIndex = 3;
+  let closeIndex = 4;
+  let volumeIndex = 5;
+
+  if (hasHeader) {
+    const headers = firstColumns.map(value =>
+      value.replace(/[<>]/g, "").trim().toLowerCase()
     );
 
-    const delimiter = delimiters[0];
-
-    const headers = lines[0]
-      .split(delimiter)
-      .map(normalizeHeader);
-
     const findColumn = aliases =>
-      headers.findIndex(header =>
-        aliases.includes(header)
-      );
+      headers.findIndex(header => aliases.includes(header));
 
-    const dateIndex = findColumn([
-      "date",
-      "datetime",
-      "time",
-      "timestamp"
-    ]);
-
-    const timeIndex = findColumn(["time"]);
-
-    const openIndex = findColumn(["open"]);
-    const highIndex = findColumn(["high"]);
-    const lowIndex = findColumn(["low"]);
-    const closeIndex = findColumn(["close"]);
-
-    const volumeIndex = findColumn([
-      "tickvol",
-      "tick_volume",
-      "volume",
-      "vol"
-    ]);
+    dateIndex = findColumn(["date", "datetime", "timestamp", "time"]);
+    timeIndex = findColumn(["time"]);
+    openIndex = findColumn(["open"]);
+    highIndex = findColumn(["high"]);
+    lowIndex = findColumn(["low"]);
+    closeIndex = findColumn(["close"]);
+    volumeIndex = findColumn(["tickvol", "tick_volume", "volume", "vol"]);
 
     if (
       dateIndex < 0 ||
@@ -2959,119 +2963,111 @@ function HistoricalDataPage() {
       lowIndex < 0 ||
       closeIndex < 0
     ) {
-      throw new Error(
-        "MT5 columns not recognised. Required: DATE, TIME (if separate), OPEN, HIGH, LOW and CLOSE."
-      );
+      throw new Error("MT5 CSV headings could not be recognised.");
     }
+  }
 
-    function parseTimestamp(dateValue, timeValue) {
-      let date = String(dateValue || "").trim();
-      let time = String(timeValue || "").trim();
+  function parseTimestamp(dateValue, timeValue) {
+    const date = String(dateValue || "").trim();
+    const time = String(timeValue || "").trim();
 
-      if (date.includes("T")) {
-        const parsed = new Date(date);
+    const combined = time
+      ? `${date} ${time}`
+      : date;
 
-        return Number.isFinite(parsed.getTime())
-          ? parsed.toISOString()
-          : null;
-      }
-
-      const parts = date.match(
-        /^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/
-      );
-
-      if (!parts) return null;
-
-      const year = parts[1];
-      const month = parts[2].padStart(2, "0");
-      const day = parts[3].padStart(2, "0");
-
-      if (!time) time = "00:00:00";
-
-      if (/^\d{2}:\d{2}$/.test(time)) {
-        time += ":00";
-      }
-
-      const parsed = new Date(
-        `${year}-${month}-${day}T${time}Z`
-      );
-
-      return Number.isFinite(parsed.getTime())
-        ? parsed.toISOString()
-        : null;
-    }
-
-    const candles = [];
-    const seen = new Set();
-
-    for (let i = 1; i < lines.length; i++) {
-      const columns = lines[i].split(delimiter);
-
-      const timestamp = parseTimestamp(
-        columns[dateIndex],
-        timeIndex >= 0 && timeIndex !== dateIndex
-          ? columns[timeIndex]
-          : ""
-      );
-
-      const open = Number(columns[openIndex]);
-      const high = Number(columns[highIndex]);
-      const low = Number(columns[lowIndex]);
-      const close = Number(columns[closeIndex]);
-
-      const volume =
-        volumeIndex >= 0
-          ? Number(columns[volumeIndex] || 0)
-          : 0;
-
-      if (
-        !timestamp ||
-        !Number.isFinite(open) ||
-        !Number.isFinite(high) ||
-        !Number.isFinite(low) ||
-        !Number.isFinite(close) ||
-        !Number.isFinite(volume) ||
-        open <= 0 ||
-        high <= 0 ||
-        low <= 0 ||
-        close <= 0 ||
-        volume < 0 ||
-        high < Math.max(open, close, low) ||
-        low > Math.min(open, close, high)
-      ) {
-        continue;
-      }
-
-      if (seen.has(timestamp)) continue;
-      seen.add(timestamp);
-
-      candles.push({
-        timestamp,
-        open,
-        high,
-        low,
-        close,
-        volume
-      });
-    }
-
-    candles.sort(
-      (a, b) =>
-        new Date(a.timestamp) - new Date(b.timestamp)
+    const match = combined.match(
+      /^(\d{4})[./-](\d{1,2})[./-](\d{1,2})[ T]+(\d{1,2}):(\d{2})(?::(\d{2}))?$/
     );
 
-    if (!candles.length) {
-      throw new Error("No valid candle records were found.");
-    }
+    if (!match) return null;
 
-    if (candles.length > MAX_CANDLES) {
-      throw new Error(
-        `This dataset contains ${candles.length} candles. Maximum allowed is ${MAX_CANDLES}.`
-      );
-    }
+    const [, year, month, day, hour, minute, second] = match;
 
-    return candles;
+    const parsed = new Date(Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second || 0)
+    ));
+
+    return Number.isFinite(parsed.getTime())
+      ? parsed.toISOString()
+      : null;
   }
+
+  const candles = [];
+  const seen = new Set();
+
+  for (let i = dataStart; i < lines.length; i++) {
+    const columns = lines[i].split(delimiter);
+
+    const timestamp = parseTimestamp(
+      columns[dateIndex],
+      timeIndex >= 0 && timeIndex !== dateIndex
+        ? columns[timeIndex]
+        : ""
+    );
+
+    const open = Number(columns[openIndex]);
+    const high = Number(columns[highIndex]);
+    const low = Number(columns[lowIndex]);
+    const close = Number(columns[closeIndex]);
+
+    const volume = volumeIndex >= 0
+      ? Number(columns[volumeIndex] || 0)
+      : 0;
+
+    if (
+      !timestamp ||
+      !Number.isFinite(open) ||
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(close) ||
+      !Number.isFinite(volume) ||
+      open <= 0 ||
+      high <= 0 ||
+      low <= 0 ||
+      close <= 0 ||
+      volume < 0 ||
+      high < Math.max(open, close, low) ||
+      low > Math.min(open, close, high)
+    ) {
+      continue;
+    }
+
+    if (seen.has(timestamp)) continue;
+
+    seen.add(timestamp);
+
+    candles.push({
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      volume
+    });
+  }
+
+  candles.sort(
+    (a, b) =>
+      new Date(a.timestamp) - new Date(b.timestamp)
+  );
+
+  if (!candles.length) {
+    throw new Error("No valid MT5 candle records found.");
+  }
+
+  if (candles.length > MAX_CANDLES) {
+    throw new Error(
+      `Maximum ${MAX_CANDLES} candles allowed per dataset.`
+    );
+  }
+
+  return candles;
+}
 
   function inferFileDetails(fileName) {
     const name = fileName
