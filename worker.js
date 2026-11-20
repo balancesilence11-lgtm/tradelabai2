@@ -450,6 +450,19 @@ async function logBillingEvent(
 async function getSubscriptionEntitlement(env, user) {
   if (!user?.id) return { active: false, reason: "unauthenticated" };
 
+  // TradeLab AI owner receives permanent lifetime access.
+  // Customer subscription checks below remain unchanged.
+  const ownerEmail = String(env.ADMIN_EMAIL || "").trim().toLowerCase();
+  const userEmail = String(user.email || "").trim().toLowerCase();
+
+  if (ownerEmail && userEmail === ownerEmail) {
+    return {
+      active: true,
+      reason: "owner_lifetime",
+      subscription: null
+    };
+  }
+
   const subscription = await env.DB.prepare(`
     SELECT s.id, s.plan_id, s.status, s.current_period_end,
            s.grace_period_end, s.cancel_at_period_end, p.active AS plan_active
