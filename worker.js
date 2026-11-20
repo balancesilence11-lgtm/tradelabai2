@@ -2471,7 +2471,11 @@ export default {
 
         if (marketResponse) return marketResponse;
       }
+ /* HISTORICAL DATA IMPORT ROUTES */
 
+      if (path.startsWith("/api/historical/")) {
+        return await handleHistoricalData(request, env, url);
+      }
       /* UNKNOWN API ROUTES */
 
       if (path.startsWith("/api/")) {
