@@ -1471,7 +1471,589 @@ async function handleMarket(request, env, url) {
 
   return null;
 }
+/* =========================================
+   HISTORICAL DATA IMPORT ENGINE
+   - MT5 historical candle storage
+   - Cloudflare D1 database
+   - CSV/ZIP data uploaded in batches
+   - Dataset ownership protection
+   - Subscription entitlement enforcement
+========================================= */
 
+const HISTORICAL_MAX_CANDLES = 100000;
+const HISTORICAL_MAX_BATCH = 100;
+const HISTORICAL_MAX_BODY = 65536;
+
+const HISTORICAL_TIMEFRAMES = new Set([
+  "M1", "M5", "M15", "M30",
+  "H1", "H4", "D1", "W1", "MN1"
+]);
+
+function historicalError(message, status = 400) {
+  return json({
+    ok: false,
+    error: message
+  }, status);
+}
+
+async function historicalReadJson(request) {
+  const contentLength = Number(
+    request.headers.get("Content-Length") || 0
+  );
+
+  if (contentLength > HISTORICAL_MAX_BODY) {
+    throw new Error("Request too large");
+  }
+
+  const text = await request.text();
+
+  if (text.length > HISTORICAL_MAX_BODY) {
+    throw new Error("Request too large");
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Invalid JSON request");
+  }
+}
+
+function historicalNormalizeTimestamp(value) {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString();
+}
+
+function historicalValidateCandle(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+
+  const timestamp = historicalNormalizeTimestamp(
+    item.timestamp || item.time || item.datetime
+  );
+
+  const open = Number(item.open);
+  const high = Number(item.high);
+  const low = Number(item.low);
+  const close = Number(item.close);
+  const volume = Number(item.volume ?? 0);
+
+  if (!timestamp) return null;
+
+  if (
+    !Number.isFinite(open) ||
+    !Number.isFinite(high) ||
+    !Number.isFinite(low) ||
+    !Number.isFinite(close) ||
+    !Number.isFinite(volume)
+  ) {
+    return null;
+  }
+
+  if (
+    open <= 0 ||
+    high <= 0 ||
+    low <= 0 ||
+    close <= 0 ||
+    volume < 0
+  ) {
+    return null;
+  }
+
+  if (
+    high < Math.max(open, close, low) ||
+    low > Math.min(open, close, high)
+  ) {
+    return null;
+  }
+
+  return {
+    timestamp,
+    open,
+    high,
+    low,
+    close,
+    volume
+  };
+}
+
+async function handleHistoricalData(request, env, url) {
+
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return historicalError("Authentication required", 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(env, user);
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  const path = url.pathname;
+  const method = request.method;
+
+  /* =====================================
+     START DATASET IMPORT
+  ===================================== */
+
+  if (
+    path === "/api/historical/import/start" &&
+    method === "POST"
+  ) {
+
+    if (!validOrigin(request, url)) {
+      return historicalError("Invalid request origin", 403);
+    }
+
+    let body;
+
+    try {
+      body = await historicalReadJson(request);
+    } catch (error) {
+      return historicalError(error.message);
+    }
+
+    const symbol = String(body.symbol || "")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+
+    const timeframe = String(body.timeframe || "")
+      .toUpperCase()
+      .trim();
+
+    const fileName = String(body.fileName || "MT5 import")
+      .slice(0, 200);
+
+    if (!/^[A-Z0-9]{3,20}$/.test(symbol)) {
+      return historicalError("Invalid trading symbol");
+    }
+
+    if (!HISTORICAL_TIMEFRAMES.has(timeframe)) {
+      return historicalError("Unsupported timeframe");
+    }
+
+    const existing = await env.DB.prepare(`
+      SELECT COUNT(*) AS total
+      FROM historical_datasets
+      WHERE user_id = ?
+        AND status = 'pending'
+    `).bind(user.id).first();
+
+    if (Number(existing?.total || 0) >= 5) {
+      return historicalError(
+        "You have too many unfinished imports. Complete or remove an existing import first.",
+        429
+      );
+    }
+
+    const datasetId = randomId(16);
+
+    await env.DB.prepare(`
+      INSERT INTO historical_datasets (
+        id,
+        user_id,
+        symbol,
+        timeframe,
+        source,
+        file_name,
+        candle_count,
+        status
+      )
+      VALUES (?, ?, ?, ?, 'MT5', ?, 0, 'pending')
+    `).bind(
+      datasetId,
+      user.id,
+      symbol,
+      timeframe,
+      fileName
+    ).run();
+
+    return json({
+      ok: true,
+      message: "Historical dataset created",
+      datasetId,
+      symbol,
+      timeframe,
+      status: "pending",
+      maximumCandles: HISTORICAL_MAX_CANDLES,
+      maximumBatchSize: HISTORICAL_MAX_BATCH
+    });
+  }
+
+  /* =====================================
+     UPLOAD CANDLE BATCH
+  ===================================== */
+
+  if (
+    path === "/api/historical/import/chunk" &&
+    method === "POST"
+  ) {
+
+    if (!validOrigin(request, url)) {
+      return historicalError("Invalid request origin", 403);
+    }
+
+    let body;
+
+    try {
+      body = await historicalReadJson(request);
+    } catch (error) {
+      return historicalError(error.message);
+    }
+
+    const datasetId = String(body.datasetId || "");
+    const candles = body.candles;
+
+    if (!/^[a-f0-9]{32}$/.test(datasetId)) {
+      return historicalError("Invalid dataset ID");
+    }
+
+    if (
+      !Array.isArray(candles) ||
+      candles.length < 1 ||
+      candles.length > HISTORICAL_MAX_BATCH
+    ) {
+      return historicalError(
+        `Batch must contain between 1 and ${HISTORICAL_MAX_BATCH} candles`
+      );
+    }
+
+    const dataset = await env.DB.prepare(`
+      SELECT id, status, candle_count
+      FROM historical_datasets
+      WHERE id = ?
+        AND user_id = ?
+    `).bind(datasetId, user.id).first();
+
+    if (!dataset) {
+      return historicalError("Dataset not found", 404);
+    }
+
+    if (dataset.status !== "pending") {
+      return historicalError("Dataset is not accepting uploads", 409);
+    }
+
+    const currentCount = Number(dataset.candle_count || 0);
+
+    if (
+      currentCount + candles.length >
+      HISTORICAL_MAX_CANDLES
+    ) {
+      return historicalError(
+        `Maximum ${HISTORICAL_MAX_CANDLES} candles allowed per dataset`
+      );
+    }
+
+    const validated = candles.map(historicalValidateCandle);
+
+    if (validated.some(candle => candle === null)) {
+      return historicalError(
+        "Batch contains invalid candle data"
+      );
+    }
+
+    const statements = validated.map(candle =>
+      env.DB.prepare(`
+        INSERT OR IGNORE INTO historical_candles (
+          dataset_id,
+          timestamp,
+          open,
+          high,
+          low,
+          close,
+          volume
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        datasetId,
+        candle.timestamp,
+        candle.open,
+        candle.high,
+        candle.low,
+        candle.close,
+        candle.volume
+      )
+    );
+
+    await env.DB.batch(statements);
+
+    const result = await env.DB.prepare(`
+      SELECT COUNT(*) AS total
+      FROM historical_candles
+      WHERE dataset_id = ?
+    `).bind(datasetId).first();
+
+    const savedCount = Number(result?.total || 0);
+
+    if (savedCount > HISTORICAL_MAX_CANDLES) {
+      return historicalError("Dataset candle limit exceeded", 413);
+    }
+
+    await env.DB.prepare(`
+      UPDATE historical_datasets
+      SET candle_count = ?
+      WHERE id = ?
+        AND user_id = ?
+        AND status = 'pending'
+    `).bind(
+      savedCount,
+      datasetId,
+      user.id
+    ).run();
+
+    return json({
+      ok: true,
+      datasetId,
+      received: candles.length,
+      stored: savedCount,
+      status: "uploading"
+    });
+  }
+
+  /* =====================================
+     COMPLETE DATASET IMPORT
+  ===================================== */
+
+  if (
+    path === "/api/historical/import/complete" &&
+    method === "POST"
+  ) {
+
+    if (!validOrigin(request, url)) {
+      return historicalError("Invalid request origin", 403);
+    }
+
+    let body;
+
+    try {
+      body = await historicalReadJson(request);
+    } catch (error) {
+      return historicalError(error.message);
+    }
+
+    const datasetId = String(body.datasetId || "");
+
+    if (!/^[a-f0-9]{32}$/.test(datasetId)) {
+      return historicalError("Invalid dataset ID");
+    }
+
+    const dataset = await env.DB.prepare(`
+      SELECT id, status
+      FROM historical_datasets
+      WHERE id = ?
+        AND user_id = ?
+    `).bind(datasetId, user.id).first();
+
+    if (!dataset) {
+      return historicalError("Dataset not found", 404);
+    }
+
+    if (dataset.status === "complete") {
+      return json({
+        ok: true,
+        message: "Dataset already completed",
+        datasetId
+      });
+    }
+
+    if (dataset.status !== "pending") {
+      return historicalError("Dataset cannot be completed", 409);
+    }
+
+    const stats = await env.DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        MIN(timestamp) AS first_timestamp,
+        MAX(timestamp) AS last_timestamp
+      FROM historical_candles
+      WHERE dataset_id = ?
+    `).bind(datasetId).first();
+
+    const count = Number(stats?.total || 0);
+
+    if (count < 1) {
+      return historicalError("No candles have been imported");
+    }
+
+    await env.DB.prepare(`
+      UPDATE historical_datasets
+      SET
+        candle_count = ?,
+        first_timestamp = ?,
+        last_timestamp = ?,
+        status = 'complete'
+      WHERE id = ?
+        AND user_id = ?
+    `).bind(
+      count,
+      stats.first_timestamp,
+      stats.last_timestamp,
+      datasetId,
+      user.id
+    ).run();
+
+    return json({
+      ok: true,
+      message: "Historical import completed successfully",
+      datasetId,
+      candleCount: count,
+      firstTimestamp: stats.first_timestamp,
+      lastTimestamp: stats.last_timestamp,
+      status: "complete"
+    });
+  }
+
+  /* =====================================
+     LIST USER DATASETS
+  ===================================== */
+
+  if (
+    path === "/api/historical/datasets" &&
+    method === "GET"
+  ) {
+
+    const result = await env.DB.prepare(`
+      SELECT
+        id,
+        symbol,
+        timeframe,
+        source,
+        file_name,
+        candle_count,
+        first_timestamp,
+        last_timestamp,
+        status,
+        created_at
+      FROM historical_datasets
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).bind(user.id).all();
+
+    return json({
+      ok: true,
+      datasets: result.results || []
+    });
+  }
+
+  /* =====================================
+     RETRIEVE HISTORICAL CANDLES
+  ===================================== */
+
+  if (
+    path === "/api/historical/candles" &&
+    method === "GET"
+  ) {
+
+    const datasetId = url.searchParams.get("datasetId");
+
+    if (!datasetId || !/^[a-f0-9]{32}$/.test(datasetId)) {
+      return historicalError("Invalid dataset ID");
+    }
+
+    const dataset = await env.DB.prepare(`
+      SELECT id, symbol, timeframe, candle_count, status
+      FROM historical_datasets
+      WHERE id = ?
+        AND user_id = ?
+    `).bind(datasetId, user.id).first();
+
+    if (!dataset) {
+      return historicalError("Dataset not found", 404);
+    }
+
+    if (dataset.status !== "complete") {
+      return historicalError("Dataset import is not complete", 409);
+    }
+
+    const requestedLimit = Number(
+      url.searchParams.get("limit") || 1000
+    );
+
+    const limit = Math.min(
+      5000,
+      Math.max(
+        1,
+        Number.isFinite(requestedLimit)
+          ? Math.floor(requestedLimit)
+          : 1000
+      )
+    );
+
+    const before = url.searchParams.get("before");
+
+    let query;
+    let result;
+
+    if (before) {
+      const timestamp = historicalNormalizeTimestamp(before);
+
+      if (!timestamp) {
+        return historicalError("Invalid before timestamp");
+      }
+
+      query = `
+        SELECT timestamp, open, high, low, close, volume
+        FROM historical_candles
+        WHERE dataset_id = ?
+          AND timestamp < ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `;
+
+      result = await env.DB.prepare(query)
+        .bind(datasetId, timestamp, limit)
+        .all();
+
+    } else {
+      query = `
+        SELECT timestamp, open, high, low, close, volume
+        FROM historical_candles
+        WHERE dataset_id = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `;
+
+      result = await env.DB.prepare(query)
+        .bind(datasetId, limit)
+        .all();
+    }
+
+    const candles = (result.results || [])
+      .reverse()
+      .map(item => ({
+        time: item.timestamp,
+        open: item.open,
+        high: item.high,
+        low: item.low,
+        close: item.close,
+        volume: item.volume
+      }));
+
+    return json({
+      ok: true,
+      datasetId,
+      symbol: dataset.symbol,
+      timeframe: dataset.timeframe,
+      totalCandles: dataset.candle_count,
+      returnedCandles: candles.length,
+      candles
+    });
+  }
+
+  return historicalError("Historical API route not found", 404);
+}
 /* =========================================
    DERIV OAUTH CONNECTION (AUTHORIZATION CODE + PKCE)
 ========================================= */
