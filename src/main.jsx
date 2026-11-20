@@ -2835,7 +2835,643 @@ function BillingSubscriptionPage() {
     </>}
   </>;
 }
+/* =========================================
+   HISTORICAL DATA IMPORT PAGE
+========================================= */
 
+function HistoricalDataPage() {
+  const [files, setFiles] = React.useState([]);
+  const [symbol, setSymbol] = React.useState("EURUSD");
+  const [timeframe, setTimeframe] = React.useState("M15");
+  const [progress, setProgress] = React.useState(0);
+  const [status, setStatus] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [datasets, setDatasets] = React.useState([]);
+  const [error, setError] = React.useState("");
+
+  const MAX_CANDLES = 110000;
+  const BATCH_SIZE = 100;
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      credentials: "include",
+      ...options
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || result.ok === false) {
+      throw new Error(result.error || "Request failed");
+    }
+
+    return result;
+  }
+
+  async function loadDatasets() {
+    try {
+      const result = await api("/api/historical/datasets");
+      setDatasets(result.datasets || []);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  React.useEffect(() => {
+    loadDatasets();
+  }, []);
+
+  function decodeFile(buffer) {
+    const bytes = new Uint8Array(buffer);
+
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return new TextDecoder("utf-16le").decode(buffer);
+    }
+
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return new TextDecoder("utf-16be").decode(buffer);
+    }
+
+    return new TextDecoder("utf-8").decode(buffer);
+  }
+
+  function normalizeHeader(value) {
+    return String(value || "")
+      .replace(/^\uFEFF/, "")
+      .replace(/[<>]/g, "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function parseMT5CSV(text) {
+    const lines = text
+      .replace(/^\uFEFF/, "")
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    if (lines.length < 2) {
+      throw new Error("The CSV file contains insufficient data.");
+    }
+
+    const sample = lines.slice(0, 5).join("\n");
+
+    const delimiters = ["\t", ";", ","].sort(
+      (a, b) =>
+        sample.split(b).length - sample.split(a).length
+    );
+
+    const delimiter = delimiters[0];
+
+    const headers = lines[0]
+      .split(delimiter)
+      .map(normalizeHeader);
+
+    const findColumn = aliases =>
+      headers.findIndex(header =>
+        aliases.includes(header)
+      );
+
+    const dateIndex = findColumn([
+      "date",
+      "datetime",
+      "time",
+      "timestamp"
+    ]);
+
+    const timeIndex = findColumn(["time"]);
+
+    const openIndex = findColumn(["open"]);
+    const highIndex = findColumn(["high"]);
+    const lowIndex = findColumn(["low"]);
+    const closeIndex = findColumn(["close"]);
+
+    const volumeIndex = findColumn([
+      "tickvol",
+      "tick_volume",
+      "volume",
+      "vol"
+    ]);
+
+    if (
+      dateIndex < 0 ||
+      openIndex < 0 ||
+      highIndex < 0 ||
+      lowIndex < 0 ||
+      closeIndex < 0
+    ) {
+      throw new Error(
+        "MT5 columns not recognised. Required: DATE, TIME (if separate), OPEN, HIGH, LOW and CLOSE."
+      );
+    }
+
+    function parseTimestamp(dateValue, timeValue) {
+      let date = String(dateValue || "").trim();
+      let time = String(timeValue || "").trim();
+
+      if (date.includes("T")) {
+        const parsed = new Date(date);
+
+        return Number.isFinite(parsed.getTime())
+          ? parsed.toISOString()
+          : null;
+      }
+
+      const parts = date.match(
+        /^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/
+      );
+
+      if (!parts) return null;
+
+      const year = parts[1];
+      const month = parts[2].padStart(2, "0");
+      const day = parts[3].padStart(2, "0");
+
+      if (!time) time = "00:00:00";
+
+      if (/^\d{2}:\d{2}$/.test(time)) {
+        time += ":00";
+      }
+
+      const parsed = new Date(
+        `${year}-${month}-${day}T${time}Z`
+      );
+
+      return Number.isFinite(parsed.getTime())
+        ? parsed.toISOString()
+        : null;
+    }
+
+    const candles = [];
+    const seen = new Set();
+
+    for (let i = 1; i < lines.length; i++) {
+      const columns = lines[i].split(delimiter);
+
+      const timestamp = parseTimestamp(
+        columns[dateIndex],
+        timeIndex >= 0 && timeIndex !== dateIndex
+          ? columns[timeIndex]
+          : ""
+      );
+
+      const open = Number(columns[openIndex]);
+      const high = Number(columns[highIndex]);
+      const low = Number(columns[lowIndex]);
+      const close = Number(columns[closeIndex]);
+
+      const volume =
+        volumeIndex >= 0
+          ? Number(columns[volumeIndex] || 0)
+          : 0;
+
+      if (
+        !timestamp ||
+        !Number.isFinite(open) ||
+        !Number.isFinite(high) ||
+        !Number.isFinite(low) ||
+        !Number.isFinite(close) ||
+        !Number.isFinite(volume) ||
+        open <= 0 ||
+        high <= 0 ||
+        low <= 0 ||
+        close <= 0 ||
+        volume < 0 ||
+        high < Math.max(open, close, low) ||
+        low > Math.min(open, close, high)
+      ) {
+        continue;
+      }
+
+      if (seen.has(timestamp)) continue;
+      seen.add(timestamp);
+
+      candles.push({
+        timestamp,
+        open,
+        high,
+        low,
+        close,
+        volume
+      });
+    }
+
+    candles.sort(
+      (a, b) =>
+        new Date(a.timestamp) - new Date(b.timestamp)
+    );
+
+    if (!candles.length) {
+      throw new Error("No valid candle records were found.");
+    }
+
+    if (candles.length > MAX_CANDLES) {
+      throw new Error(
+        `This dataset contains ${candles.length} candles. Maximum allowed is ${MAX_CANDLES}.`
+      );
+    }
+
+    return candles;
+  }
+
+  function inferFileDetails(fileName) {
+    const name = fileName
+      .split("/")
+      .pop()
+      .replace(/\.[^.]+$/, "")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+
+    const tfMatch = name.match(
+      /(MN1|W1|D1|H4|H1|M30|M15|M5|M1)$/
+    );
+
+    const detectedTimeframe = tfMatch
+      ? tfMatch[1]
+      : timeframe;
+
+    const withoutTimeframe = tfMatch
+      ? name.slice(0, -tfMatch[1].length)
+      : name;
+
+    const pairMatch = withoutTimeframe.match(
+      /([A-Z]{6})/
+    );
+
+    return {
+      symbol: pairMatch ? pairMatch[1] : symbol,
+      timeframe: detectedTimeframe
+    };
+  }
+
+  async function uploadDataset(fileName, text) {
+    const details = inferFileDetails(fileName);
+
+    setStatus(`Reading ${fileName}...`);
+
+    const candles = parseMT5CSV(text);
+
+    setStatus(
+      `Preparing ${details.symbol} ${details.timeframe}: ${candles.length.toLocaleString()} candles`
+    );
+
+    const started = await api(
+      "/api/historical/import/start",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          symbol: details.symbol,
+          timeframe: details.timeframe,
+          fileName
+        })
+      }
+    );
+
+    const datasetId = started.datasetId;
+
+    for (
+      let offset = 0;
+      offset < candles.length;
+      offset += BATCH_SIZE
+    ) {
+      const batch = candles.slice(
+        offset,
+        offset + BATCH_SIZE
+      );
+
+      await api("/api/historical/import/chunk", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          datasetId,
+          candles: batch
+        })
+      });
+
+      const completed = Math.min(
+        offset + batch.length,
+        candles.length
+      );
+
+      setProgress(
+        Math.round((completed / candles.length) * 100)
+      );
+
+      setStatus(
+        `Uploading ${details.symbol}: ${completed.toLocaleString()} / ${candles.length.toLocaleString()} candles`
+      );
+    }
+
+    await api("/api/historical/import/complete", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ datasetId })
+    });
+
+    setStatus(
+      `${details.symbol} ${details.timeframe} imported successfully.`
+    );
+
+    return datasetId;
+  }
+
+  async function processFiles() {
+    if (!files.length) {
+      setError("Select at least one CSV or ZIP file.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setProgress(0);
+
+    try {
+      for (const file of files) {
+        if (file.name.toLowerCase().endsWith(".zip")) {
+          setStatus(`Opening ZIP archive: ${file.name}`);
+
+          const zip = await JSZip.loadAsync(file);
+
+          const csvFiles = Object.values(zip.files)
+            .filter(entry =>
+              !entry.dir &&
+              entry.name.toLowerCase().endsWith(".csv")
+            )
+            .sort((a, b) =>
+              a.name.localeCompare(b.name)
+            );
+
+          if (!csvFiles.length) {
+            throw new Error(
+              `No CSV files found inside ${file.name}.`
+            );
+          }
+
+          for (const entry of csvFiles) {
+            const text = await entry.async("text");
+
+            await uploadDataset(entry.name, text);
+          }
+
+        } else if (
+          file.name.toLowerCase().endsWith(".csv")
+        ) {
+          const buffer = await file.arrayBuffer();
+          const text = decodeFile(buffer);
+
+          await uploadDataset(file.name, text);
+
+        } else {
+          throw new Error(
+            `Unsupported file: ${file.name}. Select CSV or ZIP.`
+          );
+        }
+      }
+
+      setStatus("All selected files imported successfully.");
+      setProgress(100);
+
+      await loadDatasets();
+
+    } catch (err) {
+      setError(err.message);
+      setStatus("Import stopped.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="welcome">
+        <div>
+          <h1>Historical Data Import</h1>
+          <div className="muted">
+            Import MT5 historical candles into your TradeLab AI database.
+          </div>
+        </div>
+        <div className="demo-badge">
+          ● MT5 DATA IMPORT
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Upload Historical Market Data</h2>
+
+        <p className="muted">
+          Select individual MT5 CSV files or a ZIP archive
+          containing multiple currency-pair CSV files.
+        </p>
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+          gap: 14,
+          marginTop: 20
+        }}>
+          <label>
+            <span className="muted">Default symbol</span>
+            <input
+              value={symbol}
+              onChange={e => setSymbol(
+                e.target.value.toUpperCase()
+              )}
+              disabled={busy}
+              placeholder="EURUSD"
+              style={{
+                display: "block",
+                width: "100%",
+                padding: 12,
+                marginTop: 7
+              }}
+            />
+          </label>
+
+          <label>
+            <span className="muted">Default timeframe</span>
+            <select
+              value={timeframe}
+              onChange={e => setTimeframe(e.target.value)}
+              disabled={busy}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: 12,
+                marginTop: 7
+              }}
+            >
+              {[
+                "M1", "M5", "M15", "M30",
+                "H1", "H4", "D1", "W1", "MN1"
+              ].map(value => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div style={{ marginTop: 22 }}>
+          <input
+            type="file"
+            accept=".csv,.zip"
+            multiple
+            disabled={busy}
+            onChange={e => {
+              setFiles(Array.from(e.target.files || []));
+              setError("");
+              setProgress(0);
+              setStatus("");
+            }}
+          />
+        </div>
+
+        {files.length > 0 && (
+          <div style={{ marginTop: 15 }}>
+            <strong>Selected files</strong>
+
+            {files.map((file, index) => (
+              <div key={index} className="muted" style={{
+                padding: "5px 0"
+              }}>
+                {file.name} · {(file.size / 1024 / 1024).toFixed(2)} MB
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop: 22 }}>
+          <button
+            className="primary-btn"
+            onClick={processFiles}
+            disabled={busy || !files.length}
+          >
+            {busy ? "Importing..." : "Start Historical Import"}
+          </button>
+        </div>
+
+        {(busy || progress > 0) && (
+          <div style={{ marginTop: 20 }}>
+            <div style={{
+              height: 10,
+              background: "#263447",
+              borderRadius: 10,
+              overflow: "hidden"
+            }}>
+              <div style={{
+                width: `${progress}%`,
+                height: "100%",
+                background: "#20d6a1",
+                transition: "width 0.2s"
+              }} />
+            </div>
+
+            <p className="muted">
+              {progress}% complete
+            </p>
+          </div>
+        )}
+
+        {status && (
+          <p style={{
+            color: "#20d6a1",
+            marginTop: 15
+          }}>
+            {status}
+          </p>
+        )}
+
+        {error && (
+          <p style={{
+            color: "#ff6b6b",
+            marginTop: 15
+          }}>
+            {error}
+          </p>
+        )}
+
+        <div className="muted" style={{
+          marginTop: 20,
+          lineHeight: 1.7
+        }}>
+          Maximum: 110,000 candles per dataset.<br/>
+          Supported formats: MT5 CSV and ZIP containing CSV files.<br/>
+          Uploads are sent in batches of 100 candles.<br/>
+          MT5 timestamps without timezone information are interpreted as UTC.
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 20 }}>
+        <div className="card-heading">
+          <h3>Imported Historical Datasets</h3>
+
+          <button
+            onClick={loadDatasets}
+            disabled={busy}
+          >
+            Refresh
+          </button>
+        </div>
+
+        {datasets.length === 0 ? (
+          <p className="muted">
+            No completed historical datasets found.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse"
+            }}>
+              <thead>
+                <tr>
+                  <th align="left">Symbol</th>
+                  <th align="left">Timeframe</th>
+                  <th align="left">Candles</th>
+                  <th align="left">First date</th>
+                  <th align="left">Last date</th>
+                  <th align="left">Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {datasets.map(dataset => (
+                  <tr key={dataset.id}>
+                    <td>{dataset.symbol}</td>
+                    <td>{dataset.timeframe}</td>
+                    <td>
+                      {Number(
+                        dataset.candle_count || 0
+                      ).toLocaleString()}
+                    </td>
+                    <td>
+                      {dataset.first_timestamp
+                        ? dataset.first_timestamp.slice(0, 10)
+                        : "—"}
+                    </td>
+                    <td>
+                      {dataset.last_timestamp
+                        ? dataset.last_timestamp.slice(0, 10)
+                        : "—"}
+                    </td>
+                    <td>{dataset.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
