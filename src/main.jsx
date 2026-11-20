@@ -3210,7 +3210,14 @@ function HistoricalDataPage() {
           }
 
           for (const entry of csvFiles) {
-            const text = await entry.async("text");
+            const fileBytes = await entry.async("uint8array");
+
+const fileBuffer = fileBytes.buffer.slice(
+  fileBytes.byteOffset,
+  fileBytes.byteOffset + fileBytes.byteLength
+);
+
+const text = decodeFile(fileBuffer);
 
             await uploadDataset(entry.name, text);
           }
