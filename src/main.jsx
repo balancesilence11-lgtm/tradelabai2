@@ -3368,7 +3368,114 @@ function HistoricalDataPage() {
 
   const MAX_CANDLES = 110000;
   const BATCH_SIZE = 100;
+ // TradeLab AI local historical data storage
+  const HISTORICAL_DB = "TradeLabAI_HistoricalData";
+  const HISTORICAL_DB_VERSION = 1;
 
+  function openHistoricalDB() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(
+        HISTORICAL_DB,
+        HISTORICAL_DB_VERSION
+      );
+
+      request.onupgradeneeded = event => {
+        const db = event.target.result;
+
+        if (!db.objectStoreNames.contains("datasets")) {
+          db.createObjectStore("datasets", {
+            keyPath: "id"
+          });
+        }
+
+        if (!db.objectStoreNames.contains("candles")) {
+          const store = db.createObjectStore("candles", {
+            keyPath: ["dataset_id", "timestamp"]
+          });
+
+          store.createIndex(
+            "dataset_id",
+            "dataset_id",
+            { unique: false }
+          );
+        }
+      };
+
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function saveLocalDataset(dataset) {
+    const db = await openHistoricalDB();
+
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(
+          ["datasets"],
+          "readwrite"
+        );
+
+        transaction.objectStore("datasets").put(dataset);
+
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function saveLocalCandles(datasetId, candles) {
+    const db = await openHistoricalDB();
+
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(
+          ["candles"],
+          "readwrite"
+        );
+
+        const store = transaction.objectStore("candles");
+
+        candles.forEach(candle => {
+          store.put({
+            dataset_id: datasetId,
+            ...candle
+          });
+        });
+
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function getLocalDatasets() {
+    const db = await openHistoricalDB();
+
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = db.transaction(
+          ["datasets"],
+          "readonly"
+        );
+
+        const request = transaction
+          .objectStore("datasets")
+          .getAll();
+
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
   async function api(path, options = {}) {
     const response = await fetch(path, {
       credentials: "include",
