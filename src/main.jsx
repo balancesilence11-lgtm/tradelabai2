@@ -302,82 +302,599 @@ function IndicatorSuite({candles,symbol}){
 }
 
 
-// Transparent rules-based analysis engine. It combines live-feed candles with
-// technical studies; the score is confluence, not a machine-learning probability.
+// TradeLab AI Advanced Signals Engine V1
+// Transparent, candle-based analysis. Confluence is NOT win probability.
 function AIAnalysisPanel({ candles, symbol, timeframe }) {
-  const analysis = useMemo(() => {
-    if (!candles || candles.length < 60) return { ready:false, reason:`At least 60 candles are required. Currently available: ${candles?.length || 0}.` };
-    const closes = candles.map(c => Number(c.close));
-    const ema20 = calcEMA(closes,20), ema50 = calcEMA(closes,50), ema200 = calcEMA(closes,200);
-    const rsi = calcRSI(closes,14), macd = calcMACD(closes), atr = calcATR(candles,14), adx = calcADX(candles,14);
-    const last = a => { for(let i=a.length-1;i>=0;i--) if(a[i] != null && Number.isFinite(a[i])) return a[i]; return null; };
-    const price = closes.at(-1), e20=last(ema20), e50=last(ema50), e200=last(ema200);
-    const rv=last(rsi), ml=last(macd.line), ms=last(macd.signal), av=last(adx), at=last(atr);
-    const swings = detectSwingPoints(candles.slice(-180));
-    const structure = detectMarketStructure(candles.slice(-180), swings);
-    const levels = detectSupportResistance(candles.slice(-180));
-    const recentEvent = structure.event && structure.event.index >= Math.max(0,180-30) ? structure.event : null;
-    const votes = [];
-    if(e20!=null && e50!=null) votes.push({name:'EMA 20 / 50 alignment',dir:e20>e50?1:-1,detail:e20>e50?'EMA 20 is above EMA 50':'EMA 20 is below EMA 50'});
-    if(e200!=null) votes.push({name:'EMA 200 trend filter',dir:price>e200?1:-1,detail:price>e200?'Price is above EMA 200':'Price is below EMA 200'});
-    if(ml!=null && ms!=null) votes.push({name:'MACD momentum',dir:ml>ms?1:ml<ms?-1:0,detail:ml>ms?'MACD is above its signal line':ml<ms?'MACD is below its signal line':'MACD and signal are equal'});
-    if(rv!=null) votes.push({name:'RSI momentum',dir:rv>52?1:rv<48?-1:0,detail:`RSI is ${rv.toFixed(1)}${rv>=70?' (overbought zone)':rv<=30?' (oversold zone)':''}`});
-    if(recentEvent) votes.push({name:'Market structure',dir:recentEvent.direction,detail:recentEvent.label+' detected recently'});
-    const score = votes.reduce((sum,v)=>sum+v.dir,0);
-    const maxVotes = votes.length;
-    const direction = score>=2?'BUY':score<=-2?'SELL':'WAIT';
-    const adxStrong = av!=null && av>=20;
-    const aligned = votes.filter(v=>v.dir===(direction==='BUY'?1:-1)).length;
-    const confluence = direction==='WAIT'?0:Math.round((aligned/Math.max(1,maxVotes))*100);
-    const nearestSupport = levels.filter(l=>l.type==='Support' && l.price<price).sort((a,b)=>b.price-a.price)[0];
-    const nearestResistance = levels.filter(l=>l.type==='Resistance' && l.price>price).sort((a,b)=>a.price-b.price)[0];
-    const canBuildSetup = direction!=='WAIT' && at!=null && at>0;
-    const stop = canBuildSetup ? price + (direction==='BUY'?-1:1)*1.5*at : null;
-    const target = canBuildSetup ? price + (direction==='BUY'?1:-1)*3*at : null;
-    const riskDistance = canBuildSetup ? Math.abs(price-stop) : null;
-    const rewardRisk = canBuildSetup ? Math.abs(target-price)/riskDistance : null;
-    let quality='Insufficient confluence';
-    if(direction!=='WAIT') quality=confluence>=80 && adxStrong?'Strong confluence':confluence>=60?'Moderate confluence':'Low confluence';
-    const notes=[];
-    if(e200==null) notes.push('EMA 200 is unavailable until at least 200 candles are loaded.');
-    if(av==null) notes.push('ADX is not yet available for trend-strength confirmation.');
-    else if(!adxStrong) notes.push('ADX is below 20: trend strength is weak or not established.');
-    if(recentEvent) notes.push(`${recentEvent.label} at ${recentEvent.level.toFixed(symbol==='USDJPY'?3: symbol==='BTCUSD'?1:5)}.`);
-    else notes.push('No recent BOS/CHoCH event confirmed by the current swing-point rule.');
-    if(direction==='WAIT') notes.push('Directional evidence is mixed; the engine is withholding a directional setup.');
-    return {ready:true,price,rv,av,at,e20,e50,e200,ml,ms,direction,score,maxVotes,confluence,quality,notes,votes,stop,target,rewardRisk,canBuildSetup,nearestSupport,nearestResistance,structure:recentEvent};
-  },[candles,symbol]);
 
-  const fmt = value => value==null || !Number.isFinite(value) ? '—' : value.toFixed(symbol==='USDJPY'?3:symbol==='BTCUSD'?1:symbol==='XAUUSD'?2:5);
-  if(!analysis.ready) return <div className="card"><div className="card-heading"><h3>TradeLab AI Analysis Engine</h3><span className="tag">RULES-BASED ENGINE</span></div><div className="empty">{analysis.reason} Select a supported market or timeframe with more history.</div></div>;
-  const bullish=analysis.direction==='BUY', bearish=analysis.direction==='SELL';
-  const accent=bullish?'#21d6a0':bearish?'#fb7185':'#fbbf24';
-  return <div className="card" style={{marginTop:18}}>
-    <div className="card-heading"><div><h3>TradeLab AI · Trade Analysis</h3><div className="muted">{symbol} · {timeframe} · {candles.length} candles · refreshed with market data</div></div><span className="tag">TRANSPARENT ANALYSIS</span></div>
-    <div className="stats-grid" style={{marginBottom:16}}>
-      <div className="card"><div className="stat-label">Directional assessment</div><div className="stat-value" style={{color:accent}}>{analysis.direction}</div><div className="muted">{analysis.quality}</div></div>
-      <div className="card"><div className="stat-label">Confluence score</div><div className="stat-value">{analysis.score>0?'+':''}{analysis.score} / {analysis.maxVotes}</div><div className="muted">{analysis.confluence}% aligned inputs · not win probability</div></div>
-      <div className="card"><div className="stat-label">Trend strength (ADX)</div><div className="stat-value">{analysis.av==null?'—':analysis.av.toFixed(1)}</div><div className="muted">{analysis.av==null?'Insufficient data':analysis.av>=25?'Strong trend':'Weak / developing trend'}</div></div>
-      <div className="card"><div className="stat-label">Volatility (ATR 14)</div><div className="stat-value" style={{fontSize:19}}>{fmt(analysis.at)}</div><div className="muted">Average true range</div></div>
-    </div>
-    <div className="dashboard-grid" style={{marginBottom:0}}>
-      <div><h4 style={{marginTop:0}}>Evidence and confluence</h4>
-        {analysis.votes.map((v,i)=><div className="signal" key={i}><span>{v.name}<small className="muted" style={{display:'block',marginTop:4}}>{v.detail}</small></span><strong style={{color:v.dir>0?'#21d6a0':v.dir<0?'#fb7185':'#fbbf24'}}>{v.dir>0?'Bullish':v.dir<0?'Bearish':'Neutral'}</strong></div>)}
-        {analysis.notes.map((n,i)=><p className="muted" key={i} style={{fontSize:11,lineHeight:1.6,margin:'8px 0'}}>• {n}</p>)}
+  const analysis = useMemo(() => {
+
+    if (!Array.isArray(candles) || candles.length < 60) {
+      return {
+        ready: false,
+        reason: `At least 60 candles are required. Currently available: ${candles?.length || 0}.`
+      };
+    }
+
+    const data = candles
+      .filter(c =>
+        Number.isFinite(Number(c.close)) &&
+        Number(c.close) > 0
+      );
+
+    if (data.length < 60) {
+      return {
+        ready: false,
+        reason: 'Not enough valid market candles.'
+      };
+    }
+
+    const closes = data.map(c => Number(c.close));
+
+    const last = arr => {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (arr[i] != null && Number.isFinite(Number(arr[i]))) {
+          return Number(arr[i]);
+        }
+      }
+      return null;
+    };
+
+    const ema20 = calcEMA(closes, 20);
+    const ema50 = calcEMA(closes, 50);
+    const ema200 = calcEMA(closes, 200);
+
+    const rsi = calcRSI(closes, 14);
+    const macd = calcMACD(closes);
+    const atr = calcATR(data, 14);
+    const adx = calcADX(data, 14);
+
+    const price = closes.at(-1);
+
+    const e20 = last(ema20);
+    const e50 = last(ema50);
+    const e200 = last(ema200);
+
+    const rv = last(rsi);
+    const ml = last(macd.line);
+    const ms = last(macd.signal);
+    const av = last(adx);
+    const at = last(atr);
+
+    const votes = [];
+
+    // 1. EMA trend alignment
+    if (e20 != null && e50 != null) {
+      votes.push({
+        name: 'EMA 20 / 50 alignment',
+        dir: e20 > e50 ? 1 : -1,
+        weight: 2,
+        detail: e20 > e50
+          ? 'Short-term trend is bullish.'
+          : 'Short-term trend is bearish.'
+      });
+    }
+
+    // 2. Long-term EMA trend
+    if (e200 != null) {
+      votes.push({
+        name: 'EMA 200 trend filter',
+        dir: price > e200 ? 1 : -1,
+        weight: 2,
+        detail: price > e200
+          ? 'Price is above the long-term trend filter.'
+          : 'Price is below the long-term trend filter.'
+      });
+    }
+
+    // 3. MACD momentum
+    if (ml != null && ms != null) {
+      votes.push({
+        name: 'MACD momentum',
+        dir: ml > ms ? 1 : ml < ms ? -1 : 0,
+        weight: 2,
+        detail: ml > ms
+          ? 'Bullish MACD momentum.'
+          : ml < ms
+            ? 'Bearish MACD momentum.'
+            : 'MACD is neutral.'
+      });
+    }
+
+    // 4. RSI momentum
+    if (rv != null) {
+      votes.push({
+        name: 'RSI momentum',
+        dir: rv > 52 ? 1 : rv < 48 ? -1 : 0,
+        weight: 1,
+        detail: `RSI: ${rv.toFixed(1)}`
+      });
+    }
+
+    // 5. ADX trend strength
+    if (av != null) {
+      votes.push({
+        name: 'ADX trend strength',
+        dir: av >= 20
+          ? (e20 != null && e50 != null && e20 > e50 ? 1 :
+             e20 != null && e50 != null && e20 < e50 ? -1 : 0)
+          : 0,
+        weight: 1,
+        detail: `ADX ${av.toFixed(1)} — ${av >= 25 ? 'stronger trend' : 'weak or developing trend'}`
+      });
+    }
+
+    // 6. Market structure
+    const recentCandles = data.slice(-180);
+    const swings = detectSwingPoints(recentCandles);
+    const structure = detectMarketStructure(recentCandles, swings);
+
+    const recentEvent =
+      structure.event &&
+      structure.event.index >= Math.max(0, recentCandles.length - 30)
+        ? structure.event
+        : null;
+
+    if (recentEvent) {
+      votes.push({
+        name: 'Market structure',
+        dir: recentEvent.direction,
+        weight: 3,
+        detail: `${recentEvent.label} detected.`
+      });
+    }
+
+    // 7. Liquidity sweep detection
+    let liquiditySweep = null;
+
+    if (data.length >= 22) {
+      const current = data.at(-1);
+      const previous = data.slice(-21, -1);
+
+      const previousHigh = Math.max(
+        ...previous.map(c => Number(c.high ?? c.close))
+      );
+
+      const previousLow = Math.min(
+        ...previous.map(c => Number(c.low ?? c.close))
+      );
+
+      const high = Number(current.high ?? current.close);
+      const low = Number(current.low ?? current.close);
+      const close = Number(current.close);
+
+      if (low < previousLow && close > previousLow) {
+        liquiditySweep = {
+          direction: 1,
+          label: 'Bullish liquidity sweep',
+          detail: 'Price swept previous lows and closed back above them.'
+        };
+      } else if (high > previousHigh && close < previousHigh) {
+        liquiditySweep = {
+          direction: -1,
+          label: 'Bearish liquidity sweep',
+          detail: 'Price swept previous highs and closed back below them.'
+        };
+      }
+    }
+
+    if (liquiditySweep) {
+      votes.push({
+        name: liquiditySweep.label,
+        dir: liquiditySweep.direction,
+        weight: 3,
+        detail: liquiditySweep.detail
+      });
+    }
+
+    // 8. Fair Value Gap detection
+    let fairValueGap = null;
+
+    for (let i = data.length - 1; i >= Math.max(2, data.length - 30); i--) {
+
+      const first = data[i - 2];
+      const third = data[i];
+
+      const firstHigh = Number(first.high ?? first.close);
+      const firstLow = Number(first.low ?? first.close);
+      const thirdHigh = Number(third.high ?? third.close);
+      const thirdLow = Number(third.low ?? third.close);
+
+      if (thirdLow > firstHigh) {
+        fairValueGap = {
+          direction: 1,
+          low: firstHigh,
+          high: thirdLow,
+          label: 'Bullish Fair Value Gap'
+        };
+        break;
+      }
+
+      if (thirdHigh < firstLow) {
+        fairValueGap = {
+          direction: -1,
+          low: thirdHigh,
+          high: firstLow,
+          label: 'Bearish Fair Value Gap'
+        };
+        break;
+      }
+    }
+
+    if (fairValueGap) {
+      votes.push({
+        name: 'Fair Value Gap',
+        dir: fairValueGap.direction,
+        weight: 2,
+        detail: `${fairValueGap.label}: ${fairValueGap.low} – ${fairValueGap.high}`
+      });
+    }
+
+    // 9. Weighted confluence calculation
+    const totalWeight = votes.reduce(
+      (sum, vote) => sum + vote.weight,
+      0
+    );
+
+    const weightedScore = votes.reduce(
+      (sum, vote) => sum + vote.dir * vote.weight,
+      0
+    );
+
+    const direction =
+      weightedScore >= 4 ? 'BUY' :
+      weightedScore <= -4 ? 'SELL' :
+      'WAIT';
+
+    const directionalWeight = votes
+      .filter(v =>
+        direction === 'BUY'
+          ? v.dir === 1
+          : direction === 'SELL'
+            ? v.dir === -1
+            : false
+      )
+      .reduce((sum, v) => sum + v.weight, 0);
+
+    const confluence = direction === 'WAIT' || totalWeight === 0
+      ? 0
+      : Math.round((directionalWeight / totalWeight) * 100);
+
+    // 10. Support and resistance
+    const levels = detectSupportResistance(recentCandles);
+
+    const nearestSupport = levels
+      .filter(l => l.type === 'Support' && l.price < price)
+      .sort((a, b) => b.price - a.price)[0];
+
+    const nearestResistance = levels
+      .filter(l => l.type === 'Resistance' && l.price > price)
+      .sort((a, b) => a.price - b.price)[0];
+
+    // 11. Entry, stop loss and three targets
+    const canBuildSetup =
+      direction !== 'WAIT' &&
+      at != null &&
+      at > 0;
+
+    const entry = canBuildSetup ? price : null;
+
+    const stop = canBuildSetup
+      ? price + (direction === 'BUY' ? -1 : 1) * 1.5 * at
+      : null;
+
+    const riskDistance = canBuildSetup
+      ? Math.abs(entry - stop)
+      : null;
+
+    const targets = canBuildSetup
+      ? [
+          price + (direction === 'BUY' ? 1 : -1) * riskDistance,
+          price + (direction === 'BUY' ? 2 : -2) * riskDistance,
+          price + (direction === 'BUY' ? 3 : -3) * riskDistance
+        ]
+      : [];
+
+    const rewardRisk = canBuildSetup
+      ? 1
+      : null;
+
+    // 12. Signal quality
+    let quality = 'Insufficient confluence';
+
+    if (direction !== 'WAIT') {
+      if (confluence >= 80 && av != null && av >= 25) {
+        quality = 'Strong confluence';
+      } else if (confluence >= 65) {
+        quality = 'Moderate confluence';
+      } else {
+        quality = 'Low confluence';
+      }
+    }
+
+    // 13. Signal invalidation
+    const invalidation = stop;
+
+    const notes = [];
+
+    if (e200 == null) {
+      notes.push('EMA 200 unavailable: longer history is required.');
+    }
+
+    if (av == null || av < 20) {
+      notes.push('Trend strength is not sufficiently established.');
+    }
+
+    if (!recentEvent) {
+      notes.push('No recent confirmed BOS/CHoCH event.');
+    }
+
+    if (!liquiditySweep) {
+      notes.push('No recent liquidity sweep detected.');
+    }
+
+    if (!fairValueGap) {
+      notes.push('No recent three-candle Fair Value Gap detected.');
+    }
+
+    if (direction === 'WAIT') {
+      notes.push('Directional evidence is insufficient. The engine recommends WAIT.');
+    }
+
+    notes.push(
+      'Only the selected timeframe is analysed. Higher-timeframe confirmation is not yet connected.'
+    );
+
+    return {
+      ready: true,
+      symbol,
+      timeframe,
+      price,
+      rv,
+      av,
+      at,
+      e20,
+      e50,
+      e200,
+      ml,
+      ms,
+      direction,
+      weightedScore,
+      totalWeight,
+      confluence,
+      quality,
+      votes,
+      notes,
+      entry,
+      stop,
+      targets,
+      rewardRisk,
+      canBuildSetup,
+      invalidation,
+      nearestSupport,
+      nearestResistance,
+      recentEvent,
+      liquiditySweep,
+      fairValueGap
+    };
+
+  }, [candles, symbol, timeframe]);
+
+  const fmt = value =>
+    value == null || !Number.isFinite(Number(value))
+      ? '—'
+      : Number(value).toFixed(
+          symbol === 'USDJPY' ? 3 :
+          symbol === 'BTCUSD' ? 1 :
+          symbol === 'XAUUSD' ? 2 : 5
+        );
+
+  if (!analysis.ready) {
+    return (
+      <div className="card">
+        <div className="card-heading">
+          <h3>TradeLab AI Advanced Signals Engine</h3>
+          <span className="tag">SIGNALS V1</span>
+        </div>
+        <div className="empty">{analysis.reason}</div>
       </div>
-      <div><h4 style={{marginTop:0}}>Illustrative setup levels</h4>
-        <div className="signal"><span>Reference price</span><strong>{fmt(analysis.price)}</strong></div>
-        <div className="signal"><span>ATR-based stop level (1.5 × ATR)</span><strong style={{color:'#fb7185'}}>{analysis.canBuildSetup?fmt(analysis.stop):'Not available'}</strong></div>
-        <div className="signal"><span>ATR-based target (3 × ATR)</span><strong style={{color:'#21d6a0'}}>{analysis.canBuildSetup?fmt(analysis.target):'Not available'}</strong></div>
-        <div className="signal"><span>Illustrative reward:risk</span><strong>{analysis.canBuildSetup?`1 : ${analysis.rewardRisk.toFixed(2)}`:'—'}</strong></div>
-        <div className="signal"><span>Nearest support</span><strong>{analysis.nearestSupport?fmt(analysis.nearestSupport.price):'Not detected'}</strong></div>
-        <div className="signal"><span>Nearest resistance</span><strong>{analysis.nearestResistance?fmt(analysis.nearestResistance.price):'Not detected'}</strong></div>
-        <div className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:10}}>These are analytical reference levels only. They do not account for spread, slippage, commissions, contract size or broker-specific pip/point values.</div>
+    );
+  }
+
+  const bullish = analysis.direction === 'BUY';
+  const bearish = analysis.direction === 'SELL';
+
+  const accent = bullish
+    ? '#21d6a0'
+    : bearish
+      ? '#fb7185'
+      : '#fbbf24';
+
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+
+      <div className="card-heading">
+        <div>
+          <h3>TradeLab AI · Advanced Signals Engine</h3>
+          <div className="muted">
+            {symbol} · {timeframe} · {candles.length} candles
+          </div>
+        </div>
+        <span className="tag">SIGNALS V1</span>
       </div>
+
+      <div className="stats-grid" style={{ marginBottom: 16 }}>
+
+        <div className="card">
+          <div className="stat-label">Trading signal</div>
+          <div className="stat-value" style={{ color: accent }}>
+            {analysis.direction}
+          </div>
+          <div className="muted">{analysis.quality}</div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Weighted confluence</div>
+          <div className="stat-value">{analysis.confluence}%</div>
+          <div className="muted">
+            Analytical alignment, not win probability.
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">ADX trend strength</div>
+          <div className="stat-value">
+            {analysis.av == null ? '—' : analysis.av.toFixed(1)}
+          </div>
+          <div className="muted">ADX 14</div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Market volatility</div>
+          <div className="stat-value" style={{ fontSize: 19 }}>
+            {fmt(analysis.at)}
+          </div>
+          <div className="muted">ATR 14</div>
+        </div>
+
+      </div>
+
+      <div className="dashboard-grid" style={{ marginBottom: 0 }}>
+
+        <div>
+          <h4>Signal evidence</h4>
+
+          {analysis.votes.map((v, i) => (
+            <div className="signal" key={i}>
+              <span>
+                {v.name}
+                <small
+                  className="muted"
+                  style={{ display: 'block', marginTop: 4 }}
+                >
+                  {v.detail}
+                </small>
+              </span>
+
+              <strong
+                style={{
+                  color: v.dir > 0
+                    ? '#21d6a0'
+                    : v.dir < 0
+                      ? '#fb7185'
+                      : '#fbbf24'
+                }}
+              >
+                {v.dir > 0 ? 'Bullish' : v.dir < 0 ? 'Bearish' : 'Neutral'}
+              </strong>
+            </div>
+          ))}
+
+          {analysis.notes.map((n, i) => (
+            <p
+              className="muted"
+              key={i}
+              style={{ fontSize: 11, lineHeight: 1.6 }}
+            >
+              • {n}
+            </p>
+          ))}
+        </div>
+
+        <div>
+          <h4>Trade setup</h4>
+
+          <div className="signal">
+            <span>Reference / entry price</span>
+            <strong>{fmt(analysis.entry)}</strong>
+          </div>
+
+          <div className="signal">
+            <span>Stop loss</span>
+            <strong style={{ color: '#fb7185' }}>
+              {fmt(analysis.stop)}
+            </strong>
+          </div>
+
+          <div className="signal">
+            <span>Take Profit 1 · 1R</span>
+            <strong style={{ color: '#21d6a0' }}>
+              {fmt(analysis.targets[0])}
+            </strong>
+          </div>
+
+          <div className="signal">
+            <span>Take Profit 2 · 2R</span>
+            <strong style={{ color: '#21d6a0' }}>
+              {fmt(analysis.targets[1])}
+            </strong>
+          </div>
+
+          <div className="signal">
+            <span>Take Profit 3 · 3R</span>
+            <strong style={{ color: '#21d6a0' }}>
+              {fmt(analysis.targets[2])}
+            </strong>
+          </div>
+
+          <div className="signal">
+            <span>Invalidation level</span>
+            <strong>{fmt(analysis.invalidation)}</strong>
+          </div>
+
+          <div className="signal">
+            <span>Nearest support</span>
+            <strong>
+              {analysis.nearestSupport
+                ? fmt(analysis.nearestSupport.price)
+                : 'Not detected'}
+            </strong>
+          </div>
+
+          <div className="signal">
+            <span>Nearest resistance</span>
+            <strong>
+              {analysis.nearestResistance
+                ? fmt(analysis.nearestResistance.price)
+                : 'Not detected'}
+            </strong>
+          </div>
+        </div>
+
+      </div>
+
+      <div
+        style={{
+          marginTop: 16,
+          padding: 13,
+          borderRadius: 8,
+          background: '#101d30',
+          border: '1px solid #26364e',
+          fontSize: 11,
+          lineHeight: 1.7,
+          color: '#aab8cc'
+        }}
+      >
+        <strong style={{ color: '#fbbf24' }}>
+          Signal integrity notice:
+        </strong>
+
+        {' '}This engine evaluates technical confluence from available
+        candles. It does not guarantee profitable trades or a 99% win rate.
+        The entry and exit levels are analytical estimates based on ATR.
+        Spread, slippage, commissions and broker contract specifications
+        are not included.
+
+        {' '}Higher-timeframe confirmation, live signal tracking,
+        historical signal validation and machine-learning predictions
+        are planned for subsequent development phases.
+
+        {' '}No orders are placed automatically by this component.
+      </div>
+
     </div>
-    <div style={{marginTop:15,padding:12,borderRadius:8,background:'#101d30',border:'1px solid #26364e',fontSize:11,lineHeight:1.7,color:'#aab8cc'}}><strong style={{color:'#fbbf24'}}>Important:</strong> This is a transparent, rules-based technical confluence engine, not a trained predictive AI model. The confluence percentage is the share of directional inputs aligned; it is not a probability of profit. WAIT means evidence is mixed. Use demo testing and independent risk checks before considering any trade. No orders are placed by this analysis.</div>
-  </div>;
+  );
 }
+  
 
 function AIAssistant({ candles, symbol, timeframe }) {
   const [question, setQuestion] = useState('Give me a full analysis of the current market.');
