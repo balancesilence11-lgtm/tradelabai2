@@ -7545,34 +7545,70 @@ Content-Type: application/json
   "executionMode": "ASSISTED",
   "notes": "Bullish structure with higher-timeframe confirmation."
 }
+/*
+============================================================
+API EXAMPLES — TRADE JOURNAL
+============================================================
+
+POST /api/trading/journal
+Content-Type: application/json
+
+{
+  "symbol": "EURUSD",
+  "direction": "BUY",
+  "entryPrice": 1.08500,
+  "stopLoss": 1.08300,
+  "takeProfit": 1.08900,
+  "quantity": 0.10,
+  "riskPercent": 1,
+  "riskAmount": 100,
+  "strategy": "SMC",
+  "timeframe": "15min",
+  "broker": "Deriv",
+  "executionMode": "ASSISTED",
+  "notes": "Bullish structure with higher-timeframe confirmation."
+}
+
 POST /api/trading/journal/TRADE_ID/close
 Content-Type: application/json
+
 {
   "exitPrice": 1.08900,
   "realizedPnl": 40,
   "fees": 2
 }
--- ============================================================
--- PHASE 8 — TRADE MONITORING EVENTS
--- ============================================================
+
+============================================================
+PHASE 8 — TRADE MONITORING EVENTS DATABASE SCHEMA
+============================================================
 
 CREATE TABLE IF NOT EXISTS trade_monitor_events (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     trade_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
-
     event_type TEXT NOT NULL,
     market_price REAL,
-
     entry_price REAL,
     stop_loss REAL,
     take_profit REAL,
-
     message TEXT,
-
     created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_monitor_user
+ON trade_monitor_events(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_trade
+ON trade_monitor_events(trade_id);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_created
+ON trade_monitor_events(user_id, created_at);
+
+============================================================
+END OF DOCUMENTATION
+============================================================
+*/
 
 CREATE INDEX IF NOT EXISTS idx_monitor_user
 ON trade_monitor_events(user_id);
