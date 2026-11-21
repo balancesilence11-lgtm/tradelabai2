@@ -1,5 +1,4 @@
 const SYMBOLS = {
-  // Major forex pairs
   EURUSD: "EUR/USD",
   GBPUSD: "GBP/USD",
   USDJPY: "USD/JPY",
@@ -7,19 +6,13 @@ const SYMBOLS = {
   USDCAD: "USD/CAD",
   AUDUSD: "AUD/USD",
   NZDUSD: "NZD/USD",
-
-  // Minor forex pairs
   EURGBP: "EUR/GBP",
   EURJPY: "EUR/JPY",
   GBPJPY: "GBP/JPY",
   AUDJPY: "AUD/JPY",
   EURAUD: "EUR/AUD",
   GBPAUD: "GBP/AUD",
-
-  // Commodities
   XAUUSD: "XAU/USD",
-
-  // Cryptocurrencies
   BTCUSD: "BTC/USD"
 };
 
@@ -104,8 +97,6 @@ function clearSessionCookie() {
 }
 
 function validOrigin(request, url) {
-  // These endpoints are browser-session endpoints. Missing Origin is rejected
-  // rather than treated as same-origin; this prevents cross-site socket use.
   const origin = request.headers.get("Origin");
   const fetchSite = request.headers.get("Sec-Fetch-Site");
   if (!origin || origin !== url.origin) return false;
@@ -258,7 +249,7 @@ async function login(request, env) {
 
   if (!email || email.length > 254 || !password || password.length > 128) {
     return json({ error: "Invalid email or password" }, 400);
-  } 
+  }
 
   const now = Date.now();
 
@@ -361,9 +352,7 @@ async function logout(request, env) {
   }, 200, {
     "Set-Cookie": clearSessionCookie()
   });
-}
-
-/* =========================================
+}/* =========================================
    AUTHENTICATION ROUTES
 ========================================= */
 
@@ -530,7 +519,8 @@ async function getBillingStatus(env, user) {
       s.id,
       s.plan_id,
       s.status,
-      s.payment_provider,  s.current_period_start,
+      s.payment_provider,
+      s.current_period_start,
       s.current_period_end,
       s.next_billing_at,
       s.grace_period_end,
@@ -602,254 +592,7 @@ async function getBillingStatus(env, user) {
       ? "Your TradeLab AI subscription is active."
       : "An active hourly subscription is required to use paid features."
   };
-}
-
-/* =========================================
-   BILLING TRANSACTION HISTORY
-========================================= */
-
-async function getBillingTransactions(request, env, user) {
-  const url = new URL(request.url);
-
-  const requestedLimit = Number(url.searchParams.get("limit") || 20);
-  const requestedOffset = Number(url.searchParams.get("offset") || 0);
-
-  const limit = Math.min(
-    50,
-    Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 20)
-  );
-
-  const offset = Math.min(
-    100000,
-    Math.max(0, Number.isFinite(requestedOffset) ? Math.floor(requestedOffset) : 0)
-  );
-
-  const result = await env.DB.prepare(`
-    SELECT
-      id,
-      subscription_id,
-      provider,
-      provider_payment_ref,
-      amount_minor,
-      currency,
-      status,
-      description,
-      provider_status,
-      paid_at,
-      created_at,
-      updated_at
-    FROM payment_transactions
-    WHERE user_id = ?
-    ORDER BY created_at DESC
-    LIMIT ? OFFSET ?
-  `).bind(user.id, limit, offset).all();
-
-  const countResult = await env.DB.prepare(`
-    SELECT COUNT(*) AS total
-    FROM payment_transactions
-    WHERE user_id = ?
-  `).bind(user.id).first();
-
-  const transactions = (result.results || []).map(item => ({
-    id: item.id,
-    subscriptionId: item.subscription_id,
-    provider: item.provider,
-    providerPaymentReference: item.provider_payment_ref,
-    amount: Number(item.amount_minor) / 100,
-    currency: item.currency,
-    status: item.status,
-    description: item.description,
-    providerStatus: item.provider_status,
-    paidAt: item.paid_at,
-    createdAt: item.created_at,
-    updatedAt: item.updated_at
-  }));
-
-  return json({
-    ok: true,
-    transactions,
-    pagination: {
-      limit,
-      offset,
-      total: Number(countResult?.total || 0)
-    }
-  });
-}
-
-/* =========================================
-   CREATE SUBSCRIPTION REQUEST
-========================================= */
-
-async function createBillingSubscription(request, env, user) {
-  let body;
-  try {
-    body = await readJson(request);
-  } catch {
-    return json({ error: "Invalid request body" }, 400);
-  }
-
-  if (body.consent !== true) {
-    return json({ error: "Explicit consent is required before starting recurring card billing." }, 400);
-  }
-
-  const provider = String(body.provider || "card").trim().toLowerCase();
-  if (!BILLING_ALLOWED_PROVIDERS.has(provider)) {
-    return json({
-      error: "Only recurring card payments through Flutterwave are supported.",
-      supportedProviders: ["card"],
-      message: "M-Pesa STK Push and Deriv balance payments are not enabled."
-    }, 400);
-  }
-
-  if (!env.FLW_SECRET_KEY) {
-    return json({ error: "Card billing is not configured on the server." }, 503);
-  }
-
-  const plan = await env.DB.prepare(`
-    SELECT id, name, amount, currency, billing_interval_seconds, active
-    FROM subscription_plans WHERE id = ?
-  `).bind(BILLING_PLAN_ID).first();
-
-  if (!plan || Number(plan.amount) !== 1 || plan.currency !== "USD" ||
-      Number(plan.billing_interval_seconds) !== BILLING_INTERVAL_SECONDS || Number(plan.active) !== 1) {
-    return json({ error: "The TradeLab hourly USD 1 subscription plan is unavailable or incorrectly configured." }, 503);
-  }
-
-  const now = new Date().toISOString();
-
-  // Close stale local records before creating a new checkout. Otherwise an
-  // expired row left with status='active' (or an abandoned pending checkout)
-  // would permanently block the user from subscribing again.
-  await env.DB.batch([
-    env.DB.prepare(`
-      UPDATE subscriptions
-      SET status = 'expired', updated_at = ?
-      WHERE user_id = ? AND plan_id = ? AND status = 'active'
-        AND (current_period_end IS NULL OR julianday(current_period_end) <= julianday(?))
-        AND (grace_period_end IS NULL OR julianday(grace_period_end) <= julianday(?))
-    `).bind(now, user.id, BILLING_PLAN_ID, now, now),
-    env.DB.prepare(`
-      UPDATE subscriptions
-      SET status = 'expired', updated_at = ?
-      WHERE user_id = ? AND plan_id = ? AND status = 'pending'
-        AND julianday(created_at) <= julianday(?) - (30.0 / 1440.0)
-    `).bind(now, user.id, BILLING_PLAN_ID, now),
-    env.DB.prepare(`
-      UPDATE payment_transactions
-      SET status = 'failed', provider_status = 'checkout_expired', updated_at = ?
-      WHERE user_id = ? AND status = 'pending'
-        AND subscription_id IN (
-          SELECT id FROM subscriptions WHERE user_id = ? AND plan_id = ? AND status = 'expired'
-        )
-    `).bind(now, user.id, user.id, BILLING_PLAN_ID)
-  ]);
-
-  const existing = await env.DB.prepare(`
-    SELECT id, status FROM subscriptions
-    WHERE user_id = ? AND plan_id = ? AND status IN ('active', 'pending')
-    ORDER BY created_at DESC LIMIT 1
-  `).bind(user.id, BILLING_PLAN_ID).first();
-
-  if (existing) {
-    return json({
-      error: "An active or pending subscription already exists.",
-      subscription: { id: existing.id, status: existing.status }
-    }, 409);
-  }
-
-  const subscriptionId = randomId(16);
-  const transactionId = randomId(16);
-  const txRef = `TL-${user.id}-${randomId(12)}`;
-
-  try {
-    await env.DB.batch([
-      env.DB.prepare(`
-        INSERT INTO subscriptions (
-          id, user_id, plan_id, status, payment_provider,
-          current_period_start, current_period_end, next_billing_at,
-          cancel_at_period_end, created_at, updated_at
-        ) VALUES (?, ?, ?, 'pending', 'flutterwave', NULL, NULL, NULL, 0, ?, ?)
-      `).bind(subscriptionId, user.id, BILLING_PLAN_ID, now, now),
-      env.DB.prepare(`
-        INSERT INTO payment_transactions (
-          id, user_id, subscription_id, provider, provider_payment_ref,
-          idempotency_key, amount_minor, currency, status, description,
-          provider_status, paid_at, created_at, updated_at
-        ) VALUES (?, ?, ?, 'flutterwave', ?, ?, ?, ?, 'pending',
-          'TradeLab AI hourly subscription', 'checkout_initializing', NULL, ?, ?)
-      `).bind(transactionId, user.id, subscriptionId, txRef, randomId(32),
-        BILLING_AMOUNT_MINOR, BILLING_CURRENCY, now, now),
-      env.DB.prepare(`
-        INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json)
-        VALUES (?, ?, ?, ?, 'subscription_checkout_started', ?)
-      `).bind(randomId(16), user.id, subscriptionId, transactionId,
-        JSON.stringify({ provider: "flutterwave", txRef, paymentPlanId: FLW_PAYMENT_PLAN_ID, amount: 1, currency: "USD", intervalSeconds: 3600, consent: true }))
-    ]);
-  } catch (error) {
-    console.error("Billing subscription creation failed:", error.message);
-    return json({ error: "Unable to create subscription checkout." }, 500);
-  }
-
-  const checkoutPayload = {
-    tx_ref: txRef,
-    amount: "1",
-    currency: "USD",
-    redirect_url: `${new URL(request.url).origin}/?billing=complete`,
-    payment_options: "card",
-    payment_plan: FLW_PAYMENT_PLAN_ID,
-    customer: {
-      email: user.email,
-      name: user.email.split("@")[0]
-    },
-    customizations: {
-      title: "TradeLab AI",
-      description: "USD 1 recurring hourly subscription"
-    },
-    meta: { tradelab_subscription_id: subscriptionId, tradelab_user_id: user.id }
-  };
-
-  let gatewayResponse;
-  try {
-    const response = await fetch("https://api.flutterwave.com/v3/payments", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.FLW_SECRET_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(checkoutPayload)
-    });
-    gatewayResponse = await response.json();
-    if (!response.ok || gatewayResponse.status !== "success" || !gatewayResponse.data?.link) {
-      throw new Error(gatewayResponse.message || `Flutterwave checkout returned HTTP ${response.status}`);
-    }
-  } catch (error) {
-    console.error("Flutterwave checkout initialization failed:", error.message);
-    await env.DB.batch([
-      env.DB.prepare(`UPDATE payment_transactions SET status = 'failed', provider_status = 'checkout_initialization_failed', updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), transactionId),
-      env.DB.prepare(`UPDATE subscriptions SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'pending'`).bind(new Date().toISOString(), subscriptionId),
-      env.DB.prepare(`INSERT INTO billing_audit_log (id, user_id, subscription_id, transaction_id, event_type, details_json) VALUES (?, ?, ?, ?, 'checkout_initialization_failed', ?)`)
-        .bind(randomId(16), user.id, subscriptionId, transactionId, JSON.stringify({ message: error.message }))
-    ]);
-    return json({ error: "Flutterwave could not start the card checkout. No payment was taken." }, 502);
-  }
-
-  await env.DB.prepare(`UPDATE payment_transactions SET provider_status = 'checkout_created', updated_at = ? WHERE id = ?`)
-    .bind(new Date().toISOString(), transactionId).run();
-
-  return json({
-    ok: true,
-    message: "Flutterwave card checkout is ready. Your subscription activates only after the first payment is verified.",
-    billingEnabled: true,
-    paymentStarted: true,
-    charged: false,
-    checkoutUrl: gatewayResponse.data.link,
-    tx_ref: txRef,
-    subscription: { id: subscriptionId, status: "pending", provider: "flutterwave", amount: 1, currency: "USD", intervalSeconds: BILLING_INTERVAL_SECONDS },
-    transaction: { id: transactionId, status: "pending" }
-  }, 201);
-}
-
-/* =========================================
+}/* =========================================
    FLUTTERWAVE WEBHOOK AND VERIFICATION
 ========================================= */
 
@@ -876,9 +619,6 @@ async function handleFlutterwaveWebhook(request, env) {
   try { event = await request.json(); }
   catch { return json({ error: "Invalid webhook payload" }, 400); }
 
-  // Flutterwave also sends subscription.cancelled when a customer or the
-  // provider cancels a recurring card subscription. Keep local access through
-  // the already-paid period, but record that no further renewal is expected.
   if (event.event === "subscription.cancelled") {
     const email = String(
       event.data?.customer?.customer_email ||
@@ -919,7 +659,6 @@ async function handleFlutterwaveWebhook(request, env) {
   }
 
   if (event.event !== "charge.completed" || !event.data?.id) {
-    // Other event types do not grant access. Acknowledge them to avoid retries.
     return json({ ok: true, ignored: true });
   }
 
@@ -941,6 +680,7 @@ async function handleFlutterwaveWebhook(request, env) {
   const currency = String(verified.currency || "").toUpperCase();
   const paymentType = String(verified.payment_type || event.data?.payment_type || "").toLowerCase();
   const amount = Number(verified.amount);
+
   if (
     !txRef ||
     String(verified.id) !== String(event.data.id) ||
@@ -971,26 +711,31 @@ async function handleFlutterwaveWebhook(request, env) {
 
   const paidAt = verified.created_at && !Number.isNaN(Date.parse(verified.created_at))
     ? new Date(verified.created_at).toISOString() : new Date().toISOString();
+
   const existingTransaction = await env.DB.prepare(`
     SELECT id, user_id, subscription_id, status, amount_minor, currency
     FROM payment_transactions WHERE provider = 'flutterwave' AND provider_payment_ref = ? LIMIT 1
   `).bind(txRef).first();
 
-  // A repeated webhook for the same verified charge must never extend access twice.
   if (existingTransaction?.status === "successful") return json({ ok: true, duplicate: true });
 
   let userId = existingTransaction?.user_id || null;
   let subscriptionId = existingTransaction?.subscription_id || null;
+
   if (!userId) {
     const email = String(verified.customer?.email || event.data?.customer?.email || "").trim().toLowerCase();
     if (!email) return json({ ok: true, ignored: true, reason: "Customer email missing" });
+
     const account = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active' LIMIT 1`).bind(email).first();
     if (!account) return json({ ok: true, ignored: true, reason: "TradeLab account not found" });
+
     userId = account.id;
+
     const activeSub = await env.DB.prepare(`
       SELECT id FROM subscriptions WHERE user_id = ? AND payment_provider = 'flutterwave' AND status = 'active'
       ORDER BY created_at DESC LIMIT 1
     `).bind(userId).first();
+
     if (!activeSub) return json({ ok: true, ignored: true, reason: "No active Flutterwave subscription for renewal" });
     subscriptionId = activeSub.id;
   }
@@ -998,6 +743,7 @@ async function handleFlutterwaveWebhook(request, env) {
   const now = new Date().toISOString();
   const transactionId = existingTransaction?.id || randomId(16);
   const amountMinor = Math.round(amount * 100);
+
   try {
     if (existingTransaction) {
       await env.DB.prepare(`UPDATE payment_transactions SET status = 'successful', provider_status = ?, amount_minor = ?, currency = 'USD', paid_at = ?, updated_at = ? WHERE id = ?`)
@@ -1011,7 +757,9 @@ async function handleFlutterwaveWebhook(request, env) {
 
     const subscription = await env.DB.prepare(`SELECT current_period_end, status FROM subscriptions WHERE id = ? AND user_id = ?`)
       .bind(subscriptionId, userId).first();
+
     if (!subscription) return json({ error: "Subscription record not found" }, 500);
+
     const previousEnd = subscription.current_period_end ? Date.parse(subscription.current_period_end) : 0;
     const periodStartMs = Math.max(Date.parse(paidAt), Number.isFinite(previousEnd) ? previousEnd : 0);
     const periodStart = new Date(periodStartMs).toISOString();
@@ -1127,8 +875,6 @@ async function cancelBillingSubscription(request, env, user) {
       });
     }
 
-    // Cancel this customer's Flutterwave subscription, not the shared payment
-    // plan. The local entitlement remains valid until current_period_end.
     if (!env.FLW_SECRET_KEY) {
       return json({ error: "Flutterwave cancellation is not configured. No changes were made." }, 503);
     }
@@ -1139,11 +885,14 @@ async function cancelBillingSubscription(request, env, user) {
       lookupUrl.searchParams.set("email", user.email);
       lookupUrl.searchParams.set("plan", String(FLW_PAYMENT_PLAN_ID));
       lookupUrl.searchParams.set("page", "1");
+
       const lookupResponse = await fetch(lookupUrl.toString(), {
         headers: { Authorization: `Bearer ${env.FLW_SECRET_KEY}`, Accept: "application/json" },
         signal: AbortSignal.timeout(15000)
       });
+
       const lookupData = await lookupResponse.json();
+
       if (!lookupResponse.ok || lookupData.status !== "success" || !Array.isArray(lookupData.data)) {
         throw new Error(lookupData.message || "Unable to locate Flutterwave subscription");
       }
@@ -1154,8 +903,10 @@ async function cancelBillingSubscription(request, env, user) {
           String(item.plan) === String(FLW_PAYMENT_PLAN_ID)
         )
         .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0));
+
       providerSubscription = matching.find(item => String(item.status).toLowerCase() === "active") ||
         matching.find(item => String(item.status).toLowerCase() === "cancelled");
+
       if (!providerSubscription?.id) {
         throw new Error("No matching Flutterwave customer subscription was found");
       }
@@ -1173,7 +924,9 @@ async function cancelBillingSubscription(request, env, user) {
             signal: AbortSignal.timeout(15000)
           }
         );
+
         const cancelData = await cancelResponse.json();
+
         if (!cancelResponse.ok || cancelData.status !== "success") {
           throw new Error(cancelData.message || "Flutterwave rejected subscription cancellation");
         }
@@ -1230,13 +983,14 @@ async function cancelBillingSubscription(request, env, user) {
     error: "This subscription cannot be cancelled in its current state.",
     status: subscription.status
   }, 409);
-}/* =========================================
+}
+
+/* =========================================
    BILLING ROUTES
 ========================================= */
 
 async function handleBilling(request, env, url) {
   const path = url.pathname;
-
   const user = await getAuthenticatedUser(request, env);
 
   if (!user) {
@@ -1252,9 +1006,7 @@ async function handleBilling(request, env, url) {
 
   if (path === "/api/billing/status") {
     if (request.method !== "GET") {
-      return json({ error: "Method not allowed" }, 405, {
-        Allow: "GET"
-      });
+      return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
     }
 
     try {
@@ -1267,9 +1019,7 @@ async function handleBilling(request, env, url) {
 
   if (path === "/api/billing/transactions") {
     if (request.method !== "GET") {
-      return json({ error: "Method not allowed" }, 405, {
-        Allow: "GET"
-      });
+      return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
     }
 
     try {
@@ -1282,9 +1032,7 @@ async function handleBilling(request, env, url) {
 
   if (path === "/api/billing/subscribe") {
     if (request.method !== "POST") {
-      return json({ error: "Method not allowed" }, 405, {
-        Allow: "POST"
-      });
+      return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
     }
 
     return createBillingSubscription(request, env, user);
@@ -1292,21 +1040,22 @@ async function handleBilling(request, env, url) {
 
   if (path === "/api/billing/cancel") {
     if (request.method !== "POST") {
-      return json({ error: "Method not allowed" }, 405, {
-        Allow: "POST"
-      });
+      return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
     }
 
     return cancelBillingSubscription(request, env, user);
   }
 
-  return json({
-    error: "Billing route not found"
-  }, 404);
+  return json({ error: "Billing route not found" }, 404);
 }
 
 /* =========================================
    TWELVE DATA MARKET CONNECTION
+========================================= */
+
+/* =========================================
+   MARKET DATA API
+   PROVIDER FAILOVER ENABLED
 ========================================= */
 
 async function handleMarket(request, env, url) {
@@ -1318,7 +1067,11 @@ async function handleMarket(request, env, url) {
   }
 
   if (request.method !== "GET") {
-    return json({ error: "Method not allowed" }, 405);
+    return json(
+      { error: "Method not allowed" },
+      405,
+      { Allow: "GET" }
+    );
   }
 
   const symbol = url.searchParams.get("symbol")
@@ -1328,113 +1081,89 @@ async function handleMarket(request, env, url) {
   const providerSymbol = SYMBOLS[symbol];
 
   if (!providerSymbol) {
-    return json({ error: "Unsupported symbol" }, 400);
+    return json({
+      ok: false,
+      error: "Unsupported symbol"
+    }, 400);
   }
 
-  if (!env.TWELVE_DATA_API_KEY) {
-    return json({ error: "Market data API is not configured" }, 500);
-  }
+  /* =====================================
+     LIVE PRICE
+     GET /api/market
+  ===================================== */
 
   if (url.pathname === "/api/market") {
-    const apiUrl = new URL("https://api.twelvedata.com/price");
-    apiUrl.searchParams.set("symbol", providerSymbol);
-    apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
-
     try {
-      const response = await fetch(apiUrl.toString(), {
-        signal: AbortSignal.timeout(MARKET_REQUEST_TIMEOUT_MS)
-      });
-      const data = await response.json();
-      const price = Number(data.price);
-
-      if (!response.ok || !Number.isFinite(price) || price <= 0) {
-        return json({
-          error: "Twelve Data rejected the request",
-          details: data.message || "No price returned"
-        }, 502);
-      }
+      const result = await marketGetPrice(
+        providerSymbol,
+        env
+      );
 
       return json({
         ok: true,
         symbol,
         providerSymbol,
-        price,
+        price: result.price,
         status: "LIVE",
-        source: "Twelve Data",
+        source: result.source,
         timestamp: new Date().toISOString()
       });
 
     } catch (error) {
-      console.error("Market data error:", error.message);
+      console.error(
+        "All live market providers failed:",
+        error.message
+      );
+
       return json({
         ok: false,
         status: "ERROR",
-        error: error.name === "TimeoutError"
-          ? "Market data request timed out"
-          : "Unable to retrieve market data"
+        error: "Unable to retrieve live market data",
+        timestamp: new Date().toISOString()
       }, 502);
     }
   }
 
+  /* =====================================
+     HISTORICAL CANDLES
+     GET /api/candles
+  ===================================== */
+
   if (url.pathname === "/api/candles") {
-    const interval = url.searchParams.get("interval") || "5min";
+    const interval =
+      url.searchParams.get("interval") || "5min";
 
     if (!ALLOWED_INTERVALS.includes(interval)) {
       return json({
+        ok: false,
         error: "Unsupported interval",
         allowedIntervals: ALLOWED_INTERVALS
       }, 400);
     }
 
-    const requested = Number(url.searchParams.get("outputsize") || 100);
+    const requested = Number(
+      url.searchParams.get("outputsize") || 100
+    );
 
     const outputsize = Math.min(
       500,
-      Math.max(1, Number.isFinite(requested) ? Math.floor(requested) : 100)
+      Math.max(
+        1,
+        Number.isFinite(requested)
+          ? Math.floor(requested)
+          : 100
+      )
     );
 
-    const apiUrl = new URL("https://api.twelvedata.com/time_series");
-    apiUrl.searchParams.set("symbol", providerSymbol);
-    apiUrl.searchParams.set("interval", interval);
-    apiUrl.searchParams.set("outputsize", String(outputsize));
-    apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
-
     try {
-      const response = await fetch(apiUrl.toString(), {
-        signal: AbortSignal.timeout(MARKET_REQUEST_TIMEOUT_MS)
-      });
-      const data = await response.json();
+      const result = await marketGetCandles(
+        providerSymbol,
+        interval,
+        outputsize,
+        env
+      );
 
-      if (!response.ok || !Array.isArray(data.values)) {
-        return json({
-          error: "Unable to retrieve historical market data",
-          details: data.message || "No candle data returned"
-        }, 502);
-      }
-
-      const candles = data.values
-        .map(item => ({
-          time: item.datetime,
-          open: Number(item.open),
-          high: Number(item.high),
-          low: Number(item.low),
-          close: Number(item.close),
-          volume: Number(item.volume || 0)
-        }))
-        .filter(candle => {
-          const timeIsValid = Boolean(candle.time) &&
-            Number.isFinite(Date.parse(candle.time));
-          const pricesAreValid =
-            Number.isFinite(candle.open) && candle.open > 0 &&
-            Number.isFinite(candle.high) && candle.high > 0 &&
-            Number.isFinite(candle.low) && candle.low > 0 &&
-            Number.isFinite(candle.close) && candle.close > 0;
-          const rangeIsValid =
-            candle.high >= Math.max(candle.open, candle.close, candle.low) &&
-            candle.low <= Math.min(candle.open, candle.close, candle.high);
-          return timeIsValid && pricesAreValid && rangeIsValid;
-        })
-        .sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+      const candles = result.candles;
 
       if (!candles.length) {
         return json({
@@ -1453,606 +1182,26 @@ async function handleMarket(request, env, url) {
         candles,
         latestCandleAt: candles[candles.length - 1].time,
         status: "LIVE",
-        source: "Twelve Data",
+        source: result.source,
         timestamp: new Date().toISOString()
       });
 
     } catch (error) {
-      console.error("Candlestick data error:", error.message);
+      console.error(
+        "Historical market providers failed:",
+        error.message
+      );
+
       return json({
         ok: false,
         status: "ERROR",
-        error: error.name === "TimeoutError"
-          ? "Historical candle request timed out"
-          : "Unable to retrieve candlestick data"
+        error: "Unable to retrieve historical market data",
+        timestamp: new Date().toISOString()
       }, 502);
     }
   }
 
   return null;
-}
-/* =========================================
-   HISTORICAL DATA IMPORT ENGINE
-   - MT5 historical candle storage
-   - Cloudflare D1 database
-   - CSV/ZIP data uploaded in batches
-   - Dataset ownership protection
-   - Subscription entitlement enforcement
-========================================= */
-
-const HISTORICAL_MAX_CANDLES = 110000;
-const HISTORICAL_MAX_BATCH = 100;
-const HISTORICAL_MAX_BODY = 65536;
-
-const HISTORICAL_TIMEFRAMES = new Set([
-  "M1", "M5", "M15", "M30",
-  "H1", "H4", "D1", "W1", "MN1"
-]);
-
-function historicalError(message, status = 400) {
-  return json({
-    ok: false,
-    error: message
-  }, status);
-}
-
-async function historicalReadJson(request) {
-  const contentLength = Number(
-    request.headers.get("Content-Length") || 0
-  );
-
-  if (contentLength > HISTORICAL_MAX_BODY) {
-    throw new Error("Request too large");
-  }
-
-  const text = await request.text();
-
-  if (text.length > HISTORICAL_MAX_BODY) {
-    throw new Error("Request too large");
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("Invalid JSON request");
-  }
-}
-
-function historicalNormalizeTimestamp(value) {
-  if (typeof value !== "string" && typeof value !== "number") {
-    return null;
-  }
-
-  const date = new Date(value);
-
-  if (!Number.isFinite(date.getTime())) {
-    return null;
-  }
-
-  return date.toISOString();
-}
-
-function historicalValidateCandle(item) {
-  if (!item || typeof item !== "object") {
-    return null;
-  }
-
-  const timestamp = historicalNormalizeTimestamp(
-    item.timestamp || item.time || item.datetime
-  );
-
-  const open = Number(item.open);
-  const high = Number(item.high);
-  const low = Number(item.low);
-  const close = Number(item.close);
-  const volume = Number(item.volume ?? 0);
-
-  if (!timestamp) return null;
-
-  if (
-    !Number.isFinite(open) ||
-    !Number.isFinite(high) ||
-    !Number.isFinite(low) ||
-    !Number.isFinite(close) ||
-    !Number.isFinite(volume)
-  ) {
-    return null;
-  }
-
-  if (
-    open <= 0 ||
-    high <= 0 ||
-    low <= 0 ||
-    close <= 0 ||
-    volume < 0
-  ) {
-    return null;
-  }
-
-  if (
-    high < Math.max(open, close, low) ||
-    low > Math.min(open, close, high)
-  ) {
-    return null;
-  }
-
-  return {
-    timestamp,
-    open,
-    high,
-    low,
-    close,
-    volume
-  };
-}
-
-async function handleHistoricalData(request, env, url) {
-
-  const user = await getAuthenticatedUser(request, env);
-
-  if (!user) {
-    return historicalError("Authentication required", 401);
-  }
-
-  const entitlement = await getSubscriptionEntitlement(env, user);
-
-  if (!entitlement.active) {
-    return paymentRequiredResponse(entitlement);
-  }
-
-  const path = url.pathname;
-  const method = request.method;
-
-  /* =====================================
-     START DATASET IMPORT
-  ===================================== */
-
-  if (
-    path === "/api/historical/import/start" &&
-    method === "POST"
-  ) {
-
-    if (!validOrigin(request, url)) {
-      return historicalError("Invalid request origin", 403);
-    }
-
-    let body;
-
-    try {
-      body = await historicalReadJson(request);
-    } catch (error) {
-      return historicalError(error.message);
-    }
-
-    const symbol = String(body.symbol || "")
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "");
-
-    const timeframe = String(body.timeframe || "")
-      .toUpperCase()
-      .trim();
-
-    const fileName = String(body.fileName || "MT5 import")
-      .slice(0, 200);
-
-    if (!/^[A-Z0-9]{3,20}$/.test(symbol)) {
-      return historicalError("Invalid trading symbol");
-    }
-
-    if (!HISTORICAL_TIMEFRAMES.has(timeframe)) {
-      return historicalError("Unsupported timeframe");
-    }
-
-    const existing = await env.DB.prepare(`
-      SELECT COUNT(*) AS total
-      FROM historical_datasets
-      WHERE user_id = ?
-        AND status = 'pending'
-    `).bind(user.id).first();
-
-    if (Number(existing?.total || 0) >= 5) {
-      return historicalError(
-        "You have too many unfinished imports. Complete or remove an existing import first.",
-        429
-      );
-    }
-
-    const datasetId = randomId(16);
-
-    await env.DB.prepare(`
-      INSERT INTO historical_datasets (
-        id,
-        user_id,
-        symbol,
-        timeframe,
-        source,
-        file_name,
-        candle_count,
-        status
-      )
-      VALUES (?, ?, ?, ?, 'MT5', ?, 0, 'pending')
-    `).bind(
-      datasetId,
-      user.id,
-      symbol,
-      timeframe,
-      fileName
-    ).run();
-
-    return json({
-      ok: true,
-      message: "Historical dataset created",
-      datasetId,
-      symbol,
-      timeframe,
-      status: "pending",
-      maximumCandles: HISTORICAL_MAX_CANDLES,
-      maximumBatchSize: HISTORICAL_MAX_BATCH
-    });
-  }
-
-  /* =====================================
-     UPLOAD CANDLE BATCH
-  ===================================== */
-
-  if (
-    path === "/api/historical/import/chunk" &&
-    method === "POST"
-  ) {
-
-    if (!validOrigin(request, url)) {
-      return historicalError("Invalid request origin", 403);
-    }
-
-    let body;
-
-    try {
-      body = await historicalReadJson(request);
-    } catch (error) {
-      return historicalError(error.message);
-    }
-
-    const datasetId = String(body.datasetId || "");
-    const candles = body.candles;
-
-    if (!/^[a-f0-9]{32}$/.test(datasetId)) {
-      return historicalError("Invalid dataset ID");
-    }
-
-    if (
-      !Array.isArray(candles) ||
-      candles.length < 1 ||
-      candles.length > HISTORICAL_MAX_BATCH
-    ) {
-      return historicalError(
-        `Batch must contain between 1 and ${HISTORICAL_MAX_BATCH} candles`
-      );
-    }
-
-    const dataset = await env.DB.prepare(`
-      SELECT id, status, candle_count
-      FROM historical_datasets
-      WHERE id = ?
-        AND user_id = ?
-    `).bind(datasetId, user.id).first();
-
-    if (!dataset) {
-      return historicalError("Dataset not found", 404);
-    }
-
-    if (dataset.status !== "pending") {
-      return historicalError("Dataset is not accepting uploads", 409);
-    }
-
-    const currentCount = Number(dataset.candle_count || 0);
-
-    if (
-      currentCount + candles.length >
-      HISTORICAL_MAX_CANDLES
-    ) {
-      return historicalError(
-        `Maximum ${HISTORICAL_MAX_CANDLES} candles allowed per dataset`
-      );
-    }
-
-    const validated = candles.map(historicalValidateCandle);
-
-    if (validated.some(candle => candle === null)) {
-      return historicalError(
-        "Batch contains invalid candle data"
-      );
-    }
-
-    const statements = validated.map(candle =>
-      env.DB.prepare(`
-        INSERT OR IGNORE INTO historical_candles (
-          dataset_id,
-          timestamp,
-          open,
-          high,
-          low,
-          close,
-          volume
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).bind(
-        datasetId,
-        candle.timestamp,
-        candle.open,
-        candle.high,
-        candle.low,
-        candle.close,
-        candle.volume
-      )
-    );
-
-    await env.DB.batch(statements);
-
-    const result = await env.DB.prepare(`
-      SELECT COUNT(*) AS total
-      FROM historical_candles
-      WHERE dataset_id = ?
-    `).bind(datasetId).first();
-
-    const savedCount = Number(result?.total || 0);
-
-    if (savedCount > HISTORICAL_MAX_CANDLES) {
-      return historicalError("Dataset candle limit exceeded", 413);
-    }
-
-    await env.DB.prepare(`
-      UPDATE historical_datasets
-      SET candle_count = ?
-      WHERE id = ?
-        AND user_id = ?
-        AND status = 'pending'
-    `).bind(
-      savedCount,
-      datasetId,
-      user.id
-    ).run();
-
-    return json({
-      ok: true,
-      datasetId,
-      received: candles.length,
-      stored: savedCount,
-      status: "uploading"
-    });
-  }
-
-  /* =====================================
-     COMPLETE DATASET IMPORT
-  ===================================== */
-
-  if (
-    path === "/api/historical/import/complete" &&
-    method === "POST"
-  ) {
-
-    if (!validOrigin(request, url)) {
-      return historicalError("Invalid request origin", 403);
-    }
-
-    let body;
-
-    try {
-      body = await historicalReadJson(request);
-    } catch (error) {
-      return historicalError(error.message);
-    }
-
-    const datasetId = String(body.datasetId || "");
-
-    if (!/^[a-f0-9]{32}$/.test(datasetId)) {
-      return historicalError("Invalid dataset ID");
-    }
-
-    const dataset = await env.DB.prepare(`
-      SELECT id, status
-      FROM historical_datasets
-      WHERE id = ?
-        AND user_id = ?
-    `).bind(datasetId, user.id).first();
-
-    if (!dataset) {
-      return historicalError("Dataset not found", 404);
-    }
-
-    if (dataset.status === "complete") {
-      return json({
-        ok: true,
-        message: "Dataset already completed",
-        datasetId
-      });
-    }
-
-    if (dataset.status !== "pending") {
-      return historicalError("Dataset cannot be completed", 409);
-    }
-
-    const stats = await env.DB.prepare(`
-      SELECT
-        COUNT(*) AS total,
-        MIN(timestamp) AS first_timestamp,
-        MAX(timestamp) AS last_timestamp
-      FROM historical_candles
-      WHERE dataset_id = ?
-    `).bind(datasetId).first();
-
-    const count = Number(stats?.total || 0);
-
-    if (count < 1) {
-      return historicalError("No candles have been imported");
-    }
-
-    await env.DB.prepare(`
-      UPDATE historical_datasets
-      SET
-        candle_count = ?,
-        first_timestamp = ?,
-        last_timestamp = ?,
-        status = 'complete'
-      WHERE id = ?
-        AND user_id = ?
-    `).bind(
-      count,
-      stats.first_timestamp,
-      stats.last_timestamp,
-      datasetId,
-      user.id
-    ).run();
-
-    return json({
-      ok: true,
-      message: "Historical import completed successfully",
-      datasetId,
-      candleCount: count,
-      firstTimestamp: stats.first_timestamp,
-      lastTimestamp: stats.last_timestamp,
-      status: "complete"
-    });
-  }
-
-  /* =====================================
-     LIST USER DATASETS
-  ===================================== */
-
-  if (
-    path === "/api/historical/datasets" &&
-    method === "GET"
-  ) {
-
-    const result = await env.DB.prepare(`
-      SELECT
-        id,
-        symbol,
-        timeframe,
-        source,
-        file_name,
-        candle_count,
-        first_timestamp,
-        last_timestamp,
-        status,
-        created_at
-      FROM historical_datasets
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-      LIMIT 100
-    `).bind(user.id).all();
-
-    return json({
-      ok: true,
-      datasets: result.results || []
-    });
-  }
-
-  /* =====================================
-     RETRIEVE HISTORICAL CANDLES
-  ===================================== */
-
-  if (
-    path === "/api/historical/candles" &&
-    method === "GET"
-  ) {
-
-    const datasetId = url.searchParams.get("datasetId");
-
-    if (!datasetId || !/^[a-f0-9]{32}$/.test(datasetId)) {
-      return historicalError("Invalid dataset ID");
-    }
-
-    const dataset = await env.DB.prepare(`
-      SELECT id, symbol, timeframe, candle_count, status
-      FROM historical_datasets
-      WHERE id = ?
-        AND user_id = ?
-    `).bind(datasetId, user.id).first();
-
-    if (!dataset) {
-      return historicalError("Dataset not found", 404);
-    }
-
-    if (dataset.status !== "complete") {
-      return historicalError("Dataset import is not complete", 409);
-    }
-
-    const requestedLimit = Number(
-      url.searchParams.get("limit") || 1000
-    );
-
-    const limit = Math.min(
-      5000,
-      Math.max(
-        1,
-        Number.isFinite(requestedLimit)
-          ? Math.floor(requestedLimit)
-          : 1000
-      )
-    );
-
-    const before = url.searchParams.get("before");
-
-    let query;
-    let result;
-
-    if (before) {
-      const timestamp = historicalNormalizeTimestamp(before);
-
-      if (!timestamp) {
-        return historicalError("Invalid before timestamp");
-      }
-
-      query = `
-        SELECT timestamp, open, high, low, close, volume
-        FROM historical_candles
-        WHERE dataset_id = ?
-          AND timestamp < ?
-        ORDER BY timestamp DESC
-        LIMIT ?
-      `;
-
-      result = await env.DB.prepare(query)
-        .bind(datasetId, timestamp, limit)
-        .all();
-
-    } else {
-      query = `
-        SELECT timestamp, open, high, low, close, volume
-        FROM historical_candles
-        WHERE dataset_id = ?
-        ORDER BY timestamp DESC
-        LIMIT ?
-      `;
-
-      result = await env.DB.prepare(query)
-        .bind(datasetId, limit)
-        .all();
-    }
-
-    const candles = (result.results || [])
-      .reverse()
-      .map(item => ({
-        time: item.timestamp,
-        open: item.open,
-        high: item.high,
-        low: item.low,
-        close: item.close,
-        volume: item.volume
-      }));
-
-    return json({
-      ok: true,
-      datasetId,
-      symbol: dataset.symbol,
-      timeframe: dataset.timeframe,
-      totalCandles: dataset.candle_count,
-      returnedCandles: candles.length,
-      candles
-    });
-  }
-
-  return historicalError("Historical API route not found", 404);
 }
 /* =========================================
    DERIV OAUTH CONNECTION (AUTHORIZATION CODE + PKCE)
@@ -2073,57 +1222,28 @@ function randomBytes(length) {
 function bytesToBase64Url(bytes) {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function base64ToBytes(value) {
-  const normalized = String(value)
-    .replace(/-/g, "+")
-    .replace(/_/g, "/");
-
-  const padded = normalized.padEnd(
-    Math.ceil(normalized.length / 4) * 4,
-    "="
-  );
-
+  const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
   const binary = atob(padded);
-
-  return Uint8Array.from(
-    binary,
-    character => character.charCodeAt(0)
-  );
+  return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
 async function sha256Bytes(value) {
-  return new Uint8Array(
-    await crypto.subtle.digest("SHA-256", encoder.encode(value))
-  );
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
 }
 
 async function encryptDerivToken(env, token) {
-  if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
-    throw new Error("Deriv encryption key is not configured");
-  }
+  if (!env.DERIV_TOKEN_ENCRYPTION_KEY) throw new Error("Deriv encryption key is not configured");
 
   const rawKey = base64ToBytes(env.DERIV_TOKEN_ENCRYPTION_KEY);
+  if (rawKey.length !== 32) throw new Error("Deriv encryption key must decode to 32 bytes");
 
-  if (rawKey.length !== 32) {
-    throw new Error("Deriv encryption key must decode to 32 bytes");
-  }
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    rawKey,
-    "AES-GCM",
-    false,
-    ["encrypt"]
-  );
-
+  const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["encrypt"]);
   const iv = randomBytes(12);
-
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     key,
@@ -2134,30 +1254,15 @@ async function encryptDerivToken(env, token) {
 }
 
 async function decryptDerivToken(env, encrypted) {
-  if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
-    throw new Error("Deriv encryption key is not configured");
-  }
+  if (!env.DERIV_TOKEN_ENCRYPTION_KEY) throw new Error("Deriv encryption key is not configured");
 
   const rawKey = base64ToBytes(env.DERIV_TOKEN_ENCRYPTION_KEY);
-
-  if (rawKey.length !== 32) {
-    throw new Error("Deriv encryption key must decode to 32 bytes");
-  }
+  if (rawKey.length !== 32) throw new Error("Deriv encryption key must decode to 32 bytes");
 
   const [ivText, ciphertextText] = String(encrypted || "").split(".");
+  if (!ivText || !ciphertextText) throw new Error("Stored Deriv token is invalid");
 
-  if (!ivText || !ciphertextText) {
-    throw new Error("Stored Deriv token is invalid");
-  }
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    rawKey,
-    "AES-GCM",
-    false,
-    ["decrypt"]
-  );
-
+  const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: base64ToBytes(ivText) },
     key,
@@ -2182,10 +1287,7 @@ async function getDerivAccessToken(env, userId) {
 
   if (!row?.access_token) return null;
 
-  if (
-    row.token_expires_at &&
-    Date.parse(row.token_expires_at) <= Date.now()
-  ) {
+  if (row.token_expires_at && Date.parse(row.token_expires_at) <= Date.now()) {
     return null;
   }
 
@@ -2196,27 +1298,35 @@ async function derivApiFetch(token, path, options = {}) {
   return fetch(`${DERIV_API_BASE}${path}`, {
     ...options,
     headers: {
-      "Authorization": `Bearer ${token}`,
-      "Accept": "application/json",
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
       ...(options.headers || {})
     },
     signal: AbortSignal.timeout(15000)
   });
 }
 
-
 /* =========================================
    SECURE DERIV DEMO WEBSOCKET PROXY
-   - Deriv OTP and upstream socket stay server-side.
-   - Browser connects only to this Worker.
-   - Only demo accounts are permitted.
-   - Contract types are discovered from Deriv per market before proposals.
-   - Digit and price barriers are validated server-side.
-   - Demo proposals and purchases are capped at USD 10.
 ========================================= */
 
 const DERIV_MAX_STAKE_USD = 10;
-const DERIV_ALLOWED_CONTRACTS = new Set(["CALL", "PUT"]); // Legacy fallback; live availability is discovered per symbol.
+const DERIV_ALLOWED_CONTRACTS = new Set(["CALL", "PUT"]);
+const DERIV_MAX_WS_MESSAGE_BYTES = 4096;
+const DERIV_MAX_PROPOSALS = 100;
+const DERIV_PROPOSAL_TTL_MS = 60000;
+
+const DERIV_ALLOWED_WS_ACTIONS = new Set([
+  "balance",
+  "portfolio",
+  "statement",
+  "ticks",
+  "contracts_for",
+  "proposal",
+  "buy",
+  "proposal_open_contract",
+  "forget"
+]);
 
 function wsError(socket, code, message, echoReq = undefined) {
   try {
@@ -2228,21 +1338,16 @@ function wsError(socket, code, message, echoReq = undefined) {
   } catch {}
 }
 
-const DERIV_MAX_WS_MESSAGE_BYTES = 4096;
-const DERIV_MAX_PROPOSALS = 100;
-const DERIV_PROPOSAL_TTL_MS = 60_000;
-const DERIV_ALLOWED_WS_ACTIONS = new Set([
-  "balance", "portfolio", "statement", "ticks", "contracts_for", "proposal", "buy",
-  "proposal_open_contract", "forget"
-]);
-
 function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, discoveredContracts) {
   let payload;
+
   try {
     const rawText = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+
     if (new TextEncoder().encode(rawText).byteLength > DERIV_MAX_WS_MESSAGE_BYTES) {
       return { ok: false, code: "MessageTooLarge", message: "Request exceeds the permitted size." };
     }
+
     payload = JSON.parse(rawText);
   } catch {
     return { ok: false, code: "InvalidJSON", message: "Invalid or oversized JSON request." };
@@ -2255,6 +1360,7 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
   const actions = [...DERIV_ALLOWED_WS_ACTIONS].filter(key =>
     Object.prototype.hasOwnProperty.call(payload, key)
   );
+
   const allowedKeys = new Set([
     "req_id", "subscribe", "balance", "portfolio", "statement", "description",
     "limit", "offset", "ticks", "contracts_for", "proposal", "amount", "basis",
@@ -2262,23 +1368,48 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
     "underlying_symbol", "barrier", "barrier2",
     "buy", "price", "proposal_open_contract", "contract_id", "forget"
   ]);
+
   if (actions.length !== 1 || Object.keys(payload).some(key => !allowedKeys.has(key))) {
-    return { ok: false, code: "ActionDenied", message: "This Deriv request is not permitted.", echoReq: payload };
+    return {
+      ok: false,
+      code: "ActionDenied",
+      message: "This Deriv request is not permitted.",
+      echoReq: payload
+    };
   }
-  if (payload.req_id !== undefined && (!Number.isSafeInteger(payload.req_id) || payload.req_id < 1)) {
-    return { ok: false, code: "InvalidRequestId", message: "Invalid request identifier.", echoReq: payload };
+
+  if (payload.req_id !== undefined &&
+      (!Number.isSafeInteger(payload.req_id) || payload.req_id < 1)) {
+    return {
+      ok: false,
+      code: "InvalidRequestId",
+      message: "Invalid request identifier.",
+      echoReq: payload
+    };
   }
 
   const action = actions[0];
+
   if (action === "contracts_for") {
     const symbol = String(payload.contracts_for || "");
-    if (typeof payload.contracts_for !== "string" || !/^[A-Za-z0-9_]{2,32}$/.test(symbol) || !Number.isSafeInteger(payload.req_id)) {
-      return { ok: false, code: "InvalidContractsRequest", message: "A valid market symbol and request identifier are required to discover available contracts.", echoReq: payload };
+
+    if (typeof payload.contracts_for !== "string" ||
+        !/^[A-Za-z0-9_]{2,32}$/.test(symbol) ||
+        !Number.isSafeInteger(payload.req_id)) {
+      return {
+        ok: false,
+        code: "InvalidContractsRequest",
+        message: "A valid market symbol and request identifier are required to discover available contracts.",
+        echoReq: payload
+      };
     }
-    if (discoveredContracts.size >= DERIV_MAX_PROPOSALS && !discoveredContracts.has(symbol)) {
+
+    if (discoveredContracts.size >= DERIV_MAX_PROPOSALS &&
+        !discoveredContracts.has(symbol)) {
       const oldest = discoveredContracts.keys().next().value;
       if (oldest) discoveredContracts.delete(oldest);
     }
+
     return { ok: true, payload };
   }
 
@@ -2290,65 +1421,139 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
     const symbol = String(payload.underlying_symbol || "");
     const duration = Number(payload.duration);
     const unit = String(payload.duration_unit || "");
+
     const unitLimits = { t: 10, s: 86400, m: 1440, h: 24, d: 365 };
     const available = discoveredContracts.get(symbol);
-    const contractAvailable = Array.isArray(available) && available.some(item =>
-      String(item.contract_type || "").toUpperCase() === contractType
-    );
+
+    const contractAvailable = Array.isArray(available) &&
+      available.some(item =>
+        String(item.contract_type || "").toUpperCase() === contractType
+      );
 
     const barrier = payload.barrier === undefined || payload.barrier === null
       ? ""
       : String(payload.barrier).trim();
+
     const barrier2 = payload.barrier2 === undefined || payload.barrier2 === null
       ? ""
       : String(payload.barrier2).trim();
+
     const validBarrier = value =>
       value !== "" && /^[+-]?\d{1,12}(\.\d{1,8})?$/.test(value);
 
     const digitContracts = new Set([
       "DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"
     ]);
+
     const singleBarrierContracts = new Set([
       "ONETOUCH", "NOTOUCH", "HIGHER", "LOWER"
     ]);
+
     const rangeContracts = new Set(["RANGE", "EXPIRYRANGE"]);
 
-    if (payload.proposal !== 1 || !/^[A-Z0-9_]{2,32}$/.test(contractType) || !contractAvailable) {
-      return { ok: false, code: "ContractDenied", message: "This contract type has not been confirmed as available for the selected market. Refresh the market's available contracts and try again.", echoReq: payload };
+    if (payload.proposal !== 1 ||
+        !/^[A-Z0-9_]{2,32}$/.test(contractType) ||
+        !contractAvailable) {
+      return {
+        ok: false,
+        code: "ContractDenied",
+        message: "This contract type has not been confirmed as available for the selected market. Refresh the market's available contracts and try again.",
+        echoReq: payload
+      };
     }
-    if (basis !== "stake" || !Number.isFinite(amount) || amount <= 0 || amount > DERIV_MAX_STAKE_USD || currency !== "USD") {
-      return { ok: false, code: "StakeLimitExceeded", message: "Demo stake must be greater than zero and no more than USD 10.", echoReq: payload };
+
+    if (basis !== "stake" ||
+        !Number.isFinite(amount) ||
+        amount <= 0 ||
+        amount > DERIV_MAX_STAKE_USD ||
+        currency !== "USD") {
+      return {
+        ok: false,
+        code: "StakeLimitExceeded",
+        message: "Demo stake must be greater than zero and no more than USD 10.",
+        echoReq: payload
+      };
     }
-    if (!/^[A-Za-z0-9_]{2,32}$/.test(symbol) || !unitLimits[unit] || !Number.isInteger(duration) || duration < 1 || duration > unitLimits[unit]) {
-      return { ok: false, code: "ProposalParametersDenied", message: "Invalid market symbol or contract duration.", echoReq: payload };
+
+    if (!/^[A-Za-z0-9_]{2,32}$/.test(symbol) ||
+        !unitLimits[unit] ||
+        !Number.isInteger(duration) ||
+        duration < 1 ||
+        duration > unitLimits[unit]) {
+      return {
+        ok: false,
+        code: "ProposalParametersDenied",
+        message: "Invalid market symbol or contract duration.",
+        echoReq: payload
+      };
     }
+
     if (!Number.isSafeInteger(payload.req_id)) {
-      return { ok: false, code: "RequestIdRequired", message: "A valid request identifier is required.", echoReq: payload };
+      return {
+        ok: false,
+        code: "RequestIdRequired",
+        message: "A valid request identifier is required.",
+        echoReq: payload
+      };
     }
 
     if (digitContracts.has(contractType)) {
       if (!/^[0-9]$/.test(barrier) || barrier2 !== "") {
-        return { ok: false, code: "InvalidDigitBarrier", message: "Digit contracts require one barrier digit from 0 to 9 and no second barrier.", echoReq: payload };
+        return {
+          ok: false,
+          code: "InvalidDigitBarrier",
+          message: "Digit contracts require one barrier digit from 0 to 9 and no second barrier.",
+          echoReq: payload
+        };
       }
     } else if (singleBarrierContracts.has(contractType)) {
       if (!validBarrier(barrier) || barrier2 !== "") {
-        return { ok: false, code: "InvalidBarrier", message: "This contract requires one valid price barrier and no second barrier.", echoReq: payload };
+        return {
+          ok: false,
+          code: "InvalidBarrier",
+          message: "This contract requires one valid price barrier and no second barrier.",
+          echoReq: payload
+        };
       }
     } else if (rangeContracts.has(contractType)) {
-      if (!validBarrier(barrier) || !validBarrier(barrier2) || Number(barrier) >= Number(barrier2)) {
-        return { ok: false, code: "InvalidRangeBarriers", message: "Range contracts require two valid price barriers, with the lower barrier below the upper barrier.", echoReq: payload };
+      if (!validBarrier(barrier) ||
+          !validBarrier(barrier2) ||
+          Number(barrier) >= Number(barrier2)) {
+        return {
+          ok: false,
+          code: "InvalidRangeBarriers",
+          message: "Range contracts require two valid price barriers, with the lower barrier below the upper barrier.",
+          echoReq: payload
+        };
       }
     } else if (barrier !== "" || barrier2 !== "") {
-      return { ok: false, code: "UnexpectedBarrier", message: "This contract type does not accept a barrier.", echoReq: payload };
+      return {
+        ok: false,
+        code: "UnexpectedBarrier",
+        message: "This contract type does not accept a barrier.",
+        echoReq: payload
+      };
     }
 
     if (pendingProposalRequests.size >= DERIV_MAX_PROPOSALS) {
-      return { ok: false, code: "ProposalLimitReached", message: "Too many outstanding proposals. Wait and try again.", echoReq: payload };
+      return {
+        ok: false,
+        code: "ProposalLimitReached",
+        message: "Too many outstanding proposals. Wait and try again.",
+        echoReq: payload
+      };
     }
 
     pendingProposalRequests.set(payload.req_id, {
-      amount, contractType, currency, symbol, barrier, barrier2, createdAt: Date.now()
+      amount,
+      contractType,
+      currency,
+      symbol,
+      barrier,
+      barrier2,
+      createdAt: Date.now()
     });
+
     return { ok: true, payload };
   }
 
@@ -2356,39 +1561,91 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
     const proposalId = String(payload.buy || "");
     const price = Number(payload.price);
     const record = proposalIds.get(proposalId);
+
     if (!record || record.expiresAt < Date.now()) {
       proposalIds.delete(proposalId);
-      return { ok: false, code: "ProposalNotAuthorised", message: "Proposal is missing, expired or already used. Request a fresh quote.", echoReq: payload };
+      return {
+        ok: false,
+        code: "ProposalNotAuthorised",
+        message: "Proposal is missing, expired or already used. Request a fresh quote.",
+        echoReq: payload
+      };
     }
-    if (!Number.isFinite(price) || price <= 0 || price > DERIV_MAX_STAKE_USD || price > record.askPrice + 0.0000001) {
-      return { ok: false, code: "PurchaseLimitExceeded", message: "Purchase price exceeds the authorised proposal price or USD 10 limit.", echoReq: payload };
+
+    if (!Number.isFinite(price) ||
+        price <= 0 ||
+        price > DERIV_MAX_STAKE_USD ||
+        price > record.askPrice + 0.0000001) {
+      return {
+        ok: false,
+        code: "PurchaseLimitExceeded",
+        message: "Purchase price exceeds the authorised proposal price or USD 10 limit.",
+        echoReq: payload
+      };
     }
-    proposalIds.delete(proposalId); // consume before forwarding to prevent replay
+
+    proposalIds.delete(proposalId);
     return { ok: true, payload };
   }
 
   if (action === "ticks") {
-    if (typeof payload.ticks !== "string" || !/^[A-Za-z0-9_]{2,32}$/.test(payload.ticks) || ![0, 1].includes(payload.subscribe)) {
-      return { ok: false, code: "InvalidSubscription", message: "Invalid tick subscription.", echoReq: payload };
+    if (typeof payload.ticks !== "string" ||
+        !/^[A-Za-z0-9_]{2,32}$/.test(payload.ticks) ||
+        ![0, 1].includes(payload.subscribe)) {
+      return {
+        ok: false,
+        code: "InvalidSubscription",
+        message: "Invalid tick subscription.",
+        echoReq: payload
+      };
     }
   } else if (action === "balance") {
-    if (payload.balance !== 1 || (payload.subscribe !== undefined && ![0, 1].includes(payload.subscribe))) {
-      return { ok: false, code: "InvalidRequest", message: "Invalid balance request.", echoReq: payload };
+    if (payload.balance !== 1 ||
+        (payload.subscribe !== undefined && ![0, 1].includes(payload.subscribe))) {
+      return {
+        ok: false,
+        code: "InvalidRequest",
+        message: "Invalid balance request.",
+        echoReq: payload
+      };
     }
   } else if (action === "portfolio") {
-    if (payload.portfolio !== 1) return { ok: false, code: "InvalidRequest", message: "Invalid portfolio request.", echoReq: payload };
+    if (payload.portfolio !== 1) {
+      return { ok: false, code: "InvalidRequest", message: "Invalid portfolio request.", echoReq: payload };
+    }
   } else if (action === "statement") {
-    const limit = Number(payload.limit ?? 50), offset = Number(payload.offset ?? 0);
-    if (payload.statement !== 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 10000) {
-      return { ok: false, code: "InvalidStatementRequest", message: "Statement request is outside permitted limits.", echoReq: payload };
+    const limit = Number(payload.limit ?? 50);
+    const offset = Number(payload.offset ?? 0);
+
+    if (payload.statement !== 1 ||
+        !Number.isInteger(limit) || limit < 1 || limit > 100 ||
+        !Number.isInteger(offset) || offset < 0 || offset > 10000) {
+      return {
+        ok: false,
+        code: "InvalidStatementRequest",
+        message: "Statement request is outside permitted limits.",
+        echoReq: payload
+      };
     }
   } else if (action === "proposal_open_contract") {
-    if (payload.proposal_open_contract !== 1 || !/^\d{1,24}$/.test(String(payload.contract_id || "")) || ![0, 1].includes(payload.subscribe)) {
-      return { ok: false, code: "InvalidContractRequest", message: "Invalid contract monitoring request.", echoReq: payload };
+    if (payload.proposal_open_contract !== 1 ||
+        !/^\d{1,24}$/.test(String(payload.contract_id || "")) ||
+        ![0, 1].includes(payload.subscribe)) {
+      return {
+        ok: false,
+        code: "InvalidContractRequest",
+        message: "Invalid contract monitoring request.",
+        echoReq: payload
+      };
     }
   } else if (action === "forget") {
     if (typeof payload.forget !== "string" || payload.forget.length > 128) {
-      return { ok: false, code: "InvalidSubscription", message: "Invalid subscription identifier.", echoReq: payload };
+      return {
+        ok: false,
+        code: "InvalidSubscription",
+        message: "Invalid subscription identifier.",
+        echoReq: payload
+      };
     }
   }
 
@@ -2396,7 +1653,8 @@ function validateDerivClientMessage(raw, proposalIds, pendingProposalRequests, d
 }
 
 async function handleDerivSocket(request, env, url, user) {
-  if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+  if (request.method !== "GET" ||
+      request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
     return json({ error: "WebSocket upgrade required" }, 426, { Upgrade: "websocket" });
   }
 
@@ -2405,11 +1663,13 @@ async function handleDerivSocket(request, env, url, user) {
   }
 
   const accountId = String(url.searchParams.get("account_id") || "").trim();
+
   if (!/^[A-Za-z0-9_-]{3,32}$/.test(accountId)) {
     return json({ error: "Invalid Deriv account ID" }, 400);
   }
 
   let token;
+
   try {
     token = await getDerivAccessToken(env, user.id);
   } catch (error) {
@@ -2432,19 +1692,21 @@ async function handleDerivSocket(request, env, url, user) {
     const accounts = Array.isArray(accountsData.data)
       ? accountsData.data
       : (accountsData.data ? [accountsData.data] : []);
+
     const account = accounts.find(item => String(item.account_id || "") === accountId);
 
     if (!account) return json({ error: "Deriv account not found." }, 404);
+
     if (String(account.account_type || "").toLowerCase() !== "demo") {
       return json({ error: "Real accounts are disabled. Only demo accounts may connect." }, 403);
     }
 
-    // Obtain the short-lived OTP on the server. It is never returned to the browser.
     const otpResponse = await derivApiFetch(
       token,
       `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
       { method: "POST" }
     );
+
     const otpData = await otpResponse.json();
     const upstreamUrl = otpData.data?.url;
 
@@ -2453,6 +1715,7 @@ async function handleDerivSocket(request, env, url, user) {
     }
 
     const parsed = new URL(upstreamUrl);
+
     if (
       parsed.protocol !== "wss:" ||
       parsed.hostname !== "api.derivws.com" ||
@@ -2461,11 +1724,11 @@ async function handleDerivSocket(request, env, url, user) {
       return json({ error: "Deriv returned an unexpected demo WebSocket URL." }, 502);
     }
 
-    // Cloudflare Workers supports outbound WebSocket upgrades through fetch().
     const upstreamResponse = await fetch(
       upstreamUrl.replace(/^wss:/i, "https:"),
       { headers: { Upgrade: "websocket" } }
     );
+
     const upstream = upstreamResponse.webSocket;
 
     if (!upstream) {
@@ -2475,30 +1738,45 @@ async function handleDerivSocket(request, env, url, user) {
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
+
     const proposalIds = new Map();
     const pendingProposalRequests = new Map();
     const discoveredContracts = new Map();
     const pendingContractsRequests = new Map();
+
     let messageWindowStart = Date.now();
     let messageCount = 0;
 
     upstream.accept({ allowHalfOpen: true });
     server.accept({ allowHalfOpen: true });
 
+    const closeBoth = (code = 1000, reason = "Connection closed") => {
+      try { if (server.readyState < 2) server.close(code, reason); } catch {}
+      try { if (upstream.readyState < 2) upstream.close(code, reason); } catch {}
+    };
+
     server.addEventListener("message", event => {
       const now = Date.now();
+
       if (now - messageWindowStart >= 1000) {
         messageWindowStart = now;
         messageCount = 0;
       }
+
       messageCount += 1;
+
       if (messageCount > 30) {
         wsError(server, "RateLimitExceeded", "Too many requests. Slow down.");
         closeBoth(1008, "Rate limit exceeded");
         return;
       }
 
-      const checked = validateDerivClientMessage(event.data, proposalIds, pendingProposalRequests, discoveredContracts);
+      const checked = validateDerivClientMessage(
+        event.data,
+        proposalIds,
+        pendingProposalRequests,
+        discoveredContracts
+      );
 
       if (!checked.ok) {
         wsError(server, checked.code, checked.message, checked.echoReq);
@@ -2509,7 +1787,8 @@ async function handleDerivSocket(request, env, url, user) {
         pendingContractsRequests.set(checked.payload.req_id, {
           symbol: checked.payload.contracts_for,
           createdAt: Date.now()
-        }); }
+        });
+      }
 
       try {
         upstream.send(JSON.stringify(checked.payload));
@@ -2523,28 +1802,35 @@ async function handleDerivSocket(request, env, url, user) {
 
       try {
         message = JSON.parse(
-          typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data)
+          typeof event.data === "string"
+            ? event.data
+            : new TextDecoder().decode(event.data)
         );
       } catch {
         try { server.send(event.data); } catch {}
         return;
       }
 
-      // Record only contract types returned by Deriv for a symbol requested
-      // on this socket. This prevents clients inventing unsupported contracts.
       const contractsResponse = message?.contracts_for;
       const contractsRequestId = message?.echo_req?.req_id ?? message?.req_id;
+
       const contractsRequest = contractsRequestId !== undefined
         ? pendingContractsRequests.get(contractsRequestId)
         : null;
+
       if (contractsRequest) {
         pendingContractsRequests.delete(contractsRequestId);
+
         if (
           Date.now() - contractsRequest.createdAt <= DERIV_PROPOSAL_TTL_MS &&
           Array.isArray(contractsResponse?.available)
         ) {
           const safeAvailable = contractsResponse.available
-            .filter(item => item && typeof item.contract_type === "string" && /^[A-Z0-9_]{2,32}$/.test(item.contract_type))
+            .filter(item =>
+              item &&
+              typeof item.contract_type === "string" &&
+              /^[A-Z0-9_]{2,32}$/.test(item.contract_type)
+            )
             .slice(0, 100)
             .map(item => ({
               contract_type: item.contract_type,
@@ -2556,19 +1842,24 @@ async function handleDerivSocket(request, env, url, user) {
               contract_category: item.contract_category,
               underlying_symbol: item.underlying_symbol
             }));
+
           discoveredContracts.set(contractsRequest.symbol, safeAvailable);
         }
       }
 
-      // Only proposals issued after a validated <= USD 10 stake request
-      // can be used for a purchase on this socket.
       const proposal = message?.proposal;
       const requestId = message?.echo_req?.req_id ?? message?.req_id;
-      const requested = requestId !== undefined ? pendingProposalRequests.get(requestId) : null;
+
+      const requested = requestId !== undefined
+        ? pendingProposalRequests.get(requestId)
+        : null;
+
       if (requested) {
         pendingProposalRequests.delete(requestId);
+
         const responseSymbol = String(message?.echo_req?.underlying_symbol || "");
         const responseContractType = String(message?.echo_req?.contract_type || "").toUpperCase();
+
         if (
           proposal?.id &&
           Date.now() - requested.createdAt <= DERIV_PROPOSAL_TTL_MS &&
@@ -2578,11 +1869,18 @@ async function handleDerivSocket(request, env, url, user) {
           String(message?.echo_req?.barrier2 ?? "") === requested.barrier2
         ) {
           const askPrice = Number(proposal.ask_price);
-          if (Number.isFinite(askPrice) && askPrice > 0 && askPrice <= DERIV_MAX_STAKE_USD && proposal.currency === "USD") {
+
+          if (
+            Number.isFinite(askPrice) &&
+            askPrice > 0 &&
+            askPrice <= DERIV_MAX_STAKE_USD &&
+            proposal.currency === "USD"
+          ) {
             if (proposalIds.size >= DERIV_MAX_PROPOSALS) {
               const oldest = proposalIds.keys().next().value;
               if (oldest) proposalIds.delete(oldest);
             }
+
             proposalIds.set(String(proposal.id), {
               askPrice,
               expiresAt: Date.now() + DERIV_PROPOSAL_TTL_MS,
@@ -2594,36 +1892,43 @@ async function handleDerivSocket(request, env, url, user) {
         }
       }
 
-      // Expire old proposal authorisations and abandoned proposal requests.
-      for (const [id, item] of proposalIds) if (item.expiresAt <= Date.now()) proposalIds.delete(id);
-      for (const [id, item] of pendingProposalRequests) if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingProposalRequests.delete(id);
-      for (const [id, item] of pendingContractsRequests) if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingContractsRequests.delete(id);
+      for (const [id, item] of proposalIds) {
+        if (item.expiresAt <= Date.now()) proposalIds.delete(id);
+      }
+
+      for (const [id, item] of pendingProposalRequests) {
+        if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingProposalRequests.delete(id);
+      }
+
+      for (const [id, item] of pendingContractsRequests) {
+        if (Date.now() - item.createdAt > DERIV_PROPOSAL_TTL_MS) pendingContractsRequests.delete(id);
+      }
 
       try {
         server.send(JSON.stringify(message));
       } catch {}
     });
 
-    const closeBoth = (code = 1000, reason = "Connection closed") => {
-      try { if (server.readyState < 2) server.close(code, reason); } catch {}
-      try { if (upstream.readyState < 2) upstream.close(code, reason); } catch {}
-    };
+    server.addEventListener("close", event =>
+      closeBoth(event.code || 1000, event.reason || "Client disconnected")
+    );
 
-    server.addEventListener("close", event => closeBoth(event.code || 1000, event.reason || "Client disconnected"));
-    upstream.addEventListener("close", event => closeBoth(event.code || 1000, event.reason || "Deriv disconnected"));
+    upstream.addEventListener("close", event =>
+      closeBoth(event.code || 1000, event.reason || "Deriv disconnected")
+    );
+
     server.addEventListener("error", () => closeBoth(1011, "Client socket error"));
     upstream.addEventListener("error", () => closeBoth(1011, "Deriv socket error"));
 
-    return new Response(null, {
-      status: 101,
-      webSocket: client
-    });
+    return new Response(null, { status: 101, webSocket: client });
 
   } catch (error) {
     console.error("Secure Deriv socket error:", error.message);
     return json({ error: "Unable to establish secure Deriv demo connection." }, 502);
   }
-}
+}/* =========================================
+   DERIV ROUTES AND ACCOUNT MANAGEMENT
+========================================= */
 
 async function handleDeriv(request, env, url) {
   const path = url.pathname;
@@ -2636,13 +1941,14 @@ async function handleDeriv(request, env, url) {
     return json({ error: "Authentication required" }, 401);
   }
 
-  // OAuth callback must complete an already-started handshake. Connection
-  // status and disconnect remain available to the account owner even after
+  // OAuth callback must complete an already-started handshake.
+  // Connection status and disconnect remain available even after
   // expiry so a user can inspect or revoke stored broker credentials.
   const accountManagementRoute =
     isCallback ||
     path === "/api/deriv/status" ||
     path === "/api/deriv/disconnect";
+
   if (!accountManagementRoute) {
     const entitlement = await getSubscriptionEntitlement(env, user);
     if (!entitlement.active) return paymentRequiredResponse(entitlement);
@@ -2652,6 +1958,7 @@ async function handleDeriv(request, env, url) {
     if (!env.DERIV_TOKEN_ENCRYPTION_KEY) {
       return json({ error: "Deriv encryption is not configured" }, 500);
     }
+
     return handleDerivSocket(request, env, url, user);
   }
 
@@ -2688,7 +1995,8 @@ async function handleDeriv(request, env, url) {
         updated_at = excluded.updated_at
     `).bind(user.id, stateHash, verifier, now, now).run();
 
-    const authUrl = new URL(DERIV_AUTH_URL); authUrl.searchParams.set("response_type", "code");
+    const authUrl = new URL(DERIV_AUTH_URL);
+    authUrl.searchParams.set("response_type", "code");
     authUrl.searchParams.set("client_id", String(env.DERIV_CLIENT_ID));
     authUrl.searchParams.set("redirect_uri", DERIV_REDIRECT_URI);
     authUrl.searchParams.set("scope", DERIV_SCOPES);
@@ -2722,8 +2030,9 @@ async function handleDeriv(request, env, url) {
     }
 
     if (Date.now() - Date.parse(pending.created_at) > 10 * 60 * 1000) {
-      await env.DB.prepare("DELETE FROM deriv_oauth WHERE user_id = ?")
-        .bind(user.id).run();
+      await env.DB.prepare(
+        "DELETE FROM deriv_oauth WHERE user_id = ?"
+      ).bind(user.id).run();
 
       return redirectToApp("state_expired");
     }
@@ -2822,8 +2131,9 @@ async function handleDeriv(request, env, url) {
       return json({ error: "Request origin rejected" }, 403);
     }
 
-    await env.DB.prepare("DELETE FROM deriv_oauth WHERE user_id = ?")
-      .bind(user.id).run();
+    await env.DB.prepare(
+      "DELETE FROM deriv_oauth WHERE user_id = ?"
+    ).bind(user.id).run();
 
     return json({
       ok: true,
@@ -2866,7 +2176,8 @@ async function handleDeriv(request, env, url) {
 
   if (!token) {
     return json({
-      ok: false,  connected: false,
+      ok: false,
+      connected: false,
       error: "Deriv is not connected or the authorization has expired. Reconnect your account."
     }, 401);
   }
@@ -2939,9 +2250,7 @@ async function handleDeriv(request, env, url) {
       return json({ error: "Deriv account not found" }, 404);
     }
 
-    /* =========================================
-       STRICT DEMO-ONLY ACCOUNT SECURITY
-    ========================================= */
+    /* STRICT DEMO-ONLY ACCOUNT SECURITY */
 
     const accountType = String(
       selectedAccount.account_type || ""
@@ -2985,45 +2294,51 @@ async function handleDeriv(request, env, url) {
       error: "Unable to connect to Deriv"
     }, 502);
   }
-}
-
-/* =========================================
-   MAIN CLOUDFLARE WORKER ENTRY POINT
-========================================= */
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-/* =========================================
-   CTRADER OAUTH HELPERS
+}/* =========================================
+   CTRADER OAUTH CONFIGURATION
 ========================================= */
 
 const CTRADER_REDIRECT_URI =
   "https://tradelabai2.balancesilence11.workers.dev/api/ctrader/callback";
 
-async function ctraderHash(value) {
-  const data = new TextEncoder().encode(value);
-  const hash = await crypto.subtle.digest("SHA-256", data);
+const CTRADER_AUTH_URL =
+  "https://id.ctrader.com/my/settings/openapi/grantingaccess/";
 
-  return [...new Uint8Array(hash)]
+const CTRADER_TOKEN_URL =
+  "https://openapi.ctrader.com/apps/token";
+
+
+/* =========================================
+   CTRADER CRYPTOGRAPHY
+========================================= */
+
+async function ctraderHash(value) {
+  const data = new TextEncoder().encode(String(value));
+
+  const digest = await crypto.subtle.digest("SHA-256", data);
+
+  return Array.from(new Uint8Array(digest))
     .map(byte => byte.toString(16).padStart(2, "0"))
     .join("");
 }
 
-async function ctraderEncrypt(value, secret) {
-  const encoder = new TextEncoder();
 
-  const keyData = await crypto.subtle.digest(
+async function ctraderEncrypt(env, value) {
+  if (!env.CTRADER_TOKEN_ENCRYPTION_KEY) {
+    throw new Error("cTrader token encryption key is not configured");
+  }
+
+  const secretHash = await crypto.subtle.digest(
     "SHA-256",
-    encoder.encode(secret)
+    new TextEncoder().encode(env.CTRADER_TOKEN_ENCRYPTION_KEY)
   );
 
   const key = await crypto.subtle.importKey(
     "raw",
-    keyData,
+    secretHash,
     { name: "AES-GCM" },
     false,
-    ["encrypt"]
+    ["encrypt", "decrypt"]
   );
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -3031,50 +2346,78 @@ async function ctraderEncrypt(value, secret) {
   const encrypted = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     key,
-    encoder.encode(value)
+    new TextEncoder().encode(String(value))
   );
 
-  const combined = new Uint8Array(iv.length + encrypted.byteLength);
-  combined.set(iv);
+  const combined = new Uint8Array(
+    iv.length + encrypted.byteLength
+  );
+
+  combined.set(iv, 0);
   combined.set(new Uint8Array(encrypted), iv.length);
 
   let binary = "";
-  combined.forEach(byte => {
+
+  for (const byte of combined) {
     binary += String.fromCharCode(byte);
-  });
+  }
 
   return btoa(binary);
 }
 
+
 /* =========================================
-   CTRADER CONNECT
+   CTRADER CONNECTION START
 ========================================= */
 
 async function handleCTraderConnect(request, env, url) {
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return redirectToApp("login_required");
+  }
+
+  const entitlement = await getSubscriptionEntitlement(env, user);
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  if (!env.CTRADER_CLIENT_ID) {
+    return json({
+      ok: false,
+      error: "cTrader client ID is not configured"
+    }, 500);
+  }
+
+  if (!env.CTRADER_TOKEN_ENCRYPTION_KEY) {
+    return json({
+      ok: false,
+      error: "cTrader token encryption is not configured"
+    }, 500);
+  }
+
   try {
-    const user = await getAuthenticatedUser(request, env);
+    const randomState = crypto.getRandomValues(
+      new Uint8Array(32)
+    );
 
-    if (!user) {
-      return json({ error: "Please log in first." }, 401);
-    }
-
-    if (!env.CTRADER_CLIENT_ID) {
-      return json({ error: "cTrader Client ID is missing." }, 500);
-    }
-
-    const stateBytes = crypto.getRandomValues(new Uint8Array(32));
-
-    let state = "";
-    stateBytes.forEach(byte => {
-      state += byte.toString(16).padStart(2, "0");
-    });
+    const state = Array.from(randomState)
+      .map(byte => byte.toString(16).padStart(2, "0"))
+      .join("");
 
     const stateHash = await ctraderHash(state);
-    const expiresAt = Math.floor(Date.now() / 1000) + 600;
+
+    const expiresAt = new Date(
+      Date.now() + 10 * 60 * 1000
+    ).toISOString();
 
     await env.DB.prepare(`
-      INSERT INTO ctrader_oauth_states
-      (state_hash, user_id, expires_at)
+      INSERT INTO ctrader_oauth_states (
+        state_hash,
+        user_id,
+        expires_at
+      )
       VALUES (?, ?, ?)
     `).bind(
       stateHash,
@@ -3082,120 +2425,140 @@ async function handleCTraderConnect(request, env, url) {
       expiresAt
     ).run();
 
-    const authorizationURL = new URL(
-      "https://id.ctrader.com/my/settings/openapi/grantingaccess/"
-    );
+    const authUrl = new URL(CTRADER_AUTH_URL);
 
-    authorizationURL.searchParams.set(
+    authUrl.searchParams.set(
       "client_id",
-      env.CTRADER_CLIENT_ID
+      String(env.CTRADER_CLIENT_ID)
     );
 
-    authorizationURL.searchParams.set(
+    authUrl.searchParams.set(
       "redirect_uri",
       CTRADER_REDIRECT_URI
     );
 
-    authorizationURL.searchParams.set("scope", "accounts");
-    authorizationURL.searchParams.set("product", "web");
-    authorizationURL.searchParams.set("state", state);
+    authUrl.searchParams.set("scope", "accounts");
+    authUrl.searchParams.set("product", "web");
+    authUrl.searchParams.set("state", state);
 
-    return Response.redirect(authorizationURL.toString(), 302);
+    return Response.redirect(authUrl.toString(), 302);
 
   } catch (error) {
-    console.error("cTrader connect error:", error);
+    console.error("cTrader connection initiation failed:", error.message);
 
     return json({
-      error: "Unable to start cTrader authorization."
+      ok: false,
+      error: "Unable to start cTrader authorization"
     }, 500);
   }
 }
+
 
 /* =========================================
    CTRADER OAUTH CALLBACK
 ========================================= */
 
 async function handleCTraderCallback(request, env, url) {
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return redirectToApp("login_required");
+  }
+
+  const oauthError = url.searchParams.get("error");
+
+  if (oauthError) {
+    console.error("cTrader authorization rejected:", oauthError);
+    return redirectToApp("ctrader_authorization_denied");
+  }
+
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+
+  if (!code || !state) {
+    return redirectToApp("ctrader_invalid_callback");
+  }
+
+  if (
+    !env.CTRADER_CLIENT_ID ||
+    !env.CTRADER_CLIENT_SECRET ||
+    !env.CTRADER_TOKEN_ENCRYPTION_KEY
+  ) {
+    console.error("cTrader OAuth configuration is incomplete");
+    return redirectToApp("ctrader_configuration_error");
+  }
+
   try {
-    const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
-    const oauthError = url.searchParams.get("error");
-
-    if (oauthError) {
-      return Response.redirect(
-        new URL("/?ctrader=denied", url.origin).toString(),
-        302
-      );
-    }
-
-    if (!code || !state) {
-      return json({
-        error: "Missing cTrader authorization code or state."
-      }, 400);
-    }
-
-    if (
-      !env.CTRADER_CLIENT_ID ||
-      !env.CTRADER_CLIENT_SECRET ||
-      !env.CTRADER_TOKEN_ENCRYPTION_KEY
-    ) {
-      return json({
-        error: "cTrader configuration is incomplete."
-      }, 500);
-    }
-
     const stateHash = await ctraderHash(state);
-    const now = Math.floor(Date.now() / 1000);
 
-    const stateRecord = await env.DB.prepare(`
-      SELECT user_id, expires_at
+    const pending = await env.DB.prepare(`
+      SELECT state_hash, user_id, expires_at
       FROM ctrader_oauth_states
       WHERE state_hash = ?
+        AND user_id = ?
       LIMIT 1
-    `).bind(stateHash).first();
+    `).bind(
+      stateHash,
+      user.id
+    ).first();
 
-    if (!stateRecord || stateRecord.expires_at < now) {
-      return json({
-        error: "Authorization session expired or invalid. Please reconnect."
-      }, 400);
+    if (!pending) {
+      return redirectToApp("ctrader_state_invalid");
     }
 
+    if (Date.parse(pending.expires_at) <= Date.now()) {
+      await env.DB.prepare(`
+        DELETE FROM ctrader_oauth_states
+        WHERE state_hash = ?
+          AND user_id = ?
+      `).bind(
+        stateHash,
+        user.id
+      ).run();
+
+      return redirectToApp("ctrader_state_expired");
+    }
+
+    // Consume the OAuth state before exchanging the authorization code.
     await env.DB.prepare(`
       DELETE FROM ctrader_oauth_states
       WHERE state_hash = ?
-    `).bind(stateHash).run();
+        AND user_id = ?
+    `).bind(
+      stateHash,
+      user.id
+    ).run();
 
-    const tokenURL = new URL(
-      "https://openapi.ctrader.com/apps/token"
-    );
+    const tokenUrl = new URL(CTRADER_TOKEN_URL);
 
-    tokenURL.searchParams.set(
+    tokenUrl.searchParams.set(
       "grant_type",
       "authorization_code"
     );
 
-    tokenURL.searchParams.set("code", code);
+    tokenUrl.searchParams.set("code", code);
 
-    tokenURL.searchParams.set(
+    tokenUrl.searchParams.set(
       "redirect_uri",
       CTRADER_REDIRECT_URI
     );
 
-    tokenURL.searchParams.set(
+    tokenUrl.searchParams.set(
       "client_id",
-      env.CTRADER_CLIENT_ID
+      String(env.CTRADER_CLIENT_ID)
     );
 
-    tokenURL.searchParams.set(
+    tokenUrl.searchParams.set(
       "client_secret",
-      env.CTRADER_CLIENT_SECRET
+      String(env.CTRADER_CLIENT_SECRET)
     );
 
-    const tokenResponse = await fetch(tokenURL.toString(), {
+    const tokenResponse = await fetch(tokenUrl.toString(), {
       method: "GET",
       headers: {
         "Accept": "application/json"
-      }
+      },
+      signal: AbortSignal.timeout(15000)
     });
 
     const tokenData = await tokenResponse.json();
@@ -3207,28 +2570,33 @@ async function handleCTraderCallback(request, env, url) {
     ) {
       console.error(
         "cTrader token exchange failed:",
-        tokenData.errorCode || tokenResponse.status
+        tokenResponse.status,
+        tokenData.errorCode || tokenData.description || "Invalid token response"
       );
 
-      return json({
-        error: "cTrader authorization could not be completed."
-      }, 400);
+      return redirectToApp("ctrader_token_exchange_failed");
     }
 
     const encryptedAccessToken = await ctraderEncrypt(
-      tokenData.accessToken,
-      env.CTRADER_TOKEN_ENCRYPTION_KEY
+      env,
+      tokenData.accessToken
     );
 
     const encryptedRefreshToken = await ctraderEncrypt(
-      tokenData.refreshToken,
-      env.CTRADER_TOKEN_ENCRYPTION_KEY
+      env,
+      tokenData.refreshToken
     );
 
-    const connectionId = crypto.randomUUID();
+    const expiresIn = Math.max(
+      60,
+      Number(tokenData.expiresIn || 3600)
+    );
 
-    const expiresAt =
-      now + Number(tokenData.expiresIn || 2592000);
+    const tokenExpiresAt = new Date(
+      Date.now() + expiresIn * 1000
+    ).toISOString();
+
+    const connectionId = crypto.randomUUID();
 
     await env.DB.prepare(`
       INSERT INTO ctrader_connections (
@@ -3240,30 +2608,27 @@ async function handleCTraderCallback(request, env, url) {
         token_expires_at
       )
       VALUES (?, ?, 'demo', ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        environment = 'demo',
+        access_token = excluded.access_token,
+        refresh_token = excluded.refresh_token,
+        token_expires_at = excluded.token_expires_at
     `).bind(
       connectionId,
-      stateRecord.user_id,
+      user.id,
       encryptedAccessToken,
       encryptedRefreshToken,
-      expiresAt
+      tokenExpiresAt
     ).run();
 
-    return Response.redirect(
-      new URL("/?ctrader=connected", url.origin).toString(),
-      302
-    );
+    return redirectToApp("ctrader_connected");
 
   } catch (error) {
-    console.error("cTrader callback error:", error);
+    console.error("cTrader callback failed:", error.message);
 
-    return json({
-      error: "Unable to complete cTrader connection."
-    }, 500);
+    return redirectToApp("ctrader_connection_failed");
   }
-}
-/* =========================================
-   CTRADER OAUTH CALLBACK
-========================================= */
+}/* CTRADER OAUTH ROUTES */
 
 if (
   path === "/api/ctrader/callback" &&
@@ -3271,106 +2636,1300 @@ if (
 ) {
   return await handleCTraderCallback(request, env, url);
 }
- if (
+
+if (
   path === "/api/ctrader/connect" &&
   request.method === "GET"
 ) {
   return await handleCTraderConnect(request, env, url);
-}   try {
-      /* HEALTH CHECK (kept compatible with the existing Worker) */
+}/* =========================================
+   HISTORICAL MARKET DATA ENGINE
+========================================= */
 
-      if (path === "/api/health" && request.method === "GET") {
-        return json({
-          ok: true,
-          service: "TradeLab AI",
-          status: "running",
-          authentication: "enabled",
-          billing: "enabled",
-          derivIntegration: "configured"
-        });
-      }
+const HISTORICAL_MAX_CANDLES = 110000;
+const HISTORICAL_MAX_BATCH = 100;
+const HISTORICAL_MAX_BODY = 65536;
 
-      /* AUTHENTICATION ROUTES */
+const HISTORICAL_TIMEFRAMES = new Set([
+  "M1",
+  "M5",
+  "M15",
+  "M30",
+  "H1",
+  "H4",
+  "D1",
+  "W1",
+  "MN1"
+]);
 
-      if (path.startsWith("/api/auth/")) {
-        return await handleAuth(request, env, url);
-      }
 
-      /* PUBLIC FLUTTERWAVE WEBHOOK (signature verified inside handler) */
+/* =========================================
+   HISTORICAL DATA HELPERS
+========================================= */
 
-      if (path === "/api/billing/flutterwave/webhook") {
-        return await handleFlutterwaveWebhook(request, env);
-      }
+function historicalError(message, status = 400) {
+  return json({
+    ok: false,
+    error: message
+  }, status);
+}
 
-      /* AUTHENTICATED BILLING ROUTES */
 
-      if (path.startsWith("/api/billing/")) {
-        return await handleBilling(request, env, url);
-      }
+async function historicalReadJson(request) {
+  const contentLength = Number(
+    request.headers.get("content-length") || 0
+  );
 
-      /* DERIV OAUTH ROUTES */
+  if (
+    Number.isFinite(contentLength) &&
+    contentLength > HISTORICAL_MAX_BODY
+  ) {
+    throw new Error("Request body is too large");
+  }
 
-      if (path.startsWith("/api/deriv/")) {
-        return await handleDeriv(request, env, url);
-      }
+  const text = await request.text();
 
-      /* MARKET DATA ROUTES */
+  if (text.length > HISTORICAL_MAX_BODY) {
+    throw new Error("Request body is too large");
+  }
 
-      if (path === "/api/market" || path === "/api/candles") {
-        const user = await getAuthenticatedUser(request, env);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Invalid JSON request body");
+  }
+}
 
-        if (!user) {
-          return json({
-            ok: false,
-            error: "Authentication required"
-          }, 401);
-        }
 
-        const entitlement = await getSubscriptionEntitlement(env, user);
-        if (!entitlement.active) return paymentRequiredResponse(entitlement);
+function historicalNormalizeTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // Convert Unix seconds to milliseconds when necessary.
+    const milliseconds = value < 100000000000
+      ? value * 1000
+      : value;
 
-        const marketResponse = await handleMarket(request, env, url);
+    const date = new Date(milliseconds);
 
-        if (marketResponse) return marketResponse;
-      }
- /* HISTORICAL DATA IMPORT ROUTES */
+    if (!Number.isFinite(date.getTime())) return null;
 
-      if (path.startsWith("/api/historical/")) {
-        return await handleHistoricalData(request, env, url);
-      }
-      /* UNKNOWN API ROUTES */
+    return date.toISOString();
+  }
 
-      if (path.startsWith("/api/")) {
-        return json({
-          ok: false,
-          error: "API route not found"
-        }, 404);
-      }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
 
-      /* REACT FRONTEND ASSETS */
+    if (!trimmed) return null;
 
-      const response = await env.ASSETS.fetch(request);
-      const headers = new Headers(response.headers);
+    // Numeric timestamp supplied as a string.
+    if (/^\d{10,13}$/.test(trimmed)) {
+      return historicalNormalizeTimestamp(Number(trimmed));
+    }
 
-      headers.set("X-Content-Type-Options", "nosniff");
-      headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    const date = new Date(trimmed);
 
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers
+    if (!Number.isFinite(date.getTime())) return null;
+
+    return date.toISOString();
+  }
+
+  return null;
+}
+
+
+function historicalValidateCandle(candle) {
+  if (
+    !candle ||
+    typeof candle !== "object" ||
+    Array.isArray(candle)
+  ) {
+    return null;
+  }
+
+  const timestamp = historicalNormalizeTimestamp(
+    candle.timestamp ??
+    candle.time ??
+    candle.datetime ??
+    candle.date
+  );
+
+  const open = Number(candle.open);
+  const high = Number(candle.high);
+  const low = Number(candle.low);
+  const close = Number(candle.close);
+
+  const volume = Number(candle.volume ?? 0);
+
+  if (
+    !timestamp ||
+    !Number.isFinite(open) ||
+    !Number.isFinite(high) ||
+    !Number.isFinite(low) ||
+    !Number.isFinite(close) ||
+    !Number.isFinite(volume)
+  ) {
+    return null;
+  }
+
+  if (
+    open <= 0 ||
+    high <= 0 ||
+    low <= 0 ||
+    close <= 0 ||
+    volume < 0
+  ) {
+    return null;
+  }
+
+  if (
+    high < Math.max(open, close, low) ||
+    low > Math.min(open, close, high)
+  ) {
+    return null;
+  }
+
+  return {
+    timestamp,
+    open,
+    high,
+    low,
+    close,
+    volume
+  };
+}
+
+
+/* =========================================
+   HISTORICAL DATA ROUTES
+========================================= */
+
+async function handleHistoricalData(request, env, url, user) {
+  const path = url.pathname;
+  const method = request.method;
+
+  if (!env.DB) {
+    return historicalError(
+      "Historical database is not configured",
+      500
+    );
+  }
+
+  /* =====================================
+     START IMPORT
+     POST /api/historical/import/start
+  ===================================== */
+
+  if (
+    path === "/api/historical/import/start" &&
+    method === "POST"
+  ) {
+    if (!validOrigin(request, url)) {
+      return historicalError("Request origin rejected", 403);
+    }
+
+    let body;
+
+    try {
+      body = await historicalReadJson(request);
+    } catch (error) {
+      return historicalError(error.message, 400);
+    }
+
+    const symbol = String(body.symbol || "")
+      .trim()
+      .toUpperCase();
+
+    const timeframe = String(body.timeframe || "")
+      .trim()
+      .toUpperCase();
+
+    const source = String(body.source || "manual")
+      .trim()
+      .slice(0, 40);
+
+    const expectedCandles = Number(
+      body.expectedCandles || 0
+    );
+
+    if (!/^[A-Z0-9_]{2,32}$/.test(symbol)) {
+      return historicalError("Invalid market symbol");
+    }
+
+    if (!HISTORICAL_TIMEFRAMES.has(timeframe)) {
+      return historicalError("Unsupported timeframe");
+    }
+
+    if (
+      !Number.isSafeInteger(expectedCandles) ||
+      expectedCandles < 0 ||
+      expectedCandles > HISTORICAL_MAX_CANDLES
+    ) {
+      return historicalError("Invalid expected candle count");
+    }
+
+    const pendingCount = await env.DB.prepare(`
+      SELECT COUNT(*) AS total
+      FROM historical_datasets
+      WHERE user_id = ?
+        AND status = 'pending'
+    `).bind(user.id).first();
+
+    if (Number(pendingCount?.total || 0) >= 5) {
+      return historicalError(
+        "Maximum of five pending imports reached",
+        429
+      );
+    }
+
+    const datasetId = crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    try {
+      await env.DB.prepare(`
+        INSERT INTO historical_datasets (
+          id,
+          user_id,
+          symbol,
+          timeframe,
+          source,
+          expected_candles,
+          candle_count,
+          status,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?)
+      `).bind(
+        datasetId,
+        user.id,
+        symbol,
+        timeframe,
+        source,
+        expectedCandles,
+        now,
+        now
+      ).run();
+
+      return json({
+        ok: true,
+        datasetId,
+        symbol,
+        timeframe,
+        status: "pending",
+        expectedCandles,
+        message: "Historical data import started"
       });
 
     } catch (error) {
-      console.error("WORKER ERROR:", {
-        message: error.message,
-        path
-      });
+      console.error(
+        "Historical import start failed:",
+        error.message
+      );
 
-      return json({
-        ok: false,
-        error: "Internal server error"
-      }, 500);
+      return historicalError(
+        "Unable to create historical dataset",
+        500
+      );
     }
   }
+
+
+  /* =====================================
+     IMPORT CANDLE BATCH
+     POST /api/historical/import/chunk
+  ===================================== */
+
+  if (
+    path === "/api/historical/import/chunk" &&
+    method === "POST"
+  ) {
+    if (!validOrigin(request, url)) {
+      return historicalError("Request origin rejected", 403);
+    }
+
+    let body;
+
+    try {
+      body = await historicalReadJson(request);
+    } catch (error) {
+      return historicalError(error.message, 400);
+    }
+
+    const datasetId = String(body.datasetId || "")
+      .trim();
+
+    if (
+      !/^[A-Za-z0-9_-]{8,64}$/.test(datasetId)
+    ) {
+      return historicalError("Invalid dataset ID");
+    }
+
+    if (
+      !Array.isArray(body.candles) ||
+      body.candles.length === 0 ||
+      body.candles.length > HISTORICAL_MAX_BATCH
+    ) {
+      return historicalError(
+        `Each batch must contain between 1 and ${HISTORICAL_MAX_BATCH} candles`
+      );
+    }
+
+    const dataset = await env.DB.prepare(`
+      SELECT id, user_id, candle_count, status
+      FROM historical_datasets
+      WHERE id = ?
+        AND user_id = ?
+      LIMIT 1
+    `).bind(
+      datasetId,
+      user.id
+    ).first();
+
+    if (!dataset) {
+      return historicalError("Dataset not found", 404);
+    }
+
+    if (dataset.status !== "pending") {
+      return historicalError(
+        "Dataset is not accepting additional candles",
+        409
+      );
+    }
+
+    const currentCount = Number(dataset.candle_count || 0);
+
+    if (
+      currentCount + body.candles.length >
+      HISTORICAL_MAX_CANDLES
+    ) {
+      return historicalError(
+        "Historical dataset candle limit exceeded",
+        413
+      );
+    }
+
+    const validated = [];
+
+    for (const item of body.candles) {
+      const candle = historicalValidateCandle(item);
+
+      if (!candle) {
+        return historicalError(
+          "Invalid candle detected in batch"
+        );
+      }
+
+      validated.push(candle);
+    }
+
+    // Prevent duplicate timestamps within the same batch.
+    const uniqueCandles = new Map();
+
+    for (const candle of validated) {
+      uniqueCandles.set(candle.timestamp, candle);
+    }
+
+    const statements = uniqueCandles.values();
+
+    const batch = [];
+
+    for (const candle of statements) {
+      batch.push(
+        env.DB.prepare(`
+          INSERT OR IGNORE INTO historical_candles (
+            dataset_id,
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            volume
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          datasetId,
+          candle.timestamp,
+          candle.open,
+          candle.high,
+          candle.low,
+          candle.close,
+          candle.volume
+        )
+      );
+    }
+
+    try {
+      if (batch.length) {
+        await env.DB.batch(batch);
+      }
+
+      const updated = await env.DB.prepare(`
+        SELECT COUNT(*) AS total
+        FROM historical_candles
+        WHERE dataset_id = ?
+      `).bind(datasetId).first();
+
+      const totalCandles = Number(updated?.total || 0);
+
+      await env.DB.prepare(`
+        UPDATE historical_datasets
+        SET
+          candle_count = ?,
+          updated_at = ?
+        WHERE id = ?
+          AND user_id = ?
+          AND status = 'pending'
+      `).bind(
+        totalCandles,
+        new Date().toISOString(),
+        datasetId,
+        user.id
+      ).run();
+
+      return json({
+        ok: true,
+        datasetId,
+        received: body.candles.length,
+        uniqueInBatch: uniqueCandles.size,
+        totalCandles,
+        status: "pending"
+      });
+
+    } catch (error) {
+      console.error(
+        "Historical candle batch failed:",
+        error.message
+      );
+
+      return historicalError(
+        "Unable to save historical candle batch",
+        500
+      );
+    }
+  }
+
+
+  /* =====================================
+     COMPLETE IMPORT
+     POST /api/historical/import/complete
+  ===================================== */
+
+  if (
+    path === "/api/historical/import/complete" &&
+    method === "POST"
+  ) {
+    if (!validOrigin(request, url)) {
+      return historicalError("Request origin rejected", 403);
+    }
+
+    let body;
+
+    try {
+      body = await historicalReadJson(request);
+    } catch (error) {
+      return historicalError(error.message, 400);
+    }
+
+    const datasetId = String(body.datasetId || "")
+      .trim();
+
+    if (
+      !/^[A-Za-z0-9_-]{8,64}$/.test(datasetId)
+    ) {
+      return historicalError("Invalid dataset ID");
+    }
+
+    const dataset = await env.DB.prepare(`
+      SELECT id, status
+      FROM historical_datasets
+      WHERE id = ?
+        AND user_id = ?
+      LIMIT 1
+    `).bind(
+      datasetId,
+      user.id
+    ).first();
+
+    if (!dataset) {
+      return historicalError("Dataset not found", 404);
+    }
+
+    if (dataset.status !== "pending") {
+      return historicalError(
+        "Dataset has already been completed",
+        409
+      );
+    }
+
+    const statistics = await env.DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        MIN(timestamp) AS first_timestamp,
+        MAX(timestamp) AS last_timestamp
+      FROM historical_candles
+      WHERE dataset_id = ?
+    `).bind(datasetId).first();
+
+    const totalCandles = Number(statistics?.total || 0);
+
+    if (totalCandles === 0) {
+      return historicalError(
+        "Cannot complete an empty historical dataset"
+      );
+    }
+
+    const now = new Date().toISOString();
+
+    await env.DB.prepare(`
+      UPDATE historical_datasets
+      SET
+        candle_count = ?,
+        status = 'completed',
+        updated_at = ?
+      WHERE id = ?
+        AND user_id = ?
+        AND status = 'pending'
+    `).bind(
+      totalCandles,
+      now,
+      datasetId,
+      user.id
+    ).run();
+
+    return json({
+      ok: true,
+      datasetId,
+      status: "completed",
+      candleCount: totalCandles,
+      firstTimestamp: statistics.first_timestamp,
+      lastTimestamp: statistics.last_timestamp,
+      completedAt: now
+    });
+  }
+
+
+  /* =====================================
+     LIST HISTORICAL DATASETS
+     GET /api/historical/datasets
+  ===================================== */
+
+  if (
+    path === "/api/historical/datasets" &&
+    method === "GET"
+  ) {
+    const result = await env.DB.prepare(`
+      SELECT
+        id,
+        symbol,
+        timeframe,
+        source,
+        expected_candles,
+        candle_count,
+        status,
+        created_at,
+        updated_at
+      FROM historical_datasets
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).bind(user.id).all();
+
+    return json({
+      ok: true,
+      datasets: result.results || []
+    });
+  }
+
+
+  /* =====================================
+     RETRIEVE HISTORICAL CANDLES
+     GET /api/historical/candles
+  ===================================== */
+
+  if (
+    path === "/api/historical/candles" &&
+    method === "GET"
+  ) {
+    const datasetId = String(
+      url.searchParams.get("datasetId") || ""
+    ).trim();
+
+    if (
+      !/^[A-Za-z0-9_-]{8,64}$/.test(datasetId)
+    ) {
+      return historicalError("Invalid dataset ID");
+    }
+
+    const dataset = await env.DB.prepare(`
+      SELECT
+        id,
+        symbol,
+        timeframe,
+        candle_count,
+        status
+      FROM historical_datasets
+      WHERE id = ?
+        AND user_id = ?
+      LIMIT 1
+    `).bind(
+      datasetId,
+      user.id
+    ).first();
+
+    if (!dataset) {
+      return historicalError("Dataset not found", 404);
+    }
+
+    if (dataset.status !== "completed") {
+      return historicalError(
+        "Historical dataset is not completed",
+        409
+      );
+    }
+
+    const requestedLimit = Number(
+      url.searchParams.get("limit") || 1000
+    );
+
+    const limit = Number.isSafeInteger(requestedLimit)
+      ? Math.min(5000, Math.max(1, requestedLimit))
+      : 1000;
+
+    const before = url.searchParams.get("before");
+
+    let result;
+
+    if (before) {
+      const beforeTimestamp =
+        historicalNormalizeTimestamp(before);
+
+      if (!beforeTimestamp) {
+        return historicalError("Invalid before timestamp");
+      }
+
+      result = await env.DB.prepare(`
+        SELECT
+          timestamp,
+          open,
+          high,
+          low,
+          close,
+          volume
+        FROM historical_candles
+        WHERE dataset_id = ?
+          AND timestamp < ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `).bind(
+        datasetId,
+        beforeTimestamp,
+        limit
+      ).all();
+
+    } else {
+      result = await env.DB.prepare(`
+        SELECT
+          timestamp,
+          open,
+          high,
+          low,
+          close,
+          volume
+        FROM historical_candles
+        WHERE dataset_id = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `).bind(
+        datasetId,
+        limit
+      ).all();
+    }
+
+    const candles = (result.results || []).reverse();
+
+    return json({
+      ok: true,
+      dataset: {
+        id: dataset.id,
+        symbol: dataset.symbol,
+        timeframe: dataset.timeframe,
+        candleCount: dataset.candle_count,
+        status: dataset.status
+      },
+      candles,
+      returned: candles.length,
+      limit,
+      nextBefore: candles.length
+        ? candles[0].timestamp
+        : null
+    });
+  }
+
+
+  /* =====================================
+     UNKNOWN HISTORICAL ROUTE
+  ===================================== */
+
+  return historicalError(
+    "Historical data route not found",
+    404
+  );
+}/* HISTORICAL DATA ROUTES */
+
+if (path.startsWith("/api/historical/")) {
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required"
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(env, user);
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await handleHistoricalData(
+    request,
+    env,
+    url,
+    user
+  );
+}/* =========================================
+   ADVANCED MARKET DATA ENGINE
+   PROVIDER CONFIGURATION AND HELPERS
+========================================= */
+
+const MARKET_PROVIDER_TIMEOUT_MS = 12000;
+
+const FINNHUB_RESOLUTIONS = {
+  "1min": "1",
+  "5min": "5",
+  "15min": "15",
+  "30min": "30",
+  "1h": "60",
+  "4h": "240",
+  "1day": "D",
+  "1week": "W",
+  "1month": "M"
 };
+
+function marketFinnhubSymbol(providerSymbol) {
+  return "OANDA:" + String(providerSymbol)
+    .replace("/", "_");
+}
+
+function marketAlphaCurrencies(providerSymbol) {
+  const parts = String(providerSymbol).split("/");
+
+  if (parts.length !== 2) return null;
+
+  return {
+    from: parts[0],
+    to: parts[1]
+  };
+}
+
+async function marketFetchJson(url) {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(MARKET_PROVIDER_TIMEOUT_MS),
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  let data;
+
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Market provider returned invalid JSON");
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Market provider HTTP error ${response.status}`
+    );
+  }
+
+  if (
+    data &&
+    (
+      data.status === "error" ||
+      data.status === "ERROR" ||
+      data.error ||
+      data["Error Message"] ||
+      data.Note
+    )
+  ) {
+    throw new Error(
+      String(
+        data.error ||
+        data.message ||
+        data["Error Message"] ||
+        data.Note ||
+        "Market provider rejected the request"
+      )
+    );
+  }
+
+  return data;
+}
+
+
+/* =========================================
+   TWELVE DATA PRICE
+========================================= */
+
+async function marketTwelveDataPrice(
+  providerSymbol,
+  env
+) {
+  if (!env.TWELVE_DATA_API_KEY) {
+    throw new Error("Twelve Data API key unavailable");
+  }
+
+  const apiUrl = new URL(
+    "https://api.twelvedata.com/price"
+  );
+
+  apiUrl.searchParams.set("symbol", providerSymbol);
+  apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
+
+  const data = await marketFetchJson(apiUrl.toString());
+
+  const price = Number(data.price);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("Twelve Data returned an invalid price");
+  }
+
+  return {
+    price,
+    source: "Twelve Data"
+  };
+}
+
+
+/* =========================================
+   FINNHUB PRICE FALLBACK
+========================================= */
+
+async function marketFinnhubPrice(
+  providerSymbol,
+  env
+) {
+  if (!env.FINNHUB_API_KEY) {
+    throw new Error("Finnhub API key unavailable");
+  }
+
+  const symbol = marketFinnhubSymbol(providerSymbol);
+
+  const apiUrl = new URL(
+    "https://finnhub.io/api/v1/quote"
+  );
+
+  apiUrl.searchParams.set("symbol", symbol);
+  apiUrl.searchParams.set("token", env.FINNHUB_API_KEY);
+
+  const data = await marketFetchJson(apiUrl.toString());
+
+  const price = Number(data.c);
+
+  if (
+    !Number.isFinite(price) ||
+    price <= 0 ||
+    Number(data.t) <= 0
+  ) {
+    throw new Error("Finnhub returned no valid price");
+  }
+
+  return {
+    price,
+    source: "Finnhub",
+    providerTimestamp: Number(data.t)
+  };
+}
+
+
+/* =========================================
+   TWELVE DATA HISTORICAL CANDLES
+========================================= */
+
+async function marketTwelveDataCandles(
+  providerSymbol,
+  interval,
+  outputsize,
+  env
+) {
+  if (!env.TWELVE_DATA_API_KEY) {
+    throw new Error("Twelve Data API key unavailable");
+  }
+
+  const apiUrl = new URL(
+    "https://api.twelvedata.com/time_series"
+  );
+
+  apiUrl.searchParams.set("symbol", providerSymbol);
+  apiUrl.searchParams.set("interval", interval);
+  apiUrl.searchParams.set("outputsize", String(outputsize));
+  apiUrl.searchParams.set("apikey", env.TWELVE_DATA_API_KEY);
+
+  const data = await marketFetchJson(apiUrl.toString());
+
+  if (!Array.isArray(data.values)) {
+    throw new Error("Twelve Data returned no candles");
+  }
+
+  const candles = data.values.map(item => ({
+    time: item.datetime,
+    open: Number(item.open),
+    high: Number(item.high),
+    low: Number(item.low),
+    close: Number(item.close),
+    volume: Number(item.volume || 0)
+  }));
+
+  return marketValidateCandles(candles);
+}
+
+
+/* =========================================
+   FINNHUB HISTORICAL CANDLES
+========================================= */
+
+async function marketFinnhubCandles(
+  providerSymbol,
+  interval,
+  outputsize,
+  env
+) {
+  if (!env.FINNHUB_API_KEY) {
+    throw new Error("Finnhub API key unavailable");
+  }
+
+  const resolution = FINNHUB_RESOLUTIONS[interval];
+
+  if (!resolution) {
+    throw new Error("Unsupported Finnhub resolution");
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  const secondsPerCandle = {
+    "1min": 60,
+    "5min": 300,
+    "15min": 900,
+    "30min": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1day": 86400,
+    "1week": 604800,
+    "1month": 2592000
+  }[interval];
+
+  const from = now -
+    (outputsize * secondsPerCandle);
+
+  const apiUrl = new URL(
+    "https://finnhub.io/api/v1/forex/candle"
+  );
+
+  apiUrl.searchParams.set(
+    "symbol",
+    marketFinnhubSymbol(providerSymbol)
+  );
+
+  apiUrl.searchParams.set("resolution", resolution);
+  apiUrl.searchParams.set("from", String(from));
+  apiUrl.searchParams.set("to", String(now));
+  apiUrl.searchParams.set("token", env.FINNHUB_API_KEY);
+
+  const data = await marketFetchJson(apiUrl.toString());
+
+  if (
+    data.s !== "ok" ||
+    !Array.isArray(data.t) ||
+    !Array.isArray(data.o) ||
+    !Array.isArray(data.h) ||
+    !Array.isArray(data.l) ||
+    !Array.isArray(data.c)
+  ) {
+    throw new Error("Finnhub returned no historical candles");
+  }
+
+  const candles = data.t.map((timestamp, index) => ({
+    time: new Date(timestamp * 1000).toISOString(),
+    open: Number(data.o[index]),
+    high: Number(data.h[index]),
+    low: Number(data.l[index]),
+    close: Number(data.c[index]),
+    volume: Number(data.v?.[index] || 0)
+  }));
+
+  return marketValidateCandles(candles);
+}
+
+
+/* =========================================
+   ALPHA VANTAGE HISTORICAL FALLBACK
+========================================= */
+
+async function marketAlphaVantageCandles(
+  providerSymbol,
+  interval,
+  outputsize,
+  env
+) {
+  if (!env.ALPHA_VANTAGE_API_KEY) {
+    throw new Error("Alpha Vantage API key unavailable");
+  }
+
+  const currencies = marketAlphaCurrencies(providerSymbol);
+
+  if (!currencies) {
+    throw new Error("Unsupported Alpha Vantage symbol");
+  }
+
+  const apiUrl = new URL(
+    "https://www.alphavantage.co/query"
+  );
+
+  apiUrl.searchParams.set("from_symbol", currencies.from);
+  apiUrl.searchParams.set("to_symbol", currencies.to);
+  apiUrl.searchParams.set("apikey", env.ALPHA_VANTAGE_API_KEY);
+
+  let functionName;
+
+  if (["1min", "5min", "15min", "30min", "1h"].includes(interval)) {
+    functionName = "FX_INTRADAY";
+
+    const alphaInterval = interval === "1h"
+      ? "60min"
+      : interval;
+
+    apiUrl.searchParams.set("function", functionName);
+    apiUrl.searchParams.set("interval", alphaInterval);
+    apiUrl.searchParams.set("outputsize", "full");
+
+  } else if (interval === "1day") {
+    functionName = "FX_DAILY";
+    apiUrl.searchParams.set("function", functionName);
+    apiUrl.searchParams.set("outputsize", "full");
+
+  } else if (interval === "1week") {
+    functionName = "FX_WEEKLY";
+    apiUrl.searchParams.set("function", functionName);
+
+  } else if (interval === "1month") {
+    functionName = "FX_MONTHLY";
+    apiUrl.searchParams.set("function", functionName);
+
+  } else {
+    throw new Error("Unsupported Alpha Vantage interval");
+  }
+
+  const data = await marketFetchJson(apiUrl.toString());
+
+  const seriesKey = Object.keys(data).find(key =>
+    key.toLowerCase().includes("time series")
+  );
+
+  if (!seriesKey || !data[seriesKey]) {
+    throw new Error("Alpha Vantage returned no historical series");
+  }
+
+  const entries = Object.entries(data[seriesKey])
+    .slice(0, outputsize);
+
+  const candles = entries.map(([time, item]) => ({
+    time,
+    open: Number(item["1. open"]),
+    high: Number(item["2. high"]),
+    low: Number(item["3. low"]),
+    close: Number(item["4. close"]),
+    volume: 0
+  }));
+
+  return marketValidateCandles(candles);
+}
+
+
+/* =========================================
+   MARKET CANDLE VALIDATION
+========================================= */
+
+function marketValidateCandles(candles) {
+  if (!Array.isArray(candles)) {
+    throw new Error("Invalid candle collection");
+  }
+
+  return candles
+    .filter(candle => {
+      const timeIsValid =
+        Boolean(candle.time) &&
+        Number.isFinite(Date.parse(candle.time));
+
+      const pricesAreValid =
+        Number.isFinite(candle.open) &&
+        candle.open > 0 &&
+        Number.isFinite(candle.high) &&
+        candle.high > 0 &&
+        Number.isFinite(candle.low) &&
+        candle.low > 0 &&
+        Number.isFinite(candle.close) &&
+        candle.close > 0;
+
+      const rangeIsValid =
+        candle.high >= Math.max(
+          candle.open,
+          candle.close,
+          candle.low
+        ) &&
+        candle.low <= Math.min(
+          candle.open,
+          candle.close,
+          candle.high
+        );
+
+      return timeIsValid && pricesAreValid && rangeIsValid;
+    })
+    .sort(
+      (a, b) =>
+        Date.parse(a.time) - Date.parse(b.time)
+    );
+}
+
+
+/* =========================================
+   PROVIDER FAILOVER
+========================================= */
+
+async function marketGetPrice(
+  providerSymbol,
+  env
+) {
+  const providers = [
+    {
+      name: "Twelve Data",
+      enabled: Boolean(env.TWELVE_DATA_API_KEY),
+      run: () => marketTwelveDataPrice(providerSymbol, env)
+    },
+    {
+      name: "Finnhub",
+      enabled: Boolean(env.FINNHUB_API_KEY),
+      run: () => marketFinnhubPrice(providerSymbol, env)
+    }
+  ];
+
+  const errors = [];
+
+  for (const provider of providers) {
+    if (!provider.enabled) continue;
+
+    try {
+      const result = await provider.run();
+
+      return {
+        ...result,
+        status: "LIVE"
+      };
+
+    } catch (error) {
+      console.error(
+        `${provider.name} price provider failed:`,
+        error.message
+      );
+
+      errors.push({
+        provider: provider.name,
+        message: error.message
+      });
+    }
+  }
+
+  throw new Error(
+    errors.length
+      ? "All configured live price providers failed"
+      : "No market data provider is configured"
+  );
+}
+
+
+async function marketGetCandles(
+  providerSymbol,
+  interval,
+  outputsize,
+  env
+) {
+  const providers = [
+    {
+      name: "Twelve Data",
+      enabled: Boolean(env.TWELVE_DATA_API_KEY),
+      run: () => marketTwelveDataCandles(
+        providerSymbol,
+        interval,
+        outputsize,
+        env
+      )
+    },
+    {
+      name: "Finnhub",
+      enabled: Boolean(env.FINNHUB_API_KEY),
+      run: () => marketFinnhubCandles(
+        providerSymbol,
+        interval,
+        outputsize,
+        env
+      )
+    },
+    {
+      name: "Alpha Vantage",
+      enabled: Boolean(env.ALPHA_VANTAGE_API_KEY),
+      run: () => marketAlphaVantageCandles(
+        providerSymbol,
+        interval,
+        outputsize,
+        env
+      )
+    }
+  ];
+
+  const errors = [];
+
+  for (const provider of providers) {
+    if (!provider.enabled) continue;
+
+    try {
+      const candles = await provider.run();
+
+      if (!candles.length) {
+        throw new Error("Provider returned no valid candles");
+      }
+
+      return {
+        candles,
+        source: provider.name
+      };
+
+    } catch (error) {
+      console.error(
+        `${provider.name} candle provider failed:`,
+        error.message
+      );
+
+      errors.push({
+        provider: provider.name,
+        message: error.message
+      });
+    }
+  }
+
+  throw new Error(
+    errors.length
+      ? "All configured historical data providers failed"
+      : "No historical market data provider is configured"
+  );
+}
