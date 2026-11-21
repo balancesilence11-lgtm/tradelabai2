@@ -10476,3 +10476,1285 @@ if (url.pathname.startsWith("/api/brokers/")) {
         user
     );
 }
+// ============================================================
+// PART 19: REAL-TIME MARKET STREAMING
+// ============================================================
+
+const MARKET_STREAM_CONFIG = {
+    MAX_SYMBOLS: 10,
+    MAX_CLIENT_MESSAGE_LENGTH: 1024,
+    MAX_CONNECTIONS_PER_REQUEST: 1,
+    HEARTBEAT_INTERVAL_MS: 30000,
+    MAX_MESSAGES_PER_SECOND: 10
+};
+
+function streamNormalizeSymbol(value) {
+    return String(value || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 20);
+}
+
+function streamGetSymbols(value) {
+    if (!value) {
+        return ["EURUSD", "GBPUSD", "USDJPY"];
+    }
+
+    const symbols = [
+        ...new Set(
+            value.split(",")
+                .map(streamNormalizeSymbol)
+                .filter(Boolean)
+        )
+    ];
+
+    if (!symbols.length) {
+        throw new Error("At least one symbol is required.");
+    }
+
+    if (symbols.length > MARKET_STREAM_CONFIG.MAX_SYMBOLS) {
+        throw new Error(
+            `Maximum ${MARKET_STREAM_CONFIG.MAX_SYMBOLS} symbols per stream.`
+        );
+    }
+
+    for (const symbol of symbols) {
+        if (!SYMBOLS[symbol]) {
+            throw new Error(
+                `Unsupported market symbol: ${symbol}`
+            );
+        }
+    }
+
+    return symbols;
+}
+
+function streamProviderSymbol(symbol) {
+    return SYMBOLS[symbol];
+}
+
+function streamSend(socket, payload) {
+    try {
+        if (socket.readyState === 1) {
+            socket.send(JSON.stringify(payload));
+        }
+    } catch {
+        // Ignore failed sends on closing connections.
+    }
+}
+async function streamConnectTwelveData(env, symbols) {
+    const apiKey = String(
+        env.TWELVE_DATA_API_KEY || ""
+    ).trim();
+
+    if (!apiKey) {
+        throw new Error(
+            "Twelve Data API key is not configured."
+        );
+    }
+
+    const providerSymbols = symbols.map(
+        streamProviderSymbol
+    );
+
+    const websocketUrl =
+        "wss://ws.twelvedata.com/v1/quotes/price" +
+        `?apikey=${encodeURIComponent(apiKey)}`;
+
+    const response = await fetch(websocketUrl, {
+        headers: {
+            Upgrade: "websocket"
+        }
+    });
+
+    if (response.status !== 101 || !response.webSocket) {
+        throw new Error(
+            "Could not establish Twelve Data WebSocket connection."
+        );
+    }
+
+    const upstream = response.webSocket;
+
+    upstream.accept();
+
+    return {
+        socket: upstream,
+        symbols: providerSymbols
+    };
+}
+async function handleMarketStream(request, env, user) {
+    const url = new URL(request.url);
+
+    if (
+        request.method !== "GET" ||
+        request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+    ) {
+        return json({
+            ok: false,
+            error: "A WebSocket upgrade request is required."
+        }, 426);
+    }
+
+    let symbols;
+
+    try {
+        symbols = streamGetSymbols(
+            url.searchParams.get("symbols")
+        );
+    } catch (error) {
+        return json({
+            ok: false,
+            error: error.message
+        }, 400);
+    }
+
+    if (!env.TWELVE_DATA_API_KEY) {
+        return json({
+            ok: false,
+            error: "Market streaming is not configured."
+        }, 503);
+    }
+
+    let upstream;
+
+    try {
+        const connection = await streamConnectTwelveData(
+            env,
+            symbols
+        );
+
+        upstream = connection.socket;
+
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const server = pair[1];
+
+        server.accept();
+
+        let closed = false;
+        let messageCount = 0;
+        let messageWindow = Date.now();
+
+        function closeConnections(code = 1000, reason = "Connection closed") {
+            if (closed) return;
+
+            closed = true;
+
+            try {
+                server.close(code, reason);
+            } catch {}
+
+            try {
+                upstream.close(code, reason);
+            } catch {}
+        }
+
+        // Forward provider price updates to the authenticated client.
+        upstream.addEventListener("message", event => {
+            if (closed) return;
+
+            let data;
+
+            try {
+                data = JSON.parse(event.data);
+            } catch {
+                streamSend(server, {
+                    type: "provider_message",
+                    data: String(event.data).slice(0, 2000)
+                });
+
+                return;
+            }
+
+            // Do not expose provider credentials or internal details.
+            if (
+                data.event === "subscribe-status" ||
+                data.event === "price" ||
+                data.status === "ok"
+            ) {
+                streamSend(server, {
+                    type: "market_update",
+                    data,
+                    receivedAt: new Date().toISOString()
+                });
+
+                return;
+            }
+
+            if (data.status === "error" || data.event === "error") {
+                streamSend(server, {
+                    type: "market_error",
+                    message: String(
+                        data.message || data.code || "Provider error"
+                    ).slice(0, 300)
+                });
+
+                return;
+            }
+
+            streamSend(server, {
+                type: "market_message",
+                data
+            });
+        });
+
+        upstream.addEventListener("close", event => {
+            closeConnections(
+                event.code || 1000,
+                "Market provider disconnected"
+            );
+        });
+
+        upstream.addEventListener("error", () => {
+            streamSend(server, {
+                type: "market_error",
+                message: "Market provider connection failed."
+            });
+
+            closeConnections(
+                1011,
+                "Market provider error"
+            );
+        });
+
+        // Restrict messages coming from the browser.
+        server.addEventListener("message", event => {
+            if (closed) return;
+
+            const now = Date.now();
+
+            if (now - messageWindow >= 1000) {
+                messageWindow = now;
+                messageCount = 0;
+            }
+
+            messageCount++;
+
+            if (
+                messageCount >
+                MARKET_STREAM_CONFIG.MAX_MESSAGES_PER_SECOND
+            ) {
+                closeConnections(
+                    1008,
+                    "Message rate limit exceeded"
+                );
+
+                return;
+            }
+
+            const raw = String(event.data || "");
+
+            if (
+                raw.length >
+                MARKET_STREAM_CONFIG.MAX_CLIENT_MESSAGE_LENGTH
+            ) {
+                closeConnections(
+                    1009,
+                    "Message too large"
+                );
+
+                return;
+            }
+
+            let message;
+
+            try {
+                message = JSON.parse(raw);
+            } catch {
+                closeConnections(
+                    1008,
+                    "Invalid client message"
+                );
+
+                return;
+            }
+
+            // Only heartbeat messages are accepted.
+            // Clients cannot change upstream subscriptions.
+            if (message.type === "ping") {
+                streamSend(server, {
+                    type: "pong",
+                    timestamp: new Date().toISOString()
+                });
+
+                return;
+            }
+
+            closeConnections(
+                1008,
+                "Unsupported client message"
+            );
+        });
+
+        server.addEventListener("close", () => {
+            closeConnections(
+                1000,
+                "Client disconnected"
+            );
+        });
+
+        server.addEventListener("error", () => {
+            closeConnections(
+                1011,
+                "Client connection error"
+            );
+        });
+
+        // Subscribe only to the symbols validated by the Worker.
+        upstream.send(JSON.stringify({
+            action: "subscribe",
+            params: {
+                symbols: connection.symbols.join(",")
+            }
+        }));
+
+        streamSend(server, {
+            type: "connected",
+            broker: "twelve_data",
+            symbols,
+            connectedAt: new Date().toISOString()
+        });
+
+        return new Response(null, {
+            status: 101,
+            webSocket: client
+        });
+
+    } catch (error) {
+        console.error(
+            "Market stream connection error:",
+            error?.message || error
+        );
+
+        try {
+            upstream?.close(1011, "Connection failed");
+        } catch {}
+
+        return json({
+            ok: false,
+            error: error?.message ||
+                "Unable to establish market stream."
+        }, 502);
+    }
+}
+async function handleMarketSnapshot(request, env) {
+    const url = new URL(request.url);
+
+    const symbol = streamNormalizeSymbol(
+        url.searchParams.get("symbol")
+    );
+
+    if (!SYMBOLS[symbol]) {
+        return json({
+            ok: false,
+            error: "Unsupported market symbol."
+        }, 400);
+    }
+
+    try {
+        const result = await marketGetPrice(
+            env,
+            symbol
+        );
+
+        if (!result) {
+            return json({
+                ok: false,
+                error: "Market price unavailable."
+            }, 502);
+        }
+
+        return json({
+            ok: true,
+            symbol,
+            price: result.price ??
+                result.close ??
+                result.data?.price ??
+                null,
+            source: result.source || "market_data_provider",
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error(
+            "Market snapshot error:",
+            error?.message || error
+        );
+
+        return json({
+            ok: false,
+            error: "Could not retrieve market price."
+        }, 502);
+    }
+}
+// ============================================================
+// PART 19: REAL-TIME MARKET STREAM ROUTES
+// ============================================================
+
+// Live WebSocket market stream.
+if (url.pathname === "/api/market/stream") {
+    const user = await requireAuth(request, env);
+
+    if (!user) {
+        return json({
+            ok: false,
+            error: "Authentication required."
+        }, 401);
+    }
+
+    const entitlement = await getSubscriptionEntitlement(
+        env,
+        user
+    );
+
+    if (!entitlement.active) {
+        return paymentRequiredResponse(entitlement);
+    }
+
+    return handleMarketStream(
+        request,
+        env,
+        user
+    );
+}
+
+// REST price fallback.
+if (
+    url.pathname === "/api/market/snapshot" &&
+    request.method === "GET"
+) {
+    const user = await requireAuth(request, env);
+
+    if (!user) {
+        return json({
+            ok: false,
+            error: "Authentication required."
+        }, 401);
+    }
+
+    const entitlement = await getSubscriptionEntitlement(
+        env,
+        user
+    );
+
+    if (!entitlement.active) {
+        return paymentRequiredResponse(entitlement);
+    }
+
+    return handleMarketSnapshot(
+        request,
+        env
+    );
+}
+const marketSocket = new WebSocket(
+    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/market/stream?symbols=EURUSD,GBPUSD,USDJPY,XAUUSD`
+);
+
+marketSocket.onopen = () => {
+    console.log("TradeLab market stream connected.");
+};
+
+marketSocket.onmessage = event => {
+    const message = JSON.parse(event.data);
+
+    if (message.type === "connected") {
+        console.log(
+            "Subscribed symbols:",
+            message.symbols
+        );
+    }
+
+    if (message.type === "market_update") {
+        console.log(
+            "Live market update:",
+            message.data
+        );
+
+        // Update your existing market-price state here.
+    }
+
+    if (message.type === "market_error") {
+        console.error(message.message);
+    }
+};
+
+marketSocket.onerror = error => {
+    console.error("Market WebSocket error:", error);
+};
+
+marketSocket.onclose = () => {
+    console.log("Market stream disconnected.");
+};
+const SCHEDULER_CONFIG = {
+  MAX_JOBS_PER_RUN: 50,
+  MIN_INTERVAL_MINUTES: 5,
+  MAX_INTERVAL_MINUTES: 1440,
+  LEASE_MINUTES: 10,
+  DEFAULT_INTERVAL_MINUTES: 5,
+  MAX_RUN_HISTORY: 100
+};
+
+const SCHEDULER_JOB_TYPES = [
+  "monitor_positions",
+  "scan_watchlist"
+];
+
+function schedulerNow() {
+  return new Date().toISOString();
+}
+
+function schedulerId() {
+  return crypto.randomUUID();
+}
+
+function schedulerText(value, maxLength = 500) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+function schedulerNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function schedulerInterval(value) {
+  const interval = Math.floor(
+    schedulerNumber(value, SCHEDULER_CONFIG.DEFAULT_INTERVAL_MINUTES)
+  );
+
+  if (
+    interval < SCHEDULER_CONFIG.MIN_INTERVAL_MINUTES ||
+    interval > SCHEDULER_CONFIG.MAX_INTERVAL_MINUTES
+  ) {
+    throw new Error(
+      `Interval must be between ${SCHEDULER_CONFIG.MIN_INTERVAL_MINUTES} and ${SCHEDULER_CONFIG.MAX_INTERVAL_MINUTES} minutes.`
+    );
+  }
+
+  return interval;
+}
+
+function schedulerNextRun(intervalMinutes, from = new Date()) {
+  return new Date(
+    from.getTime() + intervalMinutes * 60 * 1000
+  ).toISOString();
+}
+
+function schedulerParseSettings(value) {
+  if (!value) return {};
+
+  try {
+    const parsed = typeof value === "string"
+      ? JSON.parse(value)
+      : value;
+
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function schedulerSafeJson(value) {
+  try {
+    return JSON.stringify(value ?? {});
+  } catch {
+    return "{}";
+  }
+}
+
+async function schedulerLogRun(env, run) {
+  const id = schedulerId();
+
+  await env.DB.prepare(`
+    INSERT INTO scheduled_job_runs (
+      id,
+      job_id,
+      user_id,
+      job_type,
+      status,
+      started_at,
+      completed_at,
+      result_json,
+      error
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    id,
+    run.jobId,
+    run.userId,
+    run.jobType,
+    run.status,
+    run.startedAt,
+    run.completedAt || null,
+    schedulerSafeJson(run.result),
+    run.error ? schedulerText(run.error, 2000) : null
+  ).run();
+
+  return id;
+}
+async function schedulerCreateJob(env, userId, input) {
+  const jobType = schedulerText(input.jobType, 50);
+
+  if (!SCHEDULER_JOB_TYPES.includes(jobType)) {
+    throw new Error("Unsupported scheduled job type.");
+  }
+
+  const intervalMinutes = schedulerInterval(input.intervalMinutes);
+
+  const settings = schedulerParseSettings(input.settings);
+
+  if (jobType === "scan_watchlist") {
+    if (settings.watchlistId !== undefined) {
+      settings.watchlistId = schedulerText(
+        settings.watchlistId,
+        100
+      );
+
+      if (!settings.watchlistId) {
+        throw new Error("A valid watchlist ID is required.");
+      }
+    }
+  }
+
+  const id = schedulerId();
+  const now = schedulerNow();
+
+  await env.DB.prepare(`
+    INSERT INTO scheduled_jobs (
+      id,
+      user_id,
+      job_type,
+      enabled,
+      interval_minutes,
+      settings_json,
+      last_run_at,
+      next_run_at,
+      lease_until,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, 1, ?, ?, NULL, ?, NULL, ?, ?)
+  `).bind(
+    id,
+    userId,
+    jobType,
+    intervalMinutes,
+    schedulerSafeJson(settings),
+    schedulerNextRun(intervalMinutes),
+    now,
+    now
+  ).run();
+
+  return {
+    id,
+    jobType,
+    enabled: true,
+    intervalMinutes,
+    settings,
+    nextRunAt: schedulerNextRun(intervalMinutes),
+    createdAt: now
+  };
+}
+
+async function schedulerGetJobs(env, userId) {
+  const result = await env.DB.prepare(`
+    SELECT
+      id,
+      job_type,
+      enabled,
+      interval_minutes,
+      settings_json,
+      last_run_at,
+      next_run_at,
+      created_at,
+      updated_at
+    FROM scheduled_jobs
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+  `).bind(userId).all();
+
+  return (result.results || []).map(row => ({
+    id: row.id,
+    jobType: row.job_type,
+    enabled: Boolean(row.enabled),
+    intervalMinutes: row.interval_minutes,
+    settings: schedulerParseSettings(row.settings_json),
+    lastRunAt: row.last_run_at,
+    nextRunAt: row.next_run_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+async function schedulerUpdateJob(env, userId, jobId, input) {
+  const existing = await env.DB.prepare(`
+    SELECT *
+    FROM scheduled_jobs
+    WHERE id = ? AND user_id = ?
+    LIMIT 1
+  `).bind(jobId, userId).first();
+
+  if (!existing) {
+    return null;
+  }
+
+  let enabled = Boolean(existing.enabled);
+  let intervalMinutes = existing.interval_minutes;
+  let settings = schedulerParseSettings(existing.settings_json);
+
+  if (input.enabled !== undefined) {
+    if (typeof input.enabled !== "boolean") {
+      throw new Error("Enabled must be true or false.");
+    }
+
+    enabled = input.enabled;
+  }
+
+  if (input.intervalMinutes !== undefined) {
+    intervalMinutes = schedulerInterval(input.intervalMinutes);
+  }
+
+  if (input.settings !== undefined) {
+    const updatedSettings = schedulerParseSettings(input.settings);
+
+    settings = {
+      ...settings,
+      ...updatedSettings
+    };
+  }
+
+  const now = schedulerNow();
+
+  const nextRunAt = enabled
+    ? schedulerNextRun(intervalMinutes)
+    : existing.next_run_at;
+
+  await env.DB.prepare(`
+    UPDATE scheduled_jobs
+    SET
+      enabled = ?,
+      interval_minutes = ?,
+      settings_json = ?,
+      next_run_at = ?,
+      lease_until = NULL,
+      updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `).bind(
+    enabled ? 1 : 0,
+    intervalMinutes,
+    schedulerSafeJson(settings),
+    nextRunAt,
+    now,
+    jobId,
+    userId
+  ).run();
+
+  return {
+    id: jobId,
+    enabled,
+    intervalMinutes,
+    settings,
+    nextRunAt
+  };
+}
+
+async function schedulerDeleteJob(env, userId, jobId) {
+  const result = await env.DB.prepare(`
+    DELETE FROM scheduled_jobs
+    WHERE id = ? AND user_id = ?
+  `).bind(jobId, userId).run();
+
+  return Boolean(result.meta?.changes);
+}
+
+async function schedulerGetRuns(env, userId, limit = 50) {
+  const safeLimit = Math.max(
+    1,
+    Math.min(SCHEDULER_CONFIG.MAX_RUN_HISTORY, Math.floor(limit))
+  );
+
+  const result = await env.DB.prepare(`
+    SELECT
+      id,
+      job_id,
+      job_type,
+      status,
+      started_at,
+      completed_at,
+      result_json,
+      error
+    FROM scheduled_job_runs
+    WHERE user_id = ?
+    ORDER BY started_at DESC
+    LIMIT ?
+  `).bind(userId, safeLimit).all();
+
+  return (result.results || []).map(row => ({
+    id: row.id,
+    jobId: row.job_id,
+    jobType: row.job_type,
+    status: row.status,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    result: schedulerParseSettings(row.result_json),
+    error: row.error
+  }));
+}
+async function schedulerRunPositionMonitor(env, userId) {
+  if (typeof monitorOpenPositions !== "function") {
+    throw new Error("Position monitoring engine is unavailable.");
+  }
+
+  const result = await monitorOpenPositions(env, userId);
+
+  return {
+    success: true,
+    jobType: "monitor_positions",
+    result: result ?? null,
+    executedAt: schedulerNow()
+  };
+}
+async function schedulerRunWatchlistScan(env, userId, settings = {}) {
+  const watchlistId = schedulerText(settings.watchlistId, 100);
+
+  let watchlists;
+
+  if (watchlistId) {
+    const selected = await env.DB.prepare(`
+      SELECT id, name
+      FROM trade_watchlists
+      WHERE id = ? AND user_id = ?
+      LIMIT 1
+    `).bind(watchlistId, userId).first();
+
+    if (!selected) {
+      throw new Error("The selected watchlist was not found.");
+    }
+
+    watchlists = [selected];
+  } else {
+    const result = await env.DB.prepare(`
+      SELECT id, name
+      FROM trade_watchlists
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 20
+    `).bind(userId).all();
+
+    watchlists = result.results || [];
+  }
+
+  const scanResults = [];
+  let notificationCount = 0;
+
+  for (const watchlist of watchlists) {
+    const symbolsResult = await env.DB.prepare(`
+      SELECT symbol
+      FROM trade_watchlist_symbols
+      WHERE watchlist_id = ?
+      ORDER BY symbol
+      LIMIT 50
+    `).bind(watchlist.id).all();
+
+    const symbols = (symbolsResult.results || [])
+      .map(row => schedulerText(row.symbol, 32))
+      .filter(symbol => /^[A-Za-z0-9_]{2,32}$/.test(symbol));
+
+    for (const symbol of symbols) {
+      try {
+        if (typeof aiGenerateSignal !== "function") {
+          throw new Error("AI signal engine is unavailable.");
+        }
+
+        const timeframe = schedulerText(
+          settings.timeframe || "15min",
+          20
+        );
+
+        const signal = await aiGenerateSignal(
+          env,
+          symbol,
+          timeframe
+        );
+
+        if (!signal) continue;
+
+        const direction = String(
+          signal.direction || signal.signal || signal.action || ""
+        ).toUpperCase();
+
+        const confidence = schedulerNumber(
+          signal.confidence,
+          0
+        );
+
+        const scanItem = {
+          watchlistId: watchlist.id,
+          watchlistName: watchlist.name,
+          symbol,
+          timeframe,
+          direction,
+          confidence,
+          signal
+        };
+
+        scanResults.push(scanItem);
+
+        const minimumConfidence = Math.max(
+          0,
+          Math.min(
+            100,
+            schedulerNumber(settings.minimumConfidence, 70)
+          )
+        );
+
+        if (
+          ["BUY", "SELL"].includes(direction) &&
+          confidence >= minimumConfidence &&
+          typeof notificationCreate === "function"
+        ) {
+          await notificationCreate(env, {
+            userId,
+            type: "scheduled_signal",
+            title: `AI ${direction} signal: ${symbol}`,
+            message: `${symbol} generated a ${direction} signal on ${timeframe}. Confidence: ${confidence}%.`,
+            data: {
+              symbol,
+              timeframe,
+              direction,
+              confidence,
+              watchlistId: watchlist.id
+            }
+          });
+
+          notificationCount++;
+        }
+      } catch (error) {
+        scanResults.push({
+          watchlistId: watchlist.id,
+          symbol,
+          error: schedulerText(error.message, 500)
+        });
+      }
+    }
+  }
+
+  return {
+    success: true,
+    jobType: "scan_watchlist",
+    watchlistsScanned: watchlists.length,
+    symbolsScanned: scanResults.length,
+    notificationsCreated: notificationCount,
+    results: scanResults,
+    executedAt: schedulerNow()
+  };
+}
+async function schedulerExecuteJob(env, job) {
+  const startedAt = schedulerNow();
+
+  try {
+    const settings = schedulerParseSettings(job.settings_json);
+
+    let result;
+
+    if (job.job_type === "monitor_positions") {
+      result = await schedulerRunPositionMonitor(
+        env,
+        job.user_id
+      );
+    } else if (job.job_type === "scan_watchlist") {
+      result = await schedulerRunWatchlistScan(
+        env,
+        job.user_id,
+        settings
+      );
+    } else {
+      throw new Error("Unsupported scheduled job type.");
+    }
+
+    const completedAt = schedulerNow();
+
+    await schedulerLogRun(env, {
+      jobId: job.id,
+      userId: job.user_id,
+      jobType: job.job_type,
+      status: "completed",
+      startedAt,
+      completedAt,
+      result
+    });
+
+    return {
+      success: true,
+      jobId: job.id,
+      result
+    };
+  } catch (error) {
+    const completedAt = schedulerNow();
+
+    try {
+      await schedulerLogRun(env, {
+        jobId: job.id,
+        userId: job.user_id,
+        jobType: job.job_type,
+        status: "failed",
+        startedAt,
+        completedAt,
+        error: error.message
+      });
+    } catch (logError) {
+      console.error(
+        "Unable to record scheduled job failure:",
+        logError.message
+      );
+    }
+
+    return {
+      success: false,
+      jobId: job.id,
+      error: schedulerText(error.message, 1000)
+    };
+  } finally {
+    const now = schedulerNow();
+
+    const interval = schedulerInterval(
+      job.interval_minutes
+    );
+
+    await env.DB.prepare(`
+      UPDATE scheduled_jobs
+      SET
+        last_run_at = ?,
+        next_run_at = ?,
+        lease_until = NULL,
+        updated_at = ?
+      WHERE id = ?
+    `).bind(
+      now,
+      schedulerNextRun(interval),
+      now,
+      job.id
+    ).run();
+  }
+}
+
+async function runScheduledJobs(env, scheduledTime) {
+  if (!env.DB) {
+    console.error("Scheduler cannot run: D1 binding DB is missing.");
+    return;
+  }
+
+  const executionTime = new Date(
+    scheduledTime || Date.now()
+  ).toISOString();
+
+  const jobsResult = await env.DB.prepare(`
+    SELECT *
+    FROM scheduled_jobs
+    WHERE enabled = 1
+      AND next_run_at <= ?
+      AND (
+        lease_until IS NULL
+        OR lease_until < ?
+      )
+    ORDER BY next_run_at ASC
+    LIMIT ?
+  `).bind(
+    executionTime,
+    executionTime,
+    SCHEDULER_CONFIG.MAX_JOBS_PER_RUN
+  ).all();
+
+  const jobs = jobsResult.results || [];
+
+  for (const job of jobs) {
+    const leaseUntil = new Date(
+      Date.now() +
+      SCHEDULER_CONFIG.LEASE_MINUTES * 60 * 1000
+    ).toISOString();
+
+    const claim = await env.DB.prepare(`
+      UPDATE scheduled_jobs
+      SET lease_until = ?
+      WHERE id = ?
+        AND enabled = 1
+        AND next_run_at <= ?
+        AND (
+          lease_until IS NULL
+          OR lease_until < ?
+        )
+    `).bind(
+      leaseUntil,
+      job.id,
+      executionTime,
+      executionTime
+    ).run();
+
+    if (!claim.meta?.changes) {
+      continue;
+    }
+
+    try {
+      await schedulerExecuteJob(env, job);
+    } catch (error) {
+      console.error(
+        `Scheduled job ${job.id} failed:`,
+        error.message
+      );
+    }
+  }
+
+  return {
+    executed: jobs.length,
+    executedAt: executionTime
+  };
+}
+async function handleScheduledJobs(request, env, user) {
+  const url = new URL(request.url);
+  const method = request.method;
+  const userId = user.id;
+
+  if (method === "GET" && url.pathname === "/api/automation/jobs") {
+    const jobs = await schedulerGetJobs(env, userId);
+
+    return json({
+      ok: true,
+      jobs
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/automation/jobs") {
+    const body = await request.json();
+
+    try {
+      const job = await schedulerCreateJob(
+        env,
+        userId,
+        body
+      );
+
+      return json({
+        ok: true,
+        message: "Scheduled job created.",
+        job
+      }, 201);
+    } catch (error) {
+      return json({
+        ok: false,
+        error: error.message
+      }, 400);
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/api/automation/runs") {
+    const limit = url.searchParams.get("limit") || 50;
+
+    const runs = await schedulerGetRuns(
+      env,
+      userId,
+      limit
+    );
+
+    return json({
+      ok: true,
+      runs
+    });
+  }
+
+  const match = url.pathname.match(
+    /^\/api\/automation\/jobs\/([A-Za-z0-9-]+)$/
+  );
+
+  if (match) {
+    const jobId = match[1];
+
+    if (method === "PATCH") {
+      const body = await request.json();
+
+      try {
+        const job = await schedulerUpdateJob(
+          env,
+          userId,
+          jobId,
+          body
+        );
+
+        if (!job) {
+          return json({
+            ok: false,
+            error: "Scheduled job not found."
+          }, 404);
+        }
+
+        return json({
+          ok: true,
+          message: "Scheduled job updated.",
+          job
+        });
+      } catch (error) {
+        return json({
+          ok: false,
+          error: error.message
+        }, 400);
+      }
+    }
+
+    if (method === "DELETE") {
+      const deleted = await schedulerDeleteJob(
+        env,
+        userId,
+        jobId
+      );
+
+      if (!deleted) {
+        return json({
+          ok: false,
+          error: "Scheduled job not found."
+        }, 404);
+      }
+
+      return json({
+        ok: true,
+        message: "Scheduled job deleted."
+      });
+    }
+  }
+
+  return json({
+    ok: false,
+    error: "Automation endpoint not found."
+  }, 404);
+}
+if (
+  url.pathname.startsWith("/api/automation/") &&
+  [
+    "/api/automation/jobs",
+    "/api/automation/runs"
+  ].includes(url.pathname) ||
+  /^\/api\/automation\/jobs\/[A-Za-z0-9-]+$/.test(url.pathname)
+) {
+  return handleScheduledJobs(request, env, user);
+}
+"triggers": {
+  "crons": [
+    "*/5 * * * *"
+  ]
+}
+export default {
+  async fetch(request, env, ctx) {
+    // Existing fetch implementation
+  }
+};
+export default {
+  async fetch(request, env, ctx) {
+    // Keep your existing fetch implementation here.
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(
+      runScheduledJobs(env, controller.scheduledTime)
+    );
+  }
+};
