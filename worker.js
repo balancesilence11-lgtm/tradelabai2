@@ -1200,8 +1200,733 @@ async function handleMarket(request, env, url) {
       }, 502);
     }
   }
-
+}
   return null;
+/* =========================================
+   AI SIGNAL API
+========================================= */
+
+async function handleAISignals(request, env, url, user) {
+  const path = url.pathname;
+
+  if (path === "/api/ai/signals") {
+    if (request.method !== "GET") {
+      return json({
+        ok: false,
+        error: "Method not allowed"
+      }, 405, { Allow: "GET" });
+    }
+
+    const symbol = String(
+      url.searchParams.get("symbol") || ""
+    ).toUpperCase().replace("/", "");
+
+    const timeframe = String(
+      url.searchParams.get("timeframe") || "15min"
+    ).toLowerCase();
+
+    const providerSymbol = SYMBOLS[symbol];
+
+    if (!providerSymbol) {
+      return json({
+        ok: false,
+        error: "Unsupported market symbol"
+      }, 400);
+    }
+
+    if (!AI_SIGNAL_TIMEFRAMES.includes(timeframe)) {
+      return json({
+        ok: false,
+        error: "Unsupported signal timeframe",
+        allowedTimeframes: AI_SIGNAL_TIMEFRAMES
+      }, 400);
+    }
+
+    try {
+      const signal = await aiGenerateSignal(
+        symbol,
+        providerSymbol,
+        timeframe,
+        env
+      );
+
+      // History is optional. The signal endpoint remains functional
+      // even when the optional history table has not been created.
+      if (env.DB) {
+        try {
+          await env.DB.prepare(`
+            INSERT INTO ai_signal_history (
+              id,
+              user_id,
+              symbol,
+              timeframe,
+              signal,
+              confidence,
+              entry,
+              stop_loss,
+              take_profit_json,
+              generated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(
+            crypto.randomUUID(),
+            user.id,
+            symbol,
+            timeframe,
+            signal.signal,
+            signal.confidence,
+            signal.entry,
+            signal.stopLoss,
+            JSON.stringify(signal.takeProfit),
+            signal.generatedAt
+          ).run();
+
+        } catch (historyError) {
+          console.warn(
+            "AI signal history not saved:",
+            historyError.message
+          );
+        }
+      }
+
+      return json(signal);
+
+    } catch (error) {
+      console.error(
+        "AI signal generation failed:",
+        error.message
+      );
+
+      return json({
+        ok: false,
+        error: "Unable to generate AI trading signal",
+        symbol,
+        timeframe
+      }, 502);
+    }
+  }
+
+  /* =====================================
+     SIGNAL HISTORY
+     GET /api/ai/signals/history
+  ===================================== */
+
+  if (path === "/api/ai/signals/history") {
+    if (request.method !== "GET") {
+      return json({
+        ok: false,
+        error: "Method not allowed"
+      }, 405, { Allow: "GET" });
+    }
+
+    if (!env.DB) {
+      return json({
+        ok: true,
+        history: [],
+        message: "Signal history database is unavailable"
+      });
+    }
+
+    const requestedLimit = Number(
+      url.searchParams.get("limit") || 50
+    );
+
+    const limit = Number.isSafeInteger(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 50;
+
+    try {
+      const result = await env.DB.prepare(`
+        SELECT
+          id,
+          symbol,
+          timeframe,
+          signal,
+          confidence,
+          entry,
+          stop_loss,
+          take_profit_json,
+          generated_at
+        FROM ai_signal_history
+        WHERE user_id = ?
+        ORDER BY generated_at DESC
+        LIMIT ?
+      `).bind(
+        user.id,
+        limit
+      ).all();
+
+      return json({
+        ok: true,
+        history: result.results || []
+      });
+
+    } catch (error) {
+      console.warn(
+        "AI signal history unavailable:",
+        error.message
+      );
+
+      return json({
+        ok: true,
+        history: [],
+        message: "Signal history table is not configured"
+      });
+    }
+  }
+
+  return json({
+    ok: false,
+    error: "AI signal route not found"
+  }, 404);
+}
+}
+/* =========================================
+   TRADELAB AI SIGNAL ENGINE
+   TECHNICAL ANALYSIS CORE
+========================================= */
+
+const AI_SIGNAL_DEFAULT_CANDLES = 200;
+const AI_SIGNAL_MIN_CANDLES = 60;
+
+const AI_SIGNAL_TIMEFRAMES = [
+  "5min",
+  "15min",
+  "30min",
+  "1h",
+  "4h",
+  "1day"
+];
+
+
+/* =========================================
+   EXPONENTIAL MOVING AVERAGE
+========================================= */
+
+function aiEMA(values, period) {
+  if (!Array.isArray(values) || values.length < period) {
+    return null;
+  }
+
+  const multiplier = 2 / (period + 1);
+
+  let ema = values
+    .slice(0, period)
+    .reduce((sum, value) => sum + value, 0) / period;
+
+  for (let i = period; i < values.length; i++) {
+    ema =
+      (values[i] - ema) * multiplier +
+      ema;
+  }
+
+  return ema;
+}
+
+
+/* =========================================
+   RELATIVE STRENGTH INDEX
+========================================= */
+
+function aiRSI(values, period = 14) {
+  if (values.length <= period) return null;
+
+  let gains = 0;
+  let losses = 0;
+
+  for (let i = 1; i <= period; i++) {
+    const change = values[i] - values[i - 1];
+
+    if (change > 0) gains += change;
+    else losses += Math.abs(change);
+  }
+
+  let averageGain = gains / period;
+  let averageLoss = losses / period;
+
+  for (let i = period + 1; i < values.length; i++) {
+    const change = values[i] - values[i - 1];
+
+    const gain = Math.max(change, 0);
+    const loss = Math.max(-change, 0);
+
+    averageGain =
+      ((averageGain * (period - 1)) + gain) / period;
+
+    averageLoss =
+      ((averageLoss * (period - 1)) + loss) / period;
+  }
+
+  if (averageLoss === 0) return 100;
+
+  const relativeStrength = averageGain / averageLoss;
+
+  return 100 - (100 / (1 + relativeStrength));
+}
+
+
+/* =========================================
+   AVERAGE TRUE RANGE
+========================================= */
+
+function aiATR(candles, period = 14) {
+  if (candles.length <= period) return null;
+
+  const ranges = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const current = candles[i];
+    const previous = candles[i - 1];
+
+    const trueRange = Math.max(
+      current.high - current.low,
+      Math.abs(current.high - previous.close),
+      Math.abs(current.low - previous.close)
+    );
+
+    ranges.push(trueRange);
+  }
+
+  if (ranges.length < period) return null;
+
+  let atr = ranges
+    .slice(0, period)
+    .reduce((sum, value) => sum + value, 0) / period;
+
+  for (let i = period; i < ranges.length; i++) {
+    atr =
+      ((atr * (period - 1)) + ranges[i]) / period;
+  }
+
+  return atr;
+}
+
+
+/* =========================================
+   MACD
+========================================= */
+
+function aiMACD(values) {
+  if (values.length < 35) return null;
+
+  const fast = [];
+  const slow = [];
+
+  for (let i = 0; i < values.length; i++) {
+    const subset = values.slice(0, i + 1);
+
+    fast.push(aiEMA(subset, 12));
+    slow.push(aiEMA(subset, 26));
+  }
+
+  const macdValues = [];
+
+  for (let i = 0; i < values.length; i++) {
+    if (
+      fast[i] === null ||
+      slow[i] === null
+    ) {
+      continue;
+    }
+
+    macdValues.push(fast[i] - slow[i]);
+  }
+
+  if (macdValues.length < 9) return null;
+
+  const signal = aiEMA(macdValues, 9);
+
+  const currentMACD =
+    macdValues[macdValues.length - 1];
+
+  const previousMACD =
+    macdValues[macdValues.length - 2];
+
+  if (signal === null) return null;
+
+  return {
+    macd: currentMACD,
+    signal,
+    histogram: currentMACD - signal,
+    previousMACD
+  };
+}
+
+
+/* =========================================
+   SUPPORT AND RESISTANCE
+========================================= */
+
+function aiSupportResistance(candles, lookback = 30) {
+  const recent = candles.slice(-lookback);
+
+  if (!recent.length) return null;
+
+  const support = Math.min(
+    ...recent.map(candle => candle.low)
+  );
+
+  const resistance = Math.max(
+    ...recent.map(candle => candle.high)
+  );
+
+  return {
+    support,
+    resistance
+  };
+}
+
+
+/* =========================================
+   ANALYSE ONE TIMEFRAME
+========================================= */
+
+function aiAnalyseTimeframe(candles) {
+  if (
+    !Array.isArray(candles) ||
+    candles.length < AI_SIGNAL_MIN_CANDLES
+  ) {
+    throw new Error("Insufficient candle data for analysis");
+  }
+
+  const closes = candles.map(candle => candle.close);
+
+  const currentPrice = closes[closes.length - 1];
+
+  const ema9 = aiEMA(closes, 9);
+  const ema21 = aiEMA(closes, 21);
+  const ema50 = aiEMA(closes, 50);
+
+  const rsi = aiRSI(closes, 14);
+  const atr = aiATR(candles, 14);
+  const macd = aiMACD(closes);
+
+  const levels = aiSupportResistance(candles, 30);
+
+  if (
+    !Number.isFinite(currentPrice) ||
+    !Number.isFinite(ema9) ||
+    !Number.isFinite(ema21) ||
+    !Number.isFinite(ema50) ||
+    !Number.isFinite(rsi) ||
+    !Number.isFinite(atr) ||
+    !macd ||
+    !levels
+  ) {
+    throw new Error("Unable to calculate technical indicators");
+  }
+
+  let bullishScore = 0;
+  let bearishScore = 0;
+
+  const reasons = [];
+
+  /* EMA TREND */
+
+  if (ema9 > ema21 && ema21 > ema50) {
+    bullishScore += 2;
+    reasons.push("Bullish EMA alignment");
+  } else if (ema9 < ema21 && ema21 < ema50) {
+    bearishScore += 2;
+    reasons.push("Bearish EMA alignment");
+  }
+
+  /* PRICE POSITION */
+
+  if (currentPrice > ema50) {
+    bullishScore += 1;
+    reasons.push("Price above EMA 50");
+  } else if (currentPrice < ema50) {
+    bearishScore += 1;
+    reasons.push("Price below EMA 50");
+  }
+
+  /* RSI MOMENTUM */
+
+  if (rsi >= 52 && rsi <= 70) {
+    bullishScore += 1;
+    reasons.push("Bullish RSI momentum");
+  } else if (rsi <= 48 && rsi >= 30) {
+    bearishScore += 1;
+    reasons.push("Bearish RSI momentum");
+  }
+
+  /* MACD MOMENTUM */
+
+  if (
+    macd.histogram > 0 &&
+    macd.macd > macd.signal
+  ) {
+    bullishScore += 2;
+    reasons.push("Bullish MACD momentum");
+  } else if (
+    macd.histogram < 0 &&
+    macd.macd < macd.signal
+  ) {
+    bearishScore += 2;
+    reasons.push("Bearish MACD momentum");
+  }
+
+  /* SIGNAL DIRECTION */
+
+  let direction = "HOLD";
+
+  if (bullishScore >= 4 && bullishScore > bearishScore) {
+    direction = "BUY";
+  } else if (
+    bearishScore >= 4 &&
+    bearishScore > bullishScore
+  ) {
+    direction = "SELL";
+  }
+
+  return {
+    direction,
+    currentPrice,
+    bullishScore,
+    bearishScore,
+    rsi,
+    ema9,
+    ema21,
+    ema50,
+    atr,
+    macd,
+    support: levels.support,
+    resistance: levels.resistance,
+    reasons
+  };
+}
+
+
+/* =========================================
+   BUILD ENTRY, STOP LOSS AND TARGETS
+========================================= */
+
+function aiBuildTradeLevels(analysis) {
+  const entry = analysis.currentPrice;
+  const atr = analysis.atr;
+
+  if (
+    !Number.isFinite(entry) ||
+    !Number.isFinite(atr) ||
+    entry <= 0 ||
+    atr <= 0
+  ) {
+    return null;
+  }
+
+  const direction = analysis.direction;
+
+  if (direction === "HOLD") {
+    return {
+      entry,
+      stopLoss: null,
+      takeProfit: [],
+      riskReward: []
+    };
+  }
+
+  const riskDistance = atr * 1.5;
+
+  const stopLoss = direction === "BUY"
+    ? entry - riskDistance
+    : entry + riskDistance;
+
+  const targets = [1, 2, 3].map(multiplier =>
+    direction === "BUY"
+      ? entry + riskDistance * multiplier
+      : entry - riskDistance * multiplier
+  );
+
+  return {
+    entry,
+    stopLoss,
+    takeProfit: targets.map((price, index) => ({
+      level: `TP${index + 1}`,
+      price,
+      riskReward: index + 1
+    })),
+    riskReward: [1, 2, 3]
+  };
+}
+
+
+/* =========================================
+   CONFIDENCE SCORE
+========================================= */
+
+function aiCalculateConfidence(
+  primary,
+  confirmations
+) {
+  const maximumScore = 6;
+
+  const primaryScore = Math.max(
+    primary.bullishScore,
+    primary.bearishScore
+  );
+
+  const primaryConfidence = Math.min(
+    85,
+    (primaryScore / maximumScore) * 85
+  );
+
+  if (primary.direction === "HOLD") {
+    return Math.round(
+      Math.min(45, primaryConfidence)
+    );
+  }
+
+  const matching = confirmations.filter(
+    item => item.direction === primary.direction
+  ).length;
+
+  const confirmationBonus =
+    confirmations.length
+      ? (matching / confirmations.length) * 15
+      : 0;
+
+  return Math.round(
+    Math.min(
+      95,
+      primaryConfidence + confirmationBonus
+    )
+  );
+}
+
+
+/* =========================================
+   COMPLETE SIGNAL GENERATION
+========================================= */
+
+async function aiGenerateSignal(
+  symbol,
+  providerSymbol,
+  timeframe,
+  env
+) {
+  const primaryData = await marketGetCandles(
+    providerSymbol,
+    timeframe,
+    AI_SIGNAL_DEFAULT_CANDLES,
+    env
+  );
+
+  const primaryCandles = primaryData.candles;
+
+  if (primaryCandles.length < AI_SIGNAL_MIN_CANDLES) {
+    throw new Error("Not enough candles to generate a signal");
+  }
+
+  const primary = aiAnalyseTimeframe(primaryCandles);
+
+  const confirmationTimeframes = {
+    "5min": ["15min", "1h"],
+    "15min": ["1h", "4h"],
+    "30min": ["1h", "4h"],
+    "1h": ["4h", "1day"],
+    "4h": ["1day"],
+    "1day": ["4h"]
+  };
+
+  const confirmationIntervals =
+    confirmationTimeframes[timeframe] || [];
+
+  const confirmations = [];
+
+  for (const confirmationTimeframe of confirmationIntervals) {
+    try {
+      const data = await marketGetCandles(
+        providerSymbol,
+        confirmationTimeframe,
+        AI_SIGNAL_DEFAULT_CANDLES,
+        env
+      );
+
+      if (data.candles.length >= AI_SIGNAL_MIN_CANDLES) {
+        const analysis = aiAnalyseTimeframe(data.candles);
+
+        confirmations.push({
+          timeframe: confirmationTimeframe,
+          direction: analysis.direction
+        });
+      }
+    } catch (error) {
+      console.warn(
+        "AI confirmation timeframe unavailable:",
+        confirmationTimeframe,
+        error.message
+      );
+    }
+  }
+
+  const confidence = aiCalculateConfidence(
+    primary,
+    confirmations
+  );
+
+  const levels = aiBuildTradeLevels(primary);
+
+  const matchingConfirmations = confirmations.filter(
+    item => item.direction === primary.direction
+  ).length;
+
+  const confirmationPassed =
+    confirmations.length === 0 ||
+    matchingConfirmations >= Math.ceil(
+      confirmations.length / 2
+    );
+
+  let finalDirection = primary.direction;
+
+  if (
+    primary.direction !== "HOLD" &&
+    !confirmationPassed
+  ) {
+    finalDirection = "HOLD";
+  }
+
+  const finalLevels = finalDirection === "HOLD"
+    ? aiBuildTradeLevels({
+        ...primary,
+        direction: "HOLD"
+      })
+    : levels;
+
+  return {
+    ok: true,
+    engine: "TradeLab AI Technical Signal Engine",
+    model: "Deterministic technical analysis",
+    symbol,
+    timeframe,
+    signal: finalDirection,
+    originalSignal: primary.direction,
+    confidence: finalDirection === "HOLD"
+      ? Math.min(confidence, 49)
+      : confidence,
+    entry: finalLevels.entry,
+    stopLoss: finalLevels.stopLoss,
+    takeProfit: finalLevels.takeProfit,
+    riskReward: finalLevels.riskReward,
+    indicators: {
+      RSI: Number(primary.rsi.toFixed(2)),
+      EMA9: primary.ema9,
+      EMA21: primary.ema21,
+      EMA50: primary.ema50,
+      ATR: primary.atr,
+      MACD: primary.macd
+    },
+    supportResistance: {
+      support: primary.support,
+      resistance: primary.resistance
+    },
+    confirmations,
+    confirmationPassed,
+    reasons: primary.reasons,
+    marketDataProvider: primaryData.source,
+    candleCount: primaryCandles.length,
+    generatedAt: new Date().toISOString()
+  };
 }
 /* =========================================
    DERIV OAUTH CONNECTION (AUTHORIZATION CODE + PKCE)
@@ -3364,7 +4089,33 @@ async function handleHistoricalData(request, env, url, user) {
     });
   }
 
+/* =========================================
+   AI SIGNAL ROUTES
+========================================= */
 
+if (path.startsWith("/api/ai/signals")) {
+  const user = await getAuthenticatedUser(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required"
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(env, user);
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await handleAISignals(
+    request,
+    env,
+    url,
+    user
+  );
+}
   /* =====================================
      UNKNOWN HISTORICAL ROUTE
   ===================================== */
@@ -3932,4 +4683,5292 @@ async function marketGetCandles(
       ? "All configured historical data providers failed"
       : "No historical market data provider is configured"
   );
+}
+// ============================================================
+// PHASE 4 — MULTI-STRATEGY ANALYSIS ENGINE
+// ============================================================
+
+const STRATEGY_TIMEFRAMES = {
+  "1min": "1m",
+  "5min": "5m",
+  "15min": "15m",
+  "30min": "30m",
+  "1hour": "1h",
+  "4hour": "4h",
+  "1day": "1day",
+  M1: "1m",
+  M5: "5m",
+  M15: "15m",
+  M30: "30m",
+  H1: "1h",
+  H4: "4h",
+  D1: "1day"
+};
+
+const STRATEGY_NAMES = new Set([
+  "price_action",
+  "smc",
+  "ict",
+  "wyckoff",
+  "volume",
+  "trend",
+  "support_resistance"
+]);
+
+function strategyNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function strategyCandle(candle) {
+  if (!candle || typeof candle !== "object") return null;
+
+  const open = strategyNumber(candle.open);
+  const high = strategyNumber(candle.high);
+  const low = strategyNumber(candle.low);
+  const close = strategyNumber(candle.close);
+  const volume = strategyNumber(candle.volume);
+
+  if (
+    !Number.isFinite(open) ||
+    !Number.isFinite(high) ||
+    !Number.isFinite(low) ||
+    !Number.isFinite(close) ||
+    high < low ||
+    high < Math.max(open, close) ||
+    low > Math.min(open, close)
+  ) {
+    return null;
+  }
+
+  return {
+    time: candle.time ?? candle.datetime ?? candle.timestamp ?? null,
+    open,
+    high,
+    low,
+    close,
+    volume
+  };
+}
+
+function strategyNormalizeCandles(candles) {
+  if (!Array.isArray(candles)) return [];
+
+  return candles
+    .map(strategyCandle)
+    .filter(Boolean)
+    .sort((a, b) => {
+      const ta = new Date(a.time).getTime();
+      const tb = new Date(b.time).getTime();
+
+      if (Number.isFinite(ta) && Number.isFinite(tb)) {
+        return ta - tb;
+      }
+
+      return 0;
+    });
+}
+
+function strategyBody(candle) {
+  return Math.abs(candle.close - candle.open);
+}
+
+function strategyRange(candle) {
+  return Math.max(candle.high - candle.low, Number.EPSILON);
+}
+
+function strategyBullish(candle) {
+  return candle.close > candle.open;
+}
+
+function strategyBearish(candle) {
+  return candle.close < candle.open;
+}
+
+function strategyAverage(values) {
+  if (!values.length) return 0;
+
+  return values.reduce((sum, value) => sum + value, 0) /
+    values.length;
+}
+
+function strategyPercentChange(current, previous) {
+  if (!previous) return 0;
+
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+function strategyDirectionScore(score) {
+  if (score >= 2) return "BUY";
+  if (score <= -2) return "SELL";
+  return "NEUTRAL";
+}
+
+function strategySwingPoints(candles, strength = 2) {
+  const highs = [];
+  const lows = [];
+
+  for (
+    let i = strength;
+    i < candles.length - strength;
+    i++
+  ) {
+    const current = candles[i];
+
+    let isHigh = true;
+    let isLow = true;
+
+    for (let j = 1; j <= strength; j++) {
+      if (
+        current.high <= candles[i - j].high ||
+        current.high <= candles[i + j].high
+      ) {
+        isHigh = false;
+      }
+
+      if (
+        current.low >= candles[i - j].low ||
+        current.low >= candles[i + j].low
+      ) {
+        isLow = false;
+      }
+    }
+
+    if (isHigh) {
+      highs.push({
+        index: i,
+        price: current.high,
+        time: current.time
+      });
+    }
+
+    if (isLow) {
+      lows.push({
+        index: i,
+        price: current.low,
+        time: current.time
+      });
+    }
+  }
+
+  return { highs, lows };
+}
+
+function strategyEMA(values, period) {
+  if (values.length < period) return null;
+
+  const multiplier = 2 / (period + 1);
+
+  let ema = strategyAverage(values.slice(0, period));
+
+  for (let i = period; i < values.length; i++) {
+    ema =
+      values[i] * multiplier +
+      ema * (1 - multiplier);
+  }
+
+  return ema;
+}
+function strategyPriceAction(candles) {
+  const results = {
+    strategy: "price_action",
+    direction: "NEUTRAL",
+    score: 0,
+    patterns: [],
+    structure: "UNCONFIRMED",
+    explanation: []
+  };
+
+  if (candles.length < 10) {
+    results.explanation.push(
+      "Insufficient candles for reliable price action analysis."
+    );
+    return results;
+  }
+
+  const current = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+
+  const body = strategyBody(current);
+  const range = strategyRange(current);
+  const upperWick = current.high -
+    Math.max(current.open, current.close);
+  const lowerWick = Math.min(
+    current.open,
+    current.close
+  ) - current.low;
+
+  // Bullish engulfing
+  if (
+    strategyBearish(previous) &&
+    strategyBullish(current) &&
+    current.open <= previous.close &&
+    current.close >= previous.open
+  ) {
+    results.patterns.push("BULLISH_ENGULFING");
+    results.score += 2;
+  }
+
+  // Bearish engulfing
+  if (
+    strategyBullish(previous) &&
+    strategyBearish(current) &&
+    current.open >= previous.close &&
+    current.close <= previous.open
+  ) {
+    results.patterns.push("BEARISH_ENGULFING");
+    results.score -= 2;
+  }
+
+  // Bullish pin bar
+  if (
+    lowerWick >= body * 2 &&
+    lowerWick >= range * 0.55 &&
+    upperWick <= range * 0.25
+  ) {
+    results.patterns.push("BULLISH_PIN_BAR");
+    results.score += 1;
+  }
+
+  // Bearish pin bar
+  if (
+    upperWick >= body * 2 &&
+    upperWick >= range * 0.55 &&
+    lowerWick <= range * 0.25
+  ) {
+    results.patterns.push("BEARISH_PIN_BAR");
+    results.score -= 1;
+  }
+
+  // Doji
+  if (body <= range * 0.1) {
+    results.patterns.push("DOJI");
+  }
+
+  const recent = candles.slice(-6);
+
+  const bullishCount = recent.filter(
+    strategyBullish
+  ).length;
+
+  const bearishCount = recent.filter(
+    strategyBearish
+  ).length;
+
+  if (bullishCount >= 5) {
+    results.patterns.push("BULLISH_MOMENTUM");
+    results.score += 1;
+  }
+
+  if (bearishCount >= 5) {
+    results.patterns.push("BEARISH_MOMENTUM");
+    results.score -= 1;
+  }
+
+  const previousHigh = Math.max(
+    ...candles.slice(-11, -1).map(c => c.high)
+  );
+
+  const previousLow = Math.min(
+    ...candles.slice(-11, -1).map(c => c.low)
+  );
+
+  if (current.close > previousHigh) {
+    results.structure = "BULLISH_BREAKOUT";
+    results.score += 2;
+  } else if (current.close < previousLow) {
+    results.structure = "BEARISH_BREAKOUT";
+    results.score -= 2;
+  }
+
+  results.direction = strategyDirectionScore(
+    results.score
+  );
+
+  results.explanation.push(
+    `Detected patterns: ${results.patterns.length}.`
+  );
+
+  results.explanation.push(
+    `Price structure: ${results.structure}.`
+  );
+
+  return results;
+}
+function strategySMC(candles) {
+  const results = {
+    strategy: "smc",
+    direction: "NEUTRAL",
+    score: 0,
+    marketStructure: "UNCONFIRMED",
+    bos: null,
+    choch: null,
+    orderBlocks: [],
+    fairValueGaps: [],
+    explanation: []
+  };
+
+  if (candles.length < 20) {
+    results.explanation.push(
+      "At least 20 candles are required."
+    );
+    return results;
+  }
+
+  const swings = strategySwingPoints(candles, 2);
+
+  const current = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+
+  const lastHigh = swings.highs.at(-1);
+  const previousHigh = swings.highs.at(-2);
+  const lastLow = swings.lows.at(-1);
+  const previousLow = swings.lows.at(-2);
+
+  if (lastHigh && previousHigh && lastLow && previousLow) {
+    const bullishStructure =
+      lastHigh.price > previousHigh.price &&
+      lastLow.price > previousLow.price;
+
+    const bearishStructure =
+      lastHigh.price < previousHigh.price &&
+      lastLow.price < previousLow.price;
+
+    if (bullishStructure) {
+      results.marketStructure = "BULLISH";
+      results.score += 2;
+    } else if (bearishStructure) {
+      results.marketStructure = "BEARISH";
+      results.score -= 2;
+    }
+  }
+
+  // Break of Structure
+  if (lastHigh && current.close > lastHigh.price) {
+    results.bos = "BULLISH_BOS";
+    results.score += 2;
+  } else if (lastLow && current.close < lastLow.price) {
+    results.bos = "BEARISH_BOS";
+    results.score -= 2;
+  }
+
+  // Change of Character approximation
+  if (
+    previousHigh &&
+    lastHigh &&
+    current.close > previousHigh.price &&
+    results.marketStructure === "BEARISH"
+  ) {
+    results.choch = "BULLISH_CHOCH";
+    results.score += 2;
+  }
+
+  if (
+    previousLow &&
+    lastLow &&
+    current.close < previousLow.price &&
+    results.marketStructure === "BULLISH"
+  ) {
+    results.choch = "BEARISH_CHOCH";
+    results.score -= 2;
+  }
+
+  // Fair Value Gap detection
+  for (let i = Math.max(2, candles.length - 30); i < candles.length; i++) {
+    const first = candles[i - 2];
+    const third = candles[i];
+
+    if (third.low > first.high) {
+      results.fairValueGaps.push({
+        type: "BULLISH_FVG",
+        low: first.high,
+        high: third.low,
+        index: i
+      });
+    }
+
+    if (third.high < first.low) {
+      results.fairValueGaps.push({
+        type: "BEARISH_FVG",
+        low: third.high,
+        high: first.low,
+        index: i
+      });
+    }
+  }
+
+  // Approximate order blocks:
+  // Last opposing candle before a strong displacement candle.
+  for (let i = Math.max(1, candles.length - 25); i < candles.length - 1; i++) {
+    const candle = candles[i];
+    const next = candles[i + 1];
+
+    const displacement = strategyBody(next) >
+      strategyRange(next) * 0.65;
+
+    if (!displacement) continue;
+
+    if (
+      strategyBearish(candle) &&
+      strategyBullish(next) &&
+      next.close > candle.high
+    ) {
+      results.orderBlocks.push({
+        type: "BULLISH_ORDER_BLOCK",
+        low: candle.low,
+        high: candle.high,
+        index: i
+      });
+    }
+
+    if (
+      strategyBullish(candle) &&
+      strategyBearish(next) &&
+      next.close < candle.low
+    ) {
+      results.orderBlocks.push({
+        type: "BEARISH_ORDER_BLOCK",
+        low: candle.low,
+        high: candle.high,
+        index: i
+      });
+    }
+  }
+
+  results.fairValueGaps =
+    results.fairValueGaps.slice(-10);
+
+  results.orderBlocks =
+    results.orderBlocks.slice(-10);
+
+  results.direction = strategyDirectionScore(
+    results.score
+  );
+
+  results.explanation.push(
+    `Market structure: ${results.marketStructure}.`
+  );
+
+  results.explanation.push(
+    `Fair Value Gaps detected: ${results.fairValueGaps.length}.`
+  );
+
+  results.explanation.push(
+    `Potential order blocks detected: ${results.orderBlocks.length}.`
+  );
+
+  return results;
+}
+function strategyICT(candles) {
+  const results = {
+    strategy: "ict",
+    direction: "NEUTRAL",
+    score: 0,
+    liquiditySweep: null,
+    displacement: null,
+    dealingRange: null,
+    marketZone: null,
+    fairValueGaps: [],
+    explanation: []
+  };
+
+  if (candles.length < 20) {
+    results.explanation.push(
+      "Insufficient data for ICT analysis."
+    );
+    return results;
+  }
+
+  const current = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+
+  const lookback = candles.slice(-21, -1);
+
+  const liquidityHigh = Math.max(
+    ...lookback.map(c => c.high)
+  );
+
+  const liquidityLow = Math.min(
+    ...lookback.map(c => c.low)
+  );
+
+  // Liquidity sweep above previous highs
+  if (
+    current.high > liquidityHigh &&
+    current.close < liquidityHigh
+  ) {
+    results.liquiditySweep = "BUY_SIDE_LIQUIDITY_SWEPT";
+    results.score -= 2;
+  }
+
+  // Liquidity sweep below previous lows
+  if (
+    current.low < liquidityLow &&
+    current.close > liquidityLow
+  ) {
+    results.liquiditySweep = "SELL_SIDE_LIQUIDITY_SWEPT";
+    results.score += 2;
+  }
+
+  // Displacement
+  const averageBody = strategyAverage(
+    candles.slice(-11, -1).map(strategyBody)
+  );
+
+  if (
+    strategyBody(current) > averageBody * 1.8 &&
+    strategyBullish(current)
+  ) {
+    results.displacement = "BULLISH_DISPLACEMENT";
+    results.score += 2;
+  } else if (
+    strategyBody(current) > averageBody * 1.8 &&
+    strategyBearish(current)
+  ) {
+    results.displacement = "BEARISH_DISPLACEMENT";
+    results.score -= 2;
+  }
+
+  // Premium and discount zones
+  const rangeHigh = Math.max(
+    ...lookback.map(c => c.high)
+  );
+
+  const rangeLow = Math.min(
+    ...lookback.map(c => c.low)
+  );
+
+  const equilibrium = (rangeHigh + rangeLow) / 2;
+
+  results.dealingRange = {
+    high: rangeHigh,
+    low: rangeLow,
+    equilibrium
+  };
+
+  if (current.close > equilibrium) {
+    results.marketZone = "PREMIUM";
+  } else if (current.close < equilibrium) {
+    results.marketZone = "DISCOUNT";
+  } else {
+    results.marketZone = "EQUILIBRIUM";
+  }
+
+  // Three-candle FVG
+  for (let i = Math.max(2, candles.length - 20); i < candles.length; i++) {
+    const first = candles[i - 2];
+    const third = candles[i];
+
+    if (third.low > first.high) {
+      results.fairValueGaps.push({
+        type: "BULLISH",
+        low: first.high,
+        high: third.low
+      });
+    }
+
+    if (third.high < first.low) {
+      results.fairValueGaps.push({
+        type: "BEARISH",
+        low: third.high,
+        high: first.low
+      });
+    }
+  }
+
+  results.direction = strategyDirectionScore(
+    results.score
+  );
+
+  results.explanation.push(
+    `Liquidity event: ${results.liquiditySweep || "NONE"}.`
+  );
+
+  results.explanation.push(
+    `Displacement: ${results.displacement || "NONE"}.`
+  );
+
+  results.explanation.push(
+    `Current dealing range zone: ${results.marketZone}.`
+  );
+
+  return results;
+}
+function strategyWyckoff(candles) {
+  const results = {
+    strategy: "wyckoff",
+    direction: "NEUTRAL",
+    score: 0,
+    phase: "UNCONFIRMED",
+    events: [],
+    explanation: []
+  };
+
+  if (candles.length < 30) {
+    results.explanation.push(
+      "At least 30 candles are required."
+    );
+    return results;
+  }
+
+  const current = candles[candles.length - 1];
+  const recent = candles.slice(-20);
+
+  const rangeHigh = Math.max(
+    ...recent.map(c => c.high)
+  );
+
+  const rangeLow = Math.min(
+    ...recent.map(c => c.low)
+  );
+
+  const averageRange = strategyAverage(
+    recent.map(strategyRange)
+  );
+
+  const averageVolume = strategyAverage(
+    recent.map(c => c.volume).filter(v => v > 0)
+  );
+
+  const currentVolume = current.volume;
+
+  // Spring: price breaks below range and closes back inside.
+  if (
+    current.low < rangeLow &&
+    current.close > rangeLow
+  ) {
+    results.events.push("POTENTIAL_SPRING");
+    results.score += 2;
+  }
+
+  // Upthrust: price breaks above range and closes back inside.
+  if (
+    current.high > rangeHigh &&
+    current.close < rangeHigh
+  ) {
+    results.events.push("POTENTIAL_UPTHRUST");
+    results.score -= 2;
+  }
+
+  // Potential high-volume stopping action.
+  if (
+    averageVolume > 0 &&
+    currentVolume > averageVolume * 1.5 &&
+    strategyRange(current) > averageRange
+  ) {
+    if (strategyBullish(current)) {
+      results.events.push("HIGH_VOLUME_BUYING_PRESSURE");
+      results.score += 1;
+    } else if (strategyBearish(current)) {
+      results.events.push("HIGH_VOLUME_SELLING_PRESSURE");
+      results.score -= 1;
+    }
+  }
+
+  if (results.score >= 2) {
+    results.phase = "POTENTIAL_ACCUMULATION";
+  } else if (results.score <= -2) {
+    results.phase = "POTENTIAL_DISTRIBUTION";
+  } else {
+    results.phase = "TRADING_RANGE_OR_UNCONFIRMED";
+  }
+
+  results.direction = strategyDirectionScore(
+    results.score
+  );
+
+  results.explanation.push(
+    `Wyckoff phase estimate: ${results.phase}.`
+  );
+
+  results.explanation.push(
+    "Wyckoff events are heuristic estimates, not confirmed institutional activity."
+  );
+
+  return results;
+}
+function strategyVolume(candles) {
+  const results = {
+    strategy: "volume",
+    direction: "NEUTRAL",
+    score: 0,
+    available: false,
+    relativeVolume: null,
+    condition: "VOLUME_UNAVAILABLE",
+    explanation: []
+  };
+
+  const valid = candles.filter(c => c.volume > 0);
+
+  if (valid.length < 10) {
+    results.explanation.push(
+      "Reliable volume data is unavailable for this market feed."
+    );
+
+    return results;
+  }
+
+  results.available = true;
+
+  const current = valid[valid.length - 1];
+
+  const averageVolume = strategyAverage(
+    valid.slice(-21, -1).map(c => c.volume)
+  );
+
+  if (!averageVolume) {
+    return results;
+  }
+
+  results.relativeVolume =
+    current.volume / averageVolume;
+
+  if (results.relativeVolume >= 2) {
+    results.condition = "VERY_HIGH_VOLUME";
+  } else if (results.relativeVolume >= 1.5) {
+    results.condition = "HIGH_VOLUME";
+  } else if (results.relativeVolume <= 0.5) {
+    results.condition = "LOW_VOLUME";
+  } else {
+    results.condition = "NORMAL_VOLUME";
+  }
+
+  if (
+    results.relativeVolume >= 1.5 &&
+    strategyBullish(current)
+  ) {
+    results.score += 1;
+  }
+
+  if (
+    results.relativeVolume >= 1.5 &&
+    strategyBearish(current)
+  ) {
+    results.score -= 1;
+  }
+
+  results.direction = strategyDirectionScore(
+    results.score
+  );
+
+  results.explanation.push(
+    `Relative volume: ${results.relativeVolume.toFixed(2)}x average.`
+  );
+
+  results.explanation.push(
+    `Volume condition: ${results.condition}.`
+  );
+
+  return results;
+}
+function strategyTrend(candles) {
+  const results = {
+    strategy: "trend",
+    direction: "NEUTRAL",
+    score: 0,
+    ema20: null,
+    ema50: null,
+    ema200: null,
+    momentum: "NEUTRAL",
+    explanation: []
+  };
+
+  const closes = candles.map(c => c.close);
+
+  results.ema20 = strategyEMA(closes, 20);
+  results.ema50 = strategyEMA(closes, 50);
+  results.ema200 = strategyEMA(closes, 200);
+
+  const current = candles.at(-1);
+
+  if (results.ema20 !== null && results.ema50 !== null) {
+    if (
+      current.close > results.ema20 &&
+      results.ema20 > results.ema50
+    ) {
+      results.score += 2;
+      results.momentum = "BULLISH";
+    } else if (
+      current.close < results.ema20 &&
+      results.ema20 < results.ema50
+    ) {
+      results.score -= 2;
+      results.momentum = "BEARISH";
+    }
+  }
+
+  if (results.ema200 !== null) {
+    if (current.close > results.ema200) {
+      results.score += 1;
+    } else if (current.close < results.ema200) {
+      results.score -= 1;
+    }
+  }
+
+  results.direction = strategyDirectionScore(
+    results.score
+  );
+
+  results.explanation.push(
+    `Trend momentum: ${results.momentum}.`
+  );
+
+  return results;
+}
+function strategySupportResistance(candles) {
+  const results = {
+    strategy: "support_resistance",
+    direction: "NEUTRAL",
+    support: [],
+    resistance: [],
+    nearestSupport: null,
+    nearestResistance: null,
+    explanation: []
+  };
+
+  if (candles.length < 10) {
+    return results;
+  }
+
+  const swings = strategySwingPoints(candles, 2);
+  const currentPrice = candles.at(-1).close;
+
+  function clusterLevels(levels, tolerance) {
+    const clusters = [];
+
+    for (const level of levels) {
+      let cluster = clusters.find(item =>
+        Math.abs(item.price - level.price) <= tolerance
+      );
+
+      if (!cluster) {
+        cluster = {
+          price: level.price,
+          touches: 0
+        };
+
+        clusters.push(cluster);
+      }
+
+      cluster.price =
+        (cluster.price * cluster.touches + level.price) /
+        (cluster.touches + 1);
+
+      cluster.touches++;
+    }
+
+    return clusters
+      .filter(item => item.touches >= 1)
+      .sort((a, b) => b.touches - a.touches);
+  }
+
+  const averageRange = strategyAverage(
+    candles.slice(-20).map(strategyRange)
+  );
+
+  const tolerance = averageRange * 0.15;
+
+  results.support = clusterLevels(
+    swings.lows.filter(x => x.price < currentPrice),
+    tolerance
+  ).slice(0, 5);
+
+  results.resistance = clusterLevels(
+    swings.highs.filter(x => x.price > currentPrice),
+    tolerance
+  ).slice(0, 5);
+
+  results.nearestSupport =
+    results.support.sort(
+      (a, b) => b.price - a.price
+    )[0] || null;
+
+  results.nearestResistance =
+    results.resistance.sort(
+      (a, b) => a.price - b.price
+    )[0] || null;
+
+  results.explanation.push(
+    `Support levels identified: ${results.support.length}.`
+  );
+
+  results.explanation.push(
+    `Resistance levels identified: ${results.resistance.length}.`
+  );
+
+  return results;
+}
+function strategyBuildConsensus(analyses) {
+  const weights = {
+    price_action: 1.2,
+    smc: 1.3,
+    ict: 1.2,
+    wyckoff: 1.0,
+    volume: 0.7,
+    trend: 1.3,
+    support_resistance: 0.8
+  };
+
+  let weightedScore = 0;
+  let totalWeight = 0;
+
+  const contributions = [];
+
+  for (const analysis of analyses) {
+    if (!analysis || !STRATEGY_NAMES.has(analysis.strategy)) {
+      continue;
+    }
+
+    const weight = weights[analysis.strategy] || 1;
+    const score = strategyNumber(analysis.score);
+
+    weightedScore += score * weight;
+    totalWeight += weight;
+
+    contributions.push({
+      strategy: analysis.strategy,
+      direction: analysis.direction,
+      score,
+      weight
+    });
+  }
+
+  const normalizedScore = totalWeight
+    ? weightedScore / totalWeight
+    : 0;
+
+  let direction = "HOLD";
+
+  if (normalizedScore >= 0.65) {
+    direction = "BUY";
+  } else if (normalizedScore <= -0.65) {
+    direction = "SELL";
+  }
+
+  const confidence = Math.min(
+    95,
+    Math.max(
+      0,
+      Math.round(Math.abs(normalizedScore) * 35)
+    )
+  );
+
+  return {
+    direction,
+    normalizedScore: Number(normalizedScore.toFixed(3)),
+    confidence,
+    contributions,
+    agreement: contributions.length
+      ? Math.round(
+          (
+            contributions.filter(x =>
+              direction === "BUY"
+                ? x.score > 0
+                : direction === "SELL"
+                  ? x.score < 0
+                  : x.score === 0
+            ).length / contributions.length
+          ) * 100
+        )
+      : 0
+  };
+}
+async function handleStrategyAnalysis(request, env, user, url) {
+  const symbol = String(
+    url.searchParams.get("symbol") || "EURUSD"
+  ).toUpperCase();
+
+  const timeframe = String(
+    url.searchParams.get("timeframe") || "15min"
+  );
+
+  const normalizedTimeframe =
+    STRATEGY_TIMEFRAMES[timeframe];
+
+  if (!SYMBOLS[symbol]) {
+    return json({
+      ok: false,
+      error: "Unsupported market symbol."
+    }, 400);
+  }
+
+  if (!normalizedTimeframe) {
+    return json({
+      ok: false,
+      error: "Unsupported timeframe."
+    }, 400);
+  }
+
+  const requestedStrategies = String(
+    url.searchParams.get("strategies") || ""
+  )
+    .split(",")
+    .map(x => x.trim().toLowerCase())
+    .filter(x => STRATEGY_NAMES.has(x));
+
+  const selectedStrategies = requestedStrategies.length
+    ? requestedStrategies
+    : [...STRATEGY_NAMES];
+
+  let candles;
+
+  try {
+    const marketResult = await marketGetCandles(
+      env,
+      symbol,
+      normalizedTimeframe,
+      250
+    );
+
+    candles = strategyNormalizeCandles(
+      marketResult?.candles || marketResult?.data || marketResult
+    );
+  } catch (error) {
+    console.error(
+      "Strategy market-data error:",
+      error.message
+    );
+
+    return json({
+      ok: false,
+      error: "Unable to retrieve candles for strategy analysis."
+    }, 502);
+  }
+
+  if (candles.length < 20) {
+    return json({
+      ok: false,
+      error: "Insufficient historical candles.",
+      availableCandles: candles.length,
+      requiredCandles: 20
+    }, 422);
+  }
+
+  const analysisFunctions = {
+    price_action: strategyPriceAction,
+    smc: strategySMC,
+    ict: strategyICT,
+    wyckoff: strategyWyckoff,
+    volume: strategyVolume,
+    trend: strategyTrend,
+    support_resistance: strategySupportResistance
+  };
+
+  const analyses = [];
+
+  for (const name of selectedStrategies) {
+    try {
+      analyses.push(
+        analysisFunctions[name](candles)
+      );
+    } catch (error) {
+      console.error(
+        `Strategy ${name} failed:`,
+        error.message
+      );
+
+      analyses.push({
+        strategy: name,
+        direction: "NEUTRAL",
+        score: 0,
+        error: "Strategy analysis unavailable."
+      });
+    }
+  }
+
+  const consensus = strategyBuildConsensus(
+    analyses
+  );
+
+  return json({
+    ok: true,
+    symbol,
+    timeframe,
+    candleCount: candles.length,
+    currentPrice: candles.at(-1).close,
+    generatedAt: new Date().toISOString(),
+
+    consensus,
+
+    strategies: analyses,
+
+    disclaimer:
+      "Strategy outputs are rule-based technical estimates, not guaranteed predictions or confirmed institutional order flow."
+  });
+}
+// ============================================================
+// MULTI-STRATEGY ANALYSIS ROUTE
+// ============================================================
+
+if (
+  path === "/api/ai/strategies" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await handleStrategyAnalysis(
+    request,
+    env,
+    user,
+    url
+  );
+}
+// ============================================================
+// PHASE 5 — MULTI-TIMEFRAME CONFIRMATION ENGINE
+// ============================================================
+
+const MTF_CONFIG = {
+  "1min": {
+    lower: null,
+    entry: "1min",
+    higher: "5min"
+  },
+
+  "5min": {
+    lower: "1min",
+    entry: "5min",
+    higher: "15min"
+  },
+
+  "15min": {
+    lower: "5min",
+    entry: "15min",
+    higher: "1hour"
+  },
+
+  "30min": {
+    lower: "15min",
+    entry: "30min",
+    higher: "4hour"
+  },
+
+  "1hour": {
+    lower: "15min",
+    entry: "1hour",
+    higher: "4hour"
+  },
+
+  "4hour": {
+    lower: "1hour",
+    entry: "4hour",
+    higher: "1day"
+  },
+
+  "1day": {
+    lower: "4hour",
+    entry: "1day",
+    higher: null
+  }
+};
+
+const MTF_CANDLE_LIMIT = 250;
+const MTF_MINIMUM_CANDLES = 50;
+function mtfAnalyseCandles(candles, timeframe) {
+  const normalized = strategyNormalizeCandles(candles);
+
+  if (normalized.length < MTF_MINIMUM_CANDLES) {
+    return {
+      timeframe,
+      available: false,
+      direction: "HOLD",
+      score: 0,
+      reason: "Insufficient historical candles."
+    };
+  }
+
+  const trend = strategyTrend(normalized);
+  const priceAction = strategyPriceAction(normalized);
+  const smc = strategySMC(normalized);
+  const ict = strategyICT(normalized);
+
+  const components = [
+    trend,
+    priceAction,
+    smc,
+    ict
+  ];
+
+  const consensus = strategyBuildConsensus(
+    components
+  );
+
+  const current = normalized.at(-1);
+
+  return {
+    timeframe,
+    available: true,
+    direction: consensus.direction,
+    confidence: consensus.confidence,
+    score: consensus.normalizedScore,
+    currentPrice: current.close,
+
+    indicators: {
+      ema20: trend.ema20,
+      ema50: trend.ema50,
+      ema200: trend.ema200
+    },
+
+    confirmations: {
+      trend: trend.direction,
+      priceAction: priceAction.direction,
+      smc: smc.direction,
+      ict: ict.direction
+    },
+
+    candleCount: normalized.length
+  };
+}
+function mtfCalculateConsensus(results) {
+  const weights = {
+    higher: 0.45,
+    entry: 0.40,
+    lower: 0.15
+  };
+
+  let totalScore = 0;
+  let totalWeight = 0;
+
+  const available = [];
+
+  for (const [name, result] of Object.entries(results)) {
+    if (!result || !result.available) continue;
+
+    const weight = weights[name] || 0;
+
+    if (!weight) continue;
+
+    totalScore += result.score * weight;
+    totalWeight += weight;
+
+    available.push({
+      timeframe: name,
+      direction: result.direction,
+      score: result.score,
+      weight
+    });
+  }
+
+  if (!totalWeight) {
+    return {
+      direction: "HOLD",
+      confidence: 0,
+      agreement: 0,
+      score: 0,
+      reason: "No valid timeframe data."
+    };
+  }
+
+  const normalizedScore = totalScore / totalWeight;
+
+  let direction = "HOLD";
+
+  if (normalizedScore >= 0.65) {
+    direction = "BUY";
+  } else if (normalizedScore <= -0.65) {
+    direction = "SELL";
+  }
+
+  const directionalMatches = available.filter(item => {
+    if (direction === "BUY") {
+      return item.direction === "BUY";
+    }
+
+    if (direction === "SELL") {
+      return item.direction === "SELL";
+    }
+
+    return item.direction === "HOLD";
+  });
+
+  const agreement = Math.round(
+    directionalMatches.length / available.length * 100
+  );
+
+  let confidence = Math.round(
+    Math.abs(normalizedScore) * 70
+  );
+
+  if (agreement < 50) {
+    confidence -= 15;
+  }
+
+  if (agreement === 100) {
+    confidence += 10;
+  }
+
+  confidence = Math.max(
+    0,
+    Math.min(95, confidence)
+  );
+
+  const conflict = available.some(item =>
+    direction === "BUY"
+      ? item.direction === "SELL"
+      : direction === "SELL"
+        ? item.direction === "BUY"
+        : false
+  );
+
+  return {
+    direction,
+    confidence,
+    agreement,
+    score: Number(normalizedScore.toFixed(3)),
+    conflict,
+    timeframeResults: available
+  };
+}
+function mtfBuildTradeLevels(candles, direction) {
+  const normalized = strategyNormalizeCandles(candles);
+
+  if (normalized.length < 20 || direction === "HOLD") {
+    return null;
+  }
+
+  const current = normalized.at(-1);
+
+  const recent = normalized.slice(-20);
+
+  const ranges = recent.map(strategyRange);
+
+  const atr = strategyAverage(ranges);
+
+  if (!Number.isFinite(atr) || atr <= 0) {
+    return null;
+  }
+
+  const recentLow = Math.min(
+    ...recent.map(c => c.low)
+  );
+
+  const recentHigh = Math.max(
+    ...recent.map(c => c.high)
+  );
+
+  const entry = current.close;
+
+  let stopLoss;
+  let takeProfit1;
+  let takeProfit2;
+  let takeProfit3;
+
+  if (direction === "BUY") {
+    stopLoss = Math.min(
+      recentLow,
+      entry - atr * 1.5
+    );
+
+    const risk = entry - stopLoss;
+
+    takeProfit1 = entry + risk;
+    takeProfit2 = entry + risk * 2;
+    takeProfit3 = entry + risk * 3;
+  } else {
+    stopLoss = Math.max(
+      recentHigh,
+      entry + atr * 1.5
+    );
+
+    const risk = stopLoss - entry;
+
+    takeProfit1 = entry - risk;
+    takeProfit2 = entry - risk * 2;
+    takeProfit3 = entry - risk * 3;
+  }
+
+  return {
+    entry,
+    stopLoss,
+    takeProfit1,
+    takeProfit2,
+    takeProfit3,
+    riskReward: {
+      tp1: 1,
+      tp2: 2,
+      tp3: 3
+    },
+    atr
+  };
+}
+async function handleMultiTimeframeAnalysis(
+  request,
+  env,
+  user,
+  url
+) {
+  const symbol = String(
+    url.searchParams.get("symbol") || "EURUSD"
+  ).toUpperCase();
+
+  const requestedTimeframe = String(
+    url.searchParams.get("timeframe") || "15min"
+  );
+
+  if (!SYMBOLS[symbol]) {
+    return json({
+      ok: false,
+      error: "Unsupported market symbol."
+    }, 400);
+  }
+
+  const config = MTF_CONFIG[requestedTimeframe];
+
+  if (!config) {
+    return json({
+      ok: false,
+      error: "Unsupported timeframe."
+    }, 400);
+  }
+
+  const timeframeRequests = {
+    entry: config.entry,
+    higher: config.higher,
+    lower: config.lower
+  };
+
+  const results = {};
+  const candleSets = {};
+
+  for (const [role, timeframe] of Object.entries(
+    timeframeRequests
+  )) {
+    if (!timeframe) {
+      results[role] = null;
+      continue;
+    }
+
+    try {
+      const marketResult = await marketGetCandles(
+        env,
+        symbol,
+        STRATEGY_TIMEFRAMES[timeframe],
+        MTF_CANDLE_LIMIT
+      );
+
+      const candles = strategyNormalizeCandles(
+        marketResult?.candles ||
+        marketResult?.data ||
+        marketResult
+      );
+
+      candleSets[role] = candles;
+
+      results[role] = mtfAnalyseCandles(
+        candles,
+        timeframe
+      );
+
+    } catch (error) {
+      console.error(
+        `MTF ${role} analysis failed:`,
+        error.message
+      );
+
+      results[role] = {
+        timeframe,
+        available: false,
+        direction: "HOLD",
+        score: 0,
+        reason: "Market data unavailable."
+      };
+    }
+  }
+
+  if (!results.entry?.available) {
+    return json({
+      ok: false,
+      error: "Entry timeframe data is unavailable.",
+      timeframe: requestedTimeframe
+    }, 502);
+  }
+
+  const consensus = mtfCalculateConsensus(results);
+
+  const levels = mtfBuildTradeLevels(
+    candleSets.entry,
+    consensus.direction
+  );
+
+  const higherTimeframe = results.higher;
+  const entryTimeframe = results.entry;
+  const lowerTimeframe = results.lower;
+
+  const warnings = [];
+
+  if (
+    higherTimeframe?.available &&
+    higherTimeframe.direction !== "HOLD" &&
+    consensus.direction !== "HOLD" &&
+    higherTimeframe.direction !== consensus.direction
+  ) {
+    warnings.push(
+      "Higher timeframe direction conflicts with the overall signal."
+    );
+  }
+
+  if (
+    lowerTimeframe?.available &&
+    lowerTimeframe.direction !== "HOLD" &&
+    consensus.direction !== "HOLD" &&
+    lowerTimeframe.direction !== consensus.direction
+  ) {
+    warnings.push(
+      "Lower timeframe entry confirmation conflicts with the overall signal."
+    );
+  }
+
+  if (consensus.conflict) {
+    warnings.push(
+      "Timeframe disagreement detected. Consider waiting for confirmation."
+    );
+  }
+
+  return json({
+    ok: true,
+
+    symbol,
+
+    requestedTimeframe,
+
+    generatedAt: new Date().toISOString(),
+
+    signal: {
+      direction: consensus.direction,
+      confidence: consensus.confidence,
+      agreement: consensus.agreement,
+      conflict: consensus.conflict
+    },
+
+    timeframes: {
+      higher: results.higher,
+      entry: results.entry,
+      lower: results.lower
+    },
+
+    tradeLevels: levels,
+
+    warnings,
+
+    analysis: {
+      model: "RULE_BASED_MULTI_TIMEFRAME",
+      timeframeCount: Object.values(results).filter(
+        x => x?.available
+      ).length,
+      candleLimit: MTF_CANDLE_LIMIT
+    },
+
+    disclaimer:
+      "Signals are technical estimates based on historical candle data. They are not guaranteed trading outcomes."
+  });
+}
+// ============================================================
+// MULTI-TIMEFRAME ANALYSIS ROUTE
+// ============================================================
+
+if (
+  path === "/api/ai/multi-timeframe" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await handleMultiTimeframeAnalysis(
+    request,
+    env,
+    user,
+    url
+  );
+}
+// ============================================================
+// PHASE 6 — TRADE EXECUTION AND RISK MANAGEMENT
+// ============================================================
+
+const TRADE_RISK_CONFIG = {
+  minimumRiskPercent: 0.25,
+  maximumRiskPercent: 3,
+  defaultRiskPercent: 1,
+
+  maximumDerivStakeUSD: 10,
+
+  maximumOpenTrades: 5,
+
+  maximumDailyLossPercent: 5,
+
+  maximumConsecutiveLosses: 3,
+
+  minimumRiskReward: 1.5,
+
+  requireStopLoss: true,
+  requireUserAuthorization: true
+};
+
+const TRADE_EXECUTION_MODES = new Set([
+  "MANUAL",
+  "ASSISTED",
+  "AUTOMATED"
+]);
+function validateTradeParameters(input) {
+  const errors = [];
+
+  const direction = String(
+    input.direction || ""
+  ).toUpperCase();
+
+  const entry = Number(input.entry);
+  const stopLoss = Number(input.stopLoss);
+  const takeProfit = Number(input.takeProfit);
+
+  const riskPercent = Number(
+    input.riskPercent ??
+    TRADE_RISK_CONFIG.defaultRiskPercent
+  );
+
+  const balance = Number(input.balance);
+
+  if (!["BUY", "SELL"].includes(direction)) {
+    errors.push("Invalid trade direction.");
+  }
+
+  if (
+    !Number.isFinite(entry) ||
+    !Number.isFinite(stopLoss) ||
+    !Number.isFinite(takeProfit) ||
+    entry <= 0 ||
+    stopLoss <= 0 ||
+    takeProfit <= 0
+  ) {
+    errors.push("Invalid entry, stop-loss or take-profit.");
+  }
+
+  if (
+    !Number.isFinite(balance) ||
+    balance <= 0
+  ) {
+    errors.push("A valid account balance is required.");
+  }
+
+  if (
+    !Number.isFinite(riskPercent) ||
+    riskPercent < TRADE_RISK_CONFIG.minimumRiskPercent ||
+    riskPercent > TRADE_RISK_CONFIG.maximumRiskPercent
+  ) {
+    errors.push("Risk percentage is outside permitted limits.");
+  }
+
+  if (
+    direction === "BUY" &&
+    Number.isFinite(entry) &&
+    Number.isFinite(stopLoss) &&
+    Number.isFinite(takeProfit)
+  ) {
+    if (stopLoss >= entry) {
+      errors.push("BUY stop-loss must be below entry.");
+    }
+
+    if (takeProfit <= entry) {
+      errors.push("BUY take-profit must be above entry.");
+    }
+  }
+
+  if (
+    direction === "SELL" &&
+    Number.isFinite(entry) &&
+    Number.isFinite(stopLoss) &&
+    Number.isFinite(takeProfit)
+  ) {
+    if (stopLoss <= entry) {
+      errors.push("SELL stop-loss must be above entry.");
+    }
+
+    if (takeProfit >= entry) {
+      errors.push("SELL take-profit must be below entry.");
+    }
+  }
+
+  if (errors.length) {
+    return {
+      valid: false,
+      errors
+    };
+  }
+
+  const riskAmount = balance * riskPercent / 100;
+
+  const distanceToStop = Math.abs(
+    entry - stopLoss
+  );
+
+  const distanceToTarget = Math.abs(
+    takeProfit - entry
+  );
+
+  const riskReward =
+    distanceToTarget / distanceToStop;
+
+  if (
+    riskReward <
+    TRADE_RISK_CONFIG.minimumRiskReward
+  ) {
+    return {
+      valid: false,
+      errors: [
+        "Risk-to-reward ratio is below the permitted minimum."
+      ]
+    };
+  }
+
+  return {
+    valid: true,
+    direction,
+    entry,
+    stopLoss,
+    takeProfit,
+    riskPercent,
+    riskAmount,
+    riskReward
+  };
+}
+function calculatePositionSize({
+  balance,
+  riskPercent,
+  stopDistance,
+  valuePerUnit
+}) {
+  const accountBalance = Number(balance);
+  const risk = Number(riskPercent);
+  const distance = Number(stopDistance);
+  const unitValue = Number(valuePerUnit);
+
+  if (
+    !Number.isFinite(accountBalance) ||
+    !Number.isFinite(risk) ||
+    !Number.isFinite(distance) ||
+    !Number.isFinite(unitValue) ||
+    accountBalance <= 0 ||
+    risk <= 0 ||
+    distance <= 0 ||
+    unitValue <= 0
+  ) {
+    return {
+      ok: false,
+      error: "Invalid position sizing parameters."
+    };
+  }
+
+  const riskAmount =
+    accountBalance * risk / 100;
+
+  const positionSize =
+    riskAmount / (distance * unitValue);
+
+  if (!Number.isFinite(positionSize)) {
+    return {
+      ok: false,
+      error: "Position size calculation failed."
+    };
+  }
+
+  return {
+    ok: true,
+    riskAmount,
+    positionSize,
+    riskPercent: risk
+  };
+}
+function validateDerivStake(stake) {
+  const amount = Number(stake);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    return {
+      valid: false,
+      error: "Invalid Deriv stake."
+    };
+  }
+
+  if (
+    amount >
+    TRADE_RISK_CONFIG.maximumDerivStakeUSD
+  ) {
+    return {
+      valid: false,
+      error: "Deriv stake exceeds the USD 10 maximum."
+    };
+  }
+
+  return {
+    valid: true,
+    stake: amount,
+    currency: "USD"
+  };
+}
+function validateExecutionMode(mode) {
+  const normalized = String(
+    mode || "MANUAL"
+  ).toUpperCase();
+
+  if (!TRADE_EXECUTION_MODES.has(normalized)) {
+    return {
+      valid: false,
+      error: "Unsupported execution mode."
+    };
+  }
+
+  return {
+    valid: true,
+    mode: normalized
+  };
+}
+async function handleRiskAssessment(request, env, user) {
+  let body;
+
+  try {
+    body = await request.json();
+  } catch {
+    return json({
+      ok: false,
+      error: "Invalid JSON request."
+    }, 400);
+  }
+
+  const result = validateTradeParameters(body);
+
+  if (!result.valid) {
+    return json({
+      ok: false,
+      valid: false,
+      errors: result.errors
+    }, 400);
+  }
+
+  const mode = validateExecutionMode(
+    body.executionMode
+  );
+
+  if (!mode.valid) {
+    return json({
+      ok: false,
+      error: mode.error
+    }, 400);
+  }
+
+  return json({
+    ok: true,
+    valid: true,
+
+    userId: user.id,
+
+    riskAssessment: {
+      direction: result.direction,
+      entry: result.entry,
+      stopLoss: result.stopLoss,
+      takeProfit: result.takeProfit,
+      riskPercent: result.riskPercent,
+      riskAmount: Number(
+        result.riskAmount.toFixed(2)
+      ),
+      riskReward: Number(
+        result.riskReward.toFixed(2)
+      )
+    },
+
+    execution: {
+      mode: mode.mode,
+      tradePlaced: false,
+      userAuthorizationRequired: true
+    },
+
+    message:
+      "Risk assessment completed. No trade has been placed."
+  });
+}
+async function handleRiskSettings() {
+  return json({
+    ok: true,
+
+    risk: {
+      minimumRiskPercent:
+        TRADE_RISK_CONFIG.minimumRiskPercent,
+
+      maximumRiskPercent:
+        TRADE_RISK_CONFIG.maximumRiskPercent,
+
+      defaultRiskPercent:
+        TRADE_RISK_CONFIG.defaultRiskPercent,
+
+      maximumOpenTrades:
+        TRADE_RISK_CONFIG.maximumOpenTrades,
+
+      maximumDailyLossPercent:
+        TRADE_RISK_CONFIG.maximumDailyLossPercent,
+
+      minimumRiskReward:
+        TRADE_RISK_CONFIG.minimumRiskReward
+    },
+
+    deriv: {
+      maximumStakeUSD:
+        TRADE_RISK_CONFIG.maximumDerivStakeUSD,
+
+      demoOnly: true
+    },
+
+    executionModes: [
+      "MANUAL",
+      "ASSISTED",
+      "AUTOMATED"
+    ]
+  });
+}
+// ============================================================
+// RISK MANAGEMENT ROUTES
+// ============================================================
+
+if (
+  path === "/api/trading/risk/assess" &&
+  request.method === "POST"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await handleRiskAssessment(
+    request,
+    env,
+    user
+  );
+}
+
+if (
+  path === "/api/trading/risk/settings" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await handleRiskSettings();
+}
+{
+  "direction": "BUY",
+  "entry": 1.08500,
+  "stopLoss": 1.08300,
+  "takeProfit": 1.08900,
+  "balance": 10000,
+  "riskPercent": 1,
+  "executionMode": "ASSISTED"
+}
+// ============================================================
+// TRADE JOURNAL CONFIGURATION
+// ============================================================
+
+const TRADE_JOURNAL_CONFIG = {
+  maximumNotesLength: 2000,
+  maximumPageSize: 100,
+
+  allowedDirections: new Set([
+    "BUY",
+    "SELL"
+  ]),
+
+  allowedStatuses: new Set([
+    "OPEN",
+    "CLOSED",
+    "CANCELLED"
+  ]),
+
+  allowedExecutionModes: new Set([
+    "MANUAL",
+    "ASSISTED",
+    "AUTOMATED"
+  ])
+};
+
+function journalNumber(value, fallback = null) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function journalText(value, maximumLength = 100) {
+  return String(value || "")
+    .trim()
+    .slice(0, maximumLength);
+}
+
+function journalNow() {
+  return new Date().toISOString();
+}
+
+function journalGenerateId() {
+  return crypto.randomUUID();
+}
+async function journalCreateTrade(request, env, user) {
+  if (!env.DB) {
+    return json({
+      ok: false,
+      error: "Trade journal database is unavailable."
+    }, 503);
+  }
+
+  let body;
+
+  try {
+    body = await request.json();
+  } catch {
+    return json({
+      ok: false,
+      error: "Invalid JSON request."
+    }, 400);
+  }
+
+  const symbol = journalText(
+    body.symbol,
+    32
+  ).toUpperCase();
+
+  const direction = journalText(
+    body.direction,
+    10
+  ).toUpperCase();
+
+  const entryPrice = journalNumber(
+    body.entryPrice
+  );
+
+  const stopLoss = journalNumber(
+    body.stopLoss
+  );
+
+  const takeProfit = journalNumber(
+    body.takeProfit
+  );
+
+  const quantity = journalNumber(
+    body.quantity
+  );
+
+  const stake = journalNumber(
+    body.stake
+  );
+
+  const riskPercent = journalNumber(
+    body.riskPercent
+  );
+
+  const riskAmount = journalNumber(
+    body.riskAmount
+  );
+
+  const executionMode = journalText(
+    body.executionMode || "MANUAL",
+    20
+  ).toUpperCase();
+
+  if (!symbol || !/^[A-Z0-9_]{2,32}$/.test(symbol)) {
+    return json({
+      ok: false,
+      error: "Invalid market symbol."
+    }, 400);
+  }
+
+  if (!TRADE_JOURNAL_CONFIG.allowedDirections.has(direction)) {
+    return json({
+      ok: false,
+      error: "Direction must be BUY or SELL."
+    }, 400);
+  }
+
+  if (
+    entryPrice === null ||
+    entryPrice <= 0
+  ) {
+    return json({
+      ok: false,
+      error: "A valid entry price is required."
+    }, 400);
+  }
+
+  if (
+    stopLoss !== null &&
+    stopLoss <= 0
+  ) {
+    return json({
+      ok: false,
+      error: "Invalid stop-loss."
+    }, 400);
+  }
+
+  if (
+    takeProfit !== null &&
+    takeProfit <= 0
+  ) {
+    return json({
+      ok: false,
+      error: "Invalid take-profit."
+    }, 400);
+  }
+
+  if (
+    quantity !== null &&
+    quantity <= 0
+  ) {
+    return json({
+      ok: false,
+      error: "Quantity must be positive."
+    }, 400);
+  }
+
+  if (
+    stake !== null &&
+    stake <= 0
+  ) {
+    return json({
+      ok: false,
+      error: "Stake must be positive."
+    }, 400);
+  }
+
+  if (
+    !TRADE_JOURNAL_CONFIG.allowedExecutionModes.has(
+      executionMode
+    )
+  ) {
+    return json({
+      ok: false,
+      error: "Invalid execution mode."
+    }, 400);
+  }
+
+  const notes = journalText(
+    body.notes,
+    TRADE_JOURNAL_CONFIG.maximumNotesLength
+  );
+
+  const id = journalGenerateId();
+  const now = journalNow();
+
+  const openedAt = body.openedAt
+    ? new Date(body.openedAt).toISOString()
+    : now;
+
+  try {
+    await env.DB.prepare(`
+      INSERT INTO trade_journal (
+        id,
+        user_id,
+        symbol,
+        direction,
+        entry_price,
+        stop_loss,
+        take_profit,
+        quantity,
+        stake,
+        risk_percent,
+        risk_amount,
+        strategy,
+        timeframe,
+        broker,
+        execution_mode,
+        status,
+        notes,
+        opened_at,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)
+    `).bind(
+      id,
+      user.id,
+      symbol,
+      direction,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      quantity,
+      stake,
+      riskPercent,
+      riskAmount,
+      journalText(body.strategy, 100),
+      journalText(body.timeframe, 20),
+      journalText(body.broker, 50),
+      executionMode,
+      notes,
+      openedAt,
+      now,
+      now
+    ).run();
+
+    return json({
+      ok: true,
+      message: "Trade journal record created.",
+      trade: {
+        id,
+        symbol,
+        direction,
+        entryPrice,
+        status: "OPEN",
+        openedAt
+      }
+    }, 201);
+
+  } catch (error) {
+    console.error(
+      "Trade journal creation failed:",
+      error.message
+    );
+
+    return json({
+      ok: false,
+      error: "Unable to create trade journal record."
+    }, 500);
+  }
+}
+async function journalGetTrades(request, env, user, url) {
+  if (!env.DB) {
+    return json({
+      ok: false,
+      error: "Trade journal database is unavailable."
+    }, 503);
+  }
+
+  const status = String(
+    url.searchParams.get("status") || ""
+  ).toUpperCase();
+
+  const symbol = String(
+    url.searchParams.get("symbol") || ""
+  ).toUpperCase();
+
+  const limit = Math.min(
+    TRADE_JOURNAL_CONFIG.maximumPageSize,
+    Math.max(
+      1,
+      Number(url.searchParams.get("limit") || 50)
+    )
+  );
+
+  const offset = Math.max(
+    0,
+    Number(url.searchParams.get("offset") || 0)
+  );
+
+  if (
+    status &&
+    !TRADE_JOURNAL_CONFIG.allowedStatuses.has(status)
+  ) {
+    return json({
+      ok: false,
+      error: "Invalid trade status filter."
+    }, 400);
+  }
+
+  let query = `
+    SELECT *
+    FROM trade_journal
+    WHERE user_id = ?
+  `;
+
+  const parameters = [user.id];
+
+  if (status) {
+    query += " AND status = ?";
+    parameters.push(status);
+  }
+
+  if (symbol) {
+    query += " AND symbol = ?";
+    parameters.push(symbol);
+  }
+
+  query += `
+    ORDER BY opened_at DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  parameters.push(limit, offset);
+
+  try {
+    const result = await env.DB.prepare(query)
+      .bind(...parameters)
+      .all();
+
+    return json({
+      ok: true,
+      trades: result.results || [],
+      pagination: {
+        limit,
+        offset,
+        count: (result.results || []).length
+      }
+    });
+
+  } catch (error) {
+    console.error(
+      "Trade journal retrieval failed:",
+      error.message
+    );
+
+    return json({
+      ok: false,
+      error: "Unable to retrieve trade history."
+    }, 500);
+  }
+}
+async function journalCloseTrade(request, env, user, tradeId) {
+  if (!env.DB) {
+    return json({
+      ok: false,
+      error: "Trade journal database is unavailable."
+    }, 503);
+  }
+
+  if (
+    !tradeId ||
+    !/^[A-Za-z0-9-]{10,64}$/.test(tradeId)
+  ) {
+    return json({
+      ok: false,
+      error: "Invalid trade identifier."
+    }, 400);
+  }
+
+  let body;
+
+  try {
+    body = await request.json();
+  } catch {
+    return json({
+      ok: false,
+      error: "Invalid JSON request."
+    }, 400);
+  }
+
+  const exitPrice = journalNumber(
+    body.exitPrice
+  );
+
+  const realizedPnl = journalNumber(
+    body.realizedPnl
+  );
+
+  const fees = journalNumber(
+    body.fees,
+    0
+  );
+
+  if (
+    exitPrice === null ||
+    exitPrice <= 0 ||
+    realizedPnl === null ||
+    fees === null ||
+    fees < 0
+  ) {
+    return json({
+      ok: false,
+      error: "Valid exit price, realized P&L and fees are required."
+    }, 400);
+  }
+
+  const netPnl = realizedPnl - fees;
+  const now = journalNow();
+
+  try {
+    const result = await env.DB.prepare(`
+      UPDATE trade_journal
+      SET
+        exit_price = ?,
+        realized_pnl = ?,
+        fees = ?,
+        net_pnl = ?,
+        status = 'CLOSED',
+        closed_at = ?,
+        updated_at = ?
+      WHERE
+        id = ?
+        AND user_id = ?
+        AND status = 'OPEN'
+    `).bind(
+      exitPrice,
+      realizedPnl,
+      fees,
+      netPnl,
+      now,
+      now,
+      tradeId,
+      user.id
+    ).run();
+
+    if (!result.meta?.changes) {
+      return json({
+        ok: false,
+        error: "Trade was not found, is not owned by this user, or is already closed."
+      }, 404);
+    }
+
+    return json({
+      ok: true,
+      message: "Trade successfully closed in the journal.",
+      trade: {
+        id: tradeId,
+        exitPrice,
+        realizedPnl,
+        fees,
+        netPnl,
+        status: "CLOSED",
+        closedAt: now
+      }
+    });
+
+  } catch (error) {
+    console.error(
+      "Trade journal close failed:",
+      error.message
+    );
+
+    return json({
+      ok: false,
+      error: "Unable to close trade journal record."
+    }, 500);
+  }
+}
+function journalCalculatePerformance(trades) {
+  const closedTrades = trades.filter(
+    trade => trade.status === "CLOSED"
+  );
+
+  const wins = closedTrades.filter(
+    trade => Number(trade.net_pnl) > 0
+  );
+
+  const losses = closedTrades.filter(
+    trade => Number(trade.net_pnl) < 0
+  );
+
+  const breakeven = closedTrades.filter(
+    trade => Number(trade.net_pnl) === 0
+  );
+
+  const grossProfit = wins.reduce(
+    (sum, trade) => sum + Number(trade.net_pnl),
+    0
+  );
+
+  const grossLoss = Math.abs(
+    losses.reduce(
+      (sum, trade) => sum + Number(trade.net_pnl),
+      0
+    )
+  );
+
+  const netProfit = grossProfit - grossLoss;
+
+  const totalTrades = closedTrades.length;
+
+  const winRate = totalTrades
+    ? wins.length / totalTrades * 100
+    : 0;
+
+  const lossRate = totalTrades
+    ? losses.length / totalTrades * 100
+    : 0;
+
+  const averageWin = wins.length
+    ? grossProfit / wins.length
+    : 0;
+
+  const averageLoss = losses.length
+    ? grossLoss / losses.length
+    : 0;
+
+  const profitFactor = grossLoss > 0
+    ? grossProfit / grossLoss
+    : grossProfit > 0
+      ? null
+      : 0;
+
+  const averageTrade = totalTrades
+    ? netProfit / totalTrades
+    : 0;
+
+  // Calculate drawdown from cumulative closed-trade P&L.
+  let cumulative = 0;
+  let peak = 0;
+  let maximumDrawdown = 0;
+
+  const chronological = [...closedTrades].sort(
+    (a, b) =>
+      new Date(a.closed_at).getTime() -
+      new Date(b.closed_at).getTime()
+  );
+
+  for (const trade of chronological) {
+    cumulative += Number(trade.net_pnl || 0);
+
+    peak = Math.max(peak, cumulative);
+
+    const drawdown = peak - cumulative;
+
+    maximumDrawdown = Math.max(
+      maximumDrawdown,
+      drawdown
+    );
+  }
+
+  return {
+    totalTrades,
+    winningTrades: wins.length,
+    losingTrades: losses.length,
+    breakevenTrades: breakeven.length,
+
+    winRate: Number(winRate.toFixed(2)),
+    lossRate: Number(lossRate.toFixed(2)),
+
+    grossProfit: Number(grossProfit.toFixed(2)),
+    grossLoss: Number(grossLoss.toFixed(2)),
+    netProfit: Number(netProfit.toFixed(2)),
+
+    averageWin: Number(averageWin.toFixed(2)),
+    averageLoss: Number(averageLoss.toFixed(2)),
+    averageTrade: Number(averageTrade.toFixed(2)),
+
+    profitFactor: profitFactor === null
+      ? null
+      : Number(profitFactor.toFixed(2)),
+
+    maximumDrawdown: Number(
+      maximumDrawdown.toFixed(2)
+    )
+  };
+}
+async function journalGetPerformance(env, user, url) {
+  if (!env.DB) {
+    return json({
+      ok: false,
+      error: "Trade journal database is unavailable."
+    }, 503);
+  }
+
+  try {
+    const result = await env.DB.prepare(`
+      SELECT
+        status,
+        net_pnl,
+        realized_pnl,
+        fees,
+        closed_at,
+        opened_at,
+        symbol,
+        direction,
+        strategy
+      FROM trade_journal
+      WHERE user_id = ?
+      ORDER BY opened_at DESC
+      LIMIT 5000
+    `).bind(user.id).all();
+
+    const trades = result.results || [];
+
+    const performance =
+      journalCalculatePerformance(trades);
+
+    const openTrades = trades.filter(
+      trade => trade.status === "OPEN"
+    ).length;
+
+    const symbolPerformance = {};
+
+    for (const trade of trades) {
+      if (trade.status !== "CLOSED") continue;
+
+      const symbol = trade.symbol;
+
+      if (!symbolPerformance[symbol]) {
+        symbolPerformance[symbol] = {
+          trades: 0,
+          netProfit: 0,
+          wins: 0,
+          losses: 0
+        };
+      }
+
+      const item = symbolPerformance[symbol];
+
+      const pnl = Number(trade.net_pnl || 0);
+
+      item.trades++;
+      item.netProfit += pnl;
+
+      if (pnl > 0) item.wins++;
+      if (pnl < 0) item.losses++;
+    }
+
+    for (const item of Object.values(symbolPerformance)) {
+      item.netProfit = Number(
+        item.netProfit.toFixed(2)
+      );
+
+      item.winRate = item.trades
+        ? Number(
+            (item.wins / item.trades * 100).toFixed(2)
+          )
+        : 0;
+    }
+
+    return json({
+      ok: true,
+
+      performance: {
+        ...performance,
+        openTrades
+      },
+
+      symbolPerformance,
+
+      generatedAt: journalNow(),
+
+      note:
+        "Performance is calculated from recorded journal trades, not independently verified broker statements."
+    });
+
+  } catch (error) {
+    console.error(
+      "Trade performance calculation failed:",
+      error.message
+    );
+
+    return json({
+      ok: false,
+      error: "Unable to calculate trading performance."
+    }, 500);
+  }
+}
+// ============================================================
+// TRADE JOURNAL ROUTES
+// ============================================================
+
+// Create trade journal record
+if (
+  path === "/api/trading/journal" &&
+  request.method === "POST"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await journalCreateTrade(
+    request,
+    env,
+    user
+  );
+}
+
+// Retrieve trade journal records
+if (
+  path === "/api/trading/journal" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await journalGetTrades(
+    request,
+    env,
+    user,
+    url
+  );
+}
+
+// Close a journal trade
+const journalCloseMatch = path.match(
+  /^\/api\/trading\/journal\/([A-Za-z0-9-]+)\/close$/
+);
+
+if (
+  journalCloseMatch &&
+  request.method === "POST"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await journalCloseTrade(
+    request,
+    env,
+    user,
+    journalCloseMatch[1]
+  );
+}
+
+// Performance analytics
+if (
+  path === "/api/trading/performance" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await journalGetPerformance(
+    env,
+    user,
+    url
+  );
+}
+POST /api/trading/journal
+Content-Type: application/json
+{
+  "symbol": "EURUSD",
+  "direction": "BUY",
+  "entryPrice": 1.08500,
+  "stopLoss": 1.08300,
+  "takeProfit": 1.08900,
+  "quantity": 0.10,
+  "riskPercent": 1,
+  "riskAmount": 100,
+  "strategy": "SMC",
+  "timeframe": "15min",
+  "broker": "Deriv",
+  "executionMode": "ASSISTED",
+  "notes": "Bullish structure with higher-timeframe confirmation."
+}
+POST /api/trading/journal/TRADE_ID/close
+Content-Type: application/json
+{
+  "exitPrice": 1.08900,
+  "realizedPnl": 40,
+  "fees": 2
+}
+-- ============================================================
+-- PHASE 8 — TRADE MONITORING EVENTS
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS trade_monitor_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+
+    event_type TEXT NOT NULL,
+    market_price REAL,
+
+    entry_price REAL,
+    stop_loss REAL,
+    take_profit REAL,
+
+    message TEXT,
+
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_user
+ON trade_monitor_events(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_trade
+ON trade_monitor_events(trade_id);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_created
+ON trade_monitor_events(user_id, created_at);
+// ============================================================
+// TRADE MONITORING CONFIGURATION
+// ============================================================
+
+const TRADE_MONITOR_CONFIG = {
+  maximumPositionsPerRequest: 50,
+  maximumEventsPerRequest: 100,
+
+  priceDeviationWarningPercent: 0.5,
+
+  supportedEvents: new Set([
+    "STOP_LOSS_APPROACHED",
+    "TAKE_PROFIT_APPROACHED",
+    "STOP_LOSS_REACHED",
+    "TAKE_PROFIT_REACHED",
+    "ENTRY_REACHED"
+  ])
+};
+function monitorCalculateMovement(
+  direction,
+  entryPrice,
+  currentPrice
+) {
+  if (
+    !Number.isFinite(entryPrice) ||
+    !Number.isFinite(currentPrice) ||
+    entryPrice <= 0 ||
+    currentPrice <= 0
+  ) {
+    return null;
+  }
+
+  const movement = direction === "BUY"
+    ? currentPrice - entryPrice
+    : entryPrice - currentPrice;
+
+  const percentage =
+    movement / entryPrice * 100;
+
+  return {
+    priceDifference: Number(
+      movement.toFixed(8)
+    ),
+
+    percentage: Number(
+      percentage.toFixed(5)
+    ),
+
+    favourable: movement > 0,
+    unfavourable: movement < 0
+  };
+}
+function monitorDetectPositionEvents(
+  trade,
+  currentPrice
+) {
+  const events = [];
+
+  const direction = String(
+    trade.direction || ""
+  ).toUpperCase();
+
+  const entry = Number(trade.entry_price);
+  const stopLoss = Number(trade.stop_loss);
+  const takeProfit = Number(trade.take_profit);
+
+  if (
+    !Number.isFinite(currentPrice) ||
+    currentPrice <= 0 ||
+    !Number.isFinite(entry) ||
+    entry <= 0
+  ) {
+    return events;
+  }
+
+  const movement = monitorCalculateMovement(
+    direction,
+    entry,
+    currentPrice
+  );
+
+  if (!movement) return events;
+
+  const stopDistance =
+    Number.isFinite(stopLoss) && stopLoss > 0
+      ? Math.abs(entry - stopLoss)
+      : null;
+
+  const targetDistance =
+    Number.isFinite(takeProfit) && takeProfit > 0
+      ? Math.abs(takeProfit - entry)
+      : null;
+
+  if (direction === "BUY") {
+    if (
+      stopLoss > 0 &&
+      currentPrice <= stopLoss
+    ) {
+      events.push({
+        type: "STOP_LOSS_REACHED",
+        message: "Market price has reached or crossed the BUY stop-loss."
+      });
+    } else if (
+      stopDistance &&
+      currentPrice <= entry - stopDistance * 0.8
+    ) {
+      events.push({
+        type: "STOP_LOSS_APPROACHED",
+        message: "Market price is approaching the BUY stop-loss."
+      });
+    }
+
+    if (
+      takeProfit > 0 &&
+      currentPrice >= takeProfit
+    ) {
+      events.push({
+        type: "TAKE_PROFIT_REACHED",
+        message: "Market price has reached or crossed the BUY take-profit."
+      });
+    } else if (
+      targetDistance &&
+      currentPrice >= entry + targetDistance * 0.8
+    ) {
+      events.push({
+        type: "TAKE_PROFIT_APPROACHED",
+        message: "Market price is approaching the BUY take-profit."
+      });
+    }
+  }
+
+  if (direction === "SELL") {
+    if (
+      stopLoss > 0 &&
+      currentPrice >= stopLoss
+    ) {
+      events.push({
+        type: "STOP_LOSS_REACHED",
+        message: "Market price has reached or crossed the SELL stop-loss."
+      });
+    } else if (
+      stopDistance &&
+      currentPrice >= entry + stopDistance * 0.8
+    ) {
+      events.push({
+        type: "STOP_LOSS_APPROACHED",
+        message: "Market price is approaching the SELL stop-loss."
+      });
+    }
+
+    if (
+      takeProfit > 0 &&
+      currentPrice <= takeProfit
+    ) {
+      events.push({
+        type: "TAKE_PROFIT_REACHED",
+        message: "Market price has reached or crossed the SELL take-profit."
+      });
+    } else if (
+      targetDistance &&
+      currentPrice <= entry - targetDistance * 0.8
+    ) {
+      events.push({
+        type: "TAKE_PROFIT_APPROACHED",
+        message: "Market price is approaching the SELL take-profit."
+      });
+    }
+  }
+
+  return events;
+}
+async function monitorSaveEvent(
+  env,
+  user,
+  trade,
+  event,
+  currentPrice
+) {
+  if (!env.DB) return;
+
+  if (
+    !TRADE_MONITOR_CONFIG.supportedEvents.has(
+      event.type
+    )
+  ) {
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  try {
+    // Avoid repeatedly saving the same alert
+    // for the same trade within five minutes.
+    const existing = await env.DB.prepare(`
+      SELECT id
+      FROM trade_monitor_events
+      WHERE
+        user_id = ?
+        AND trade_id = ?
+        AND event_type = ?
+        AND created_at >= ?
+      LIMIT 1
+    `).bind(
+      user.id,
+      trade.id,
+      event.type,
+      new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    ).first();
+
+    if (existing) return;
+
+    await env.DB.prepare(`
+      INSERT INTO trade_monitor_events (
+        id,
+        user_id,
+        trade_id,
+        symbol,
+        event_type,
+        market_price,
+        entry_price,
+        stop_loss,
+        take_profit,
+        message,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      id,
+      user.id,
+      trade.id,
+      trade.symbol,
+      event.type,
+      currentPrice,
+      trade.entry_price,
+      trade.stop_loss,
+      trade.take_profit,
+      event.message,
+      now
+    ).run();
+
+  } catch (error) {
+    console.error(
+      "Unable to save trade monitoring event:",
+      error.message
+    );
+  }
+}
+async function monitorOpenPositions(
+  env,
+  user
+) {
+  if (!env.DB) {
+    return {
+      ok: false,
+      error: "Trade database unavailable."
+    };
+  }
+
+  const result = await env.DB.prepare(`
+    SELECT *
+    FROM trade_journal
+    WHERE
+      user_id = ?
+      AND status = 'OPEN'
+    ORDER BY opened_at DESC
+    LIMIT ?
+  `).bind(
+    user.id,
+    TRADE_MONITOR_CONFIG.maximumPositionsPerRequest
+  ).all();
+
+  const trades = result.results || [];
+
+  const monitored = [];
+
+  for (const trade of trades) {
+    let currentPrice = null;
+    let priceError = null;
+
+    try {
+      const marketResult = await marketGetPrice(
+        env,
+        trade.symbol
+      );
+
+      currentPrice = Number(
+        marketResult?.price ??
+        marketResult?.close ??
+        marketResult?.data?.price
+      );
+
+      if (
+        !Number.isFinite(currentPrice) ||
+        currentPrice <= 0
+      ) {
+        currentPrice = null;
+        priceError = "Market price unavailable.";
+      }
+
+    } catch (error) {
+      priceError = error.message;
+    }
+
+    if (currentPrice === null) {
+      monitored.push({
+        tradeId: trade.id,
+        symbol: trade.symbol,
+        status: trade.status,
+        monitored: false,
+        error: priceError
+      });
+
+      continue;
+    }
+
+    const movement = monitorCalculateMovement(
+      trade.direction,
+      Number(trade.entry_price),
+      currentPrice
+    );
+
+    const events = monitorDetectPositionEvents(
+      trade,
+      currentPrice
+    );
+
+    for (const event of events) {
+      await monitorSaveEvent(
+        env,
+        user,
+        trade,
+        event,
+        currentPrice
+      );
+    }
+
+    monitored.push({
+      tradeId: trade.id,
+      symbol: trade.symbol,
+      direction: trade.direction,
+
+      entryPrice: Number(trade.entry_price),
+      currentPrice,
+
+      stopLoss: trade.stop_loss,
+      takeProfit: trade.take_profit,
+
+      movement,
+
+      events,
+
+      status: "OPEN",
+      monitored: true
+    });
+  }
+
+  return {
+    ok: true,
+    positions: monitored,
+    count: monitored.length,
+    generatedAt: new Date().toISOString()
+  };
+}
+async function monitorGetEvents(
+  env,
+  user,
+  url
+) {
+  if (!env.DB) {
+    return json({
+      ok: false,
+      error: "Trade database unavailable."
+    }, 503);
+  }
+
+  const limit = Math.min(
+    TRADE_MONITOR_CONFIG.maximumEventsPerRequest,
+    Math.max(
+      1,
+      Number(url.searchParams.get("limit") || 50)
+    )
+  );
+
+  const result = await env.DB.prepare(`
+    SELECT *
+    FROM trade_monitor_events
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).bind(
+    user.id,
+    limit
+  ).all();
+
+  return json({
+    ok: true,
+    events: result.results || [],
+    count: (result.results || []).length
+  });
+}
+// ============================================================
+// AUTOMATED TRADE MONITORING ROUTES
+// ============================================================
+
+// Monitor open journal positions
+if (
+  path === "/api/trading/monitor" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  const result = await monitorOpenPositions(
+    env,
+    user
+  );
+
+  return json(result);
+}
+
+// Retrieve monitoring alerts
+if (
+  path === "/api/trading/monitor/events" &&
+  request.method === "GET"
+) {
+  const user = await requireAuth(request, env);
+
+  if (!user) {
+    return json({
+      ok: false,
+      error: "Authentication required."
+    }, 401);
+  }
+
+  const entitlement = await getSubscriptionEntitlement(
+    env,
+    user
+  );
+
+  if (!entitlement.active) {
+    return paymentRequiredResponse(entitlement);
+  }
+
+  return await monitorGetEvents(
+    env,
+    user,
+    url
+  );
+}
+{
+  "ok": true,
+  "count": 1,
+  "positions": [
+    {
+      "tradeId": "example-trade-id",
+      "symbol": "EURUSD",
+      "direction": "BUY",
+      "entryPrice": 1.085,
+      "currentPrice": 1.0865,
+      "stopLoss": 1.083,
+      "takeProfit": 1.089,
+      "movement": {
+        "priceDifference": 0.0015,
+        "percentage": 0.13825,
+        "favourable": true,
+        "unfavourable": false
+      },
+      "events": [],
+      "status": "OPEN",
+      "monitored": true
+    }
+  ]
+}
+// ============================================================
+// PART 15: NOTIFICATIONS AND ALERT DELIVERY
+// ============================================================
+
+const NOTIFICATION_CONFIG = {
+    DEFAULT_LIMIT: 30,
+    MAX_LIMIT: 100,
+    MAX_TITLE_LENGTH: 120,
+    MAX_MESSAGE_LENGTH: 1000,
+    MAX_METADATA_LENGTH: 4000
+};
+
+function notificationId() {
+    return crypto.randomUUID();
+}
+
+function notificationNow() {
+    return new Date().toISOString();
+}
+
+function notificationText(value, maxLength) {
+    return String(value ?? "")
+        .trim()
+        .slice(0, maxLength);
+}
+
+function notificationLimit(value) {
+    const number = Number(value);
+
+    if (!Number.isFinite(number)) {
+        return NOTIFICATION_CONFIG.DEFAULT_LIMIT;
+    }
+
+    return Math.max(
+        1,
+        Math.min(
+            NOTIFICATION_CONFIG.MAX_LIMIT,
+            Math.floor(number)
+        )
+    );
+}
+
+async function notificationGetPreferences(env, userId) {
+    const defaults = {
+        inAppEnabled: true,
+        emailEnabled: false,
+        pushEnabled: false
+    };
+
+    const result = await env.DB.prepare(`
+        SELECT
+            in_app_enabled,
+            email_enabled,
+            push_enabled
+        FROM trade_notification_preferences
+        WHERE user_id = ?
+        LIMIT 1
+    `).bind(userId).first();
+
+    if (!result) {
+        return defaults;
+    }
+
+    return {
+        inAppEnabled: Number(result.in_app_enabled) === 1,
+        emailEnabled: Number(result.email_enabled) === 1,
+        pushEnabled: Number(result.push_enabled) === 1
+    };
+}
+
+async function notificationCreate(
+    env,
+    userId,
+    type,
+    title,
+    message,
+    metadata = {}
+) {
+    if (!env.DB) {
+        throw new Error("D1 database is not configured.");
+    }
+
+    const preferences = await notificationGetPreferences(
+        env,
+        userId
+    );
+
+    if (!preferences.inAppEnabled) {
+        return {
+            ok: true,
+            created: false,
+            reason: "in_app_notifications_disabled"
+        };
+    }
+
+    const safeType = notificationText(type, 50) || "general";
+
+    const safeTitle = notificationText(
+        title,
+        NOTIFICATION_CONFIG.MAX_TITLE_LENGTH
+    );
+
+    const safeMessage = notificationText(
+        message,
+        NOTIFICATION_CONFIG.MAX_MESSAGE_LENGTH
+    );
+
+    if (!safeTitle || !safeMessage) {
+        throw new Error("Notification title and message are required.");
+    }
+
+    let metadataJson = null;
+
+    if (metadata && typeof metadata === "object") {
+        metadataJson = JSON.stringify(metadata);
+
+        if (
+            metadataJson.length >
+            NOTIFICATION_CONFIG.MAX_METADATA_LENGTH
+        ) {
+            throw new Error("Notification metadata is too large.");
+        }
+    }
+
+    const id = notificationId();
+    const createdAt = notificationNow();
+
+    await env.DB.prepare(`
+        INSERT INTO trade_notifications (
+            id,
+            user_id,
+            type,
+            title,
+            message,
+            metadata_json,
+            read_at,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+    `).bind(
+        id,
+        userId,
+        safeType,
+        safeTitle,
+        safeMessage,
+        metadataJson,
+        createdAt
+    ).run();
+
+    return {
+        ok: true,
+        created: true,
+        notification: {
+            id,
+            type: safeType,
+            title: safeTitle,
+            message: safeMessage,
+            metadata,
+            readAt: null,
+            createdAt
+        }
+    };
+}
+
+async function notificationGetList(env, userId, limit) {
+    const result = await env.DB.prepare(`
+        SELECT
+            id,
+            type,
+            title,
+            message,
+            metadata_json,
+            read_at,
+            created_at
+        FROM trade_notifications
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+    `).bind(userId, limit).all();
+
+    const rows = result.results || [];
+
+    return rows.map(row => {
+        let metadata = null;
+
+        try {
+            metadata = row.metadata_json
+                ? JSON.parse(row.metadata_json)
+                : null;
+        } catch {
+            metadata = null;
+        }
+
+        return {
+            id: row.id,
+            type: row.type,
+            title: row.title,
+            message: row.message,
+            metadata,
+            readAt: row.read_at,
+            createdAt: row.created_at,
+            unread: !row.read_at
+        };
+    });
+}
+
+async function notificationUnreadCount(env, userId) {
+    const result = await env.DB.prepare(`
+        SELECT COUNT(*) AS total
+        FROM trade_notifications
+        WHERE user_id = ?
+        AND read_at IS NULL
+    `).bind(userId).first();
+
+    return Number(result?.total || 0);
+}
+
+async function notificationMarkRead(env, userId, id) {
+    const result = await env.DB.prepare(`
+        UPDATE trade_notifications
+        SET read_at = ?
+        WHERE id = ?
+        AND user_id = ?
+        AND read_at IS NULL
+    `).bind(
+        notificationNow(),
+        id,
+        userId
+    ).run();
+
+    return Number(result.meta?.changes || 0) > 0;
+}
+
+async function notificationMarkAllRead(env, userId) {
+    const result = await env.DB.prepare(`
+        UPDATE trade_notifications
+        SET read_at = ?
+        WHERE user_id = ?
+        AND read_at IS NULL
+    `).bind(
+        notificationNow(),
+        userId
+    ).run();
+
+    return Number(result.meta?.changes || 0);
+}
+
+async function notificationSavePreferences(
+    env,
+    userId,
+    input
+) {
+    const allowedKeys = [
+        "inAppEnabled",
+        "emailEnabled",
+        "pushEnabled"
+    ];
+
+    for (const key of Object.keys(input)) {
+        if (!allowedKeys.includes(key)) {
+            throw new Error(
+                `Unsupported notification preference: ${key}`
+            );
+        }
+
+        if (typeof input[key] !== "boolean") {
+            throw new Error(
+                `${key} must be true or false.`
+            );
+        }
+    }
+
+    const existing = await notificationGetPreferences(
+        env,
+        userId
+    );
+
+    const preferences = {
+        inAppEnabled:
+            input.inAppEnabled ?? existing.inAppEnabled,
+
+        emailEnabled:
+            input.emailEnabled ?? existing.emailEnabled,
+
+        pushEnabled:
+            input.pushEnabled ?? existing.pushEnabled
+    };
+
+    await env.DB.prepare(`
+        INSERT INTO trade_notification_preferences (
+            user_id,
+            in_app_enabled,
+            email_enabled,
+            push_enabled,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+            in_app_enabled = excluded.in_app_enabled,
+            email_enabled = excluded.email_enabled,
+            push_enabled = excluded.push_enabled,
+            updated_at = excluded.updated_at
+    `).bind(
+        userId,
+        preferences.inAppEnabled ? 1 : 0,
+        preferences.emailEnabled ? 1 : 0,
+        preferences.pushEnabled ? 1 : 0,
+        notificationNow()
+    ).run();
+
+    return preferences;
+}
+
+async function handleNotifications(request, env, user) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method.toUpperCase();
+
+    if (!env.DB) {
+        return json({
+            ok: false,
+            error: "Database is not configured."
+        }, 500);
+    }
+
+    try {
+        // GET /api/notifications
+        if (
+            path === "/api/notifications" &&
+            method === "GET"
+        ) {
+            const limit = notificationLimit(
+                url.searchParams.get("limit")
+            );
+
+            const notifications = await notificationGetList(
+                env,
+                user.id,
+                limit
+            );
+
+            return json({
+                ok: true,
+                notifications,
+                unreadCount: await notificationUnreadCount(
+                    env,
+                    user.id
+                )
+            });
+        }
+
+        // GET /api/notifications/unread-count
+        if (
+            path === "/api/notifications/unread-count" &&
+            method === "GET"
+        ) {
+            return json({
+                ok: true,
+                unreadCount: await notificationUnreadCount(
+                    env,
+                    user.id
+                )
+            });
+        }
+
+        // GET /api/notifications/preferences
+        if (
+            path === "/api/notifications/preferences" &&
+            method === "GET"
+        ) {
+            const preferences = await notificationGetPreferences(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: true,
+                preferences,
+                deliveryStatus: {
+                    inApp: "available",
+                    email: "not_configured",
+                    push: "not_configured"
+                }
+            });
+        }
+
+        // PUT /api/notifications/preferences
+        if (
+            path === "/api/notifications/preferences" &&
+            method === "PUT"
+        ) {
+            const contentLength = Number(
+                request.headers.get("content-length") || 0
+            );
+
+            if (contentLength > 4096) {
+                return json({
+                    ok: false,
+                    error: "Request body is too large."
+                }, 413);
+            }
+
+            const input = await request.json();
+
+            if (
+                !input ||
+                typeof input !== "object" ||
+                Array.isArray(input)
+            ) {
+                return json({
+                    ok: false,
+                    error: "Invalid preferences."
+                }, 400);
+            }
+
+            const preferences = await notificationSavePreferences(
+                env,
+                user.id,
+                input
+            );
+
+            return json({
+                ok: true,
+                preferences,
+                message: "Notification preferences updated.",
+                deliveryStatus: {
+                    inApp: "available",
+                    email: "not_configured",
+                    push: "not_configured"
+                }
+            });
+        }
+
+        // POST /api/notifications/read-all
+        if (
+            path === "/api/notifications/read-all" &&
+            method === "POST"
+        ) {
+            const updated = await notificationMarkAllRead(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: true,
+                updated,
+                message: "All notifications marked as read."
+            });
+        }
+
+        // POST /api/notifications/:id/read
+        const readMatch = path.match(
+            /^\/api\/notifications\/([a-f0-9-]+)\/read$/i
+        );
+
+        if (readMatch && method === "POST") {
+            const id = readMatch[1];
+
+            const updated = await notificationMarkRead(
+                env,
+                user.id,
+                id
+            );
+
+            if (!updated) {
+                return json({
+                    ok: false,
+                    error: "Notification not found or already read."
+                }, 404);
+            }
+
+            return json({
+                ok: true,
+                message: "Notification marked as read."
+            });
+        }
+
+        return json({
+            ok: false,
+            error: "Notification endpoint not found."
+        }, 404);
+
+    } catch (error) {
+        console.error(
+            "Notification error:",
+            error?.message || error
+        );
+
+        return json({
+            ok: false,
+            error: error?.message || "Notification request failed."
+        }, 500);
+    }
+}
+// Create an in-app notification for the monitoring event.
+// Notification failure must not interrupt trade monitoring.
+
+try {
+    const eventTitle = {
+        stop_loss_near: "Stop-loss warning",
+        take_profit_near: "Take-profit approaching",
+        stop_loss_hit: "Stop-loss level reached",
+        take_profit_hit: "Take-profit level reached",
+        price_movement: "Significant price movement"
+    };
+
+    const title =
+        eventTitle[event.type] || "Trading monitor alert";
+
+    const message =
+        `${event.symbol || "Trading instrument"}: ` +
+        `${event.message || event.type}`;
+
+    await notificationCreate(
+        env,
+        event.userId || event.user_id,
+        "trade_monitor",
+        title,
+        message,
+        {
+            symbol: event.symbol,
+            eventType: event.type,
+            tradeId: event.tradeId || event.trade_id || null
+        }
+    );
+
+} catch (notificationError) {
+    console.error(
+        "Could not create monitoring notification:",
+        notificationError?.message || notificationError
+    );
+}
+// ============================================================
+// PART 15: NOTIFICATION API ROUTES
+// ============================================================
+
+if (url.pathname.startsWith("/api/notifications")) {
+    const user = await requireAuth(request, env);
+
+    if (!user) {
+        return json({
+            ok: false,
+            error: "Authentication required."
+        }, 401);
+    }
+
+    const entitlement = await getSubscriptionEntitlement(
+        env,
+        user
+    );
+
+    if (!entitlement.active) {
+        return paymentRequiredResponse(entitlement);
+    }
+
+    return handleNotifications(
+        request,
+        env,
+        user
+    );
+}
+// ============================================================
+// PART 16: MARKET SCANNER AND WATCHLIST ENGINE
+// ============================================================
+
+const SCANNER_CONFIG = {
+    MAX_SYMBOLS: 30,
+    MAX_WATCHLIST_SYMBOLS: 30,
+    MAX_WATCHLISTS: 10,
+    DEFAULT_TIMEFRAME: "15min",
+    DEFAULT_MIN_CONFIDENCE: 55,
+    MAX_SCAN_HISTORY: 100,
+    MAX_CONCURRENT_SCANS: 3
+};
+
+const SCANNER_DEFAULT_SYMBOLS = [
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "USDCHF",
+    "USDCAD",
+    "AUDUSD",
+    "NZDUSD",
+    "EURGBP",
+    "EURJPY",
+    "GBPJPY",
+    "AUDJPY",
+    "XAUUSD",
+    "XAGUSD",
+    "BTCUSD",
+    "ETHUSD"
+];
+
+function scannerId() {
+    return crypto.randomUUID();
+}
+
+function scannerNow() {
+    return new Date().toISOString();
+}
+
+function scannerNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function scannerSymbol(value) {
+    return String(value || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 20);
+}
+
+function scannerTimeframe(value) {
+    const timeframe = String(value || "")
+        .trim()
+        .toLowerCase();
+
+    const allowed = [
+        "1min",
+        "5min",
+        "15min",
+        "30min",
+        "1hour",
+        "4hour",
+        "1day"
+    ];
+
+    return allowed.includes(timeframe)
+        ? timeframe
+        : SCANNER_CONFIG.DEFAULT_TIMEFRAME;
+}
+
+function scannerValidateSymbols(symbols) {
+    if (!Array.isArray(symbols)) {
+        throw new Error("Symbols must be supplied as an array.");
+    }
+
+    const normalized = [
+        ...new Set(symbols.map(scannerSymbol).filter(Boolean))
+    ];
+
+    if (normalized.length === 0) {
+        throw new Error("At least one valid symbol is required.");
+    }
+
+    if (normalized.length > SCANNER_CONFIG.MAX_SYMBOLS) {
+        throw new Error(
+            `Maximum ${SCANNER_CONFIG.MAX_SYMBOLS} symbols allowed per scan.`
+        );
+    }
+
+    for (const symbol of normalized) {
+        if (!SYMBOLS[symbol]) {
+            throw new Error(`Unsupported trading symbol: ${symbol}`);
+        }
+    }
+
+    return normalized;
+}
+
+function scannerSignalRank(signal) {
+    const confidence = scannerNumber(signal.confidence);
+    const direction = String(signal.direction || "HOLD").toUpperCase();
+
+    if (direction === "BUY" || direction === "SELL") {
+        return confidence;
+    }
+
+    return 0;
+}
+
+function scannerSignalSummary(signal) {
+    return {
+        symbol: signal.symbol,
+        direction: signal.direction,
+        confidence: scannerNumber(signal.confidence),
+        entry: scannerNumber(signal.entry),
+        stopLoss: scannerNumber(signal.stopLoss),
+        takeProfit1: scannerNumber(
+            signal.takeProfit1 ?? signal.tp1
+        ),
+        riskReward: scannerNumber(
+            signal.riskReward ?? signal.riskRewardRatio
+        ),
+        timeframe: signal.timeframe,
+        generatedAt: signal.generatedAt || scannerNow()
+    };
+}
+async function scannerCreateWatchlist(
+    env,
+    userId,
+    name
+) {
+    const safeName = String(name || "")
+        .trim()
+        .slice(0, 60);
+
+    if (!safeName) {
+        throw new Error("Watchlist name is required.");
+    }
+
+    const count = await env.DB.prepare(`
+        SELECT COUNT(*) AS total
+        FROM trade_watchlists
+        WHERE user_id = ?
+    `).bind(userId).first();
+
+    if (
+        Number(count?.total || 0) >=
+        SCANNER_CONFIG.MAX_WATCHLISTS
+    ) {
+        throw new Error("Maximum number of watchlists reached.");
+    }
+
+    const id = scannerId();
+    const now = scannerNow();
+
+    await env.DB.prepare(`
+        INSERT INTO trade_watchlists (
+            id,
+            user_id,
+            name,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+    `).bind(
+        id,
+        userId,
+        safeName,
+        now,
+        now
+    ).run();
+
+    return {
+        id,
+        name: safeName,
+        createdAt: now
+    };
+}
+
+async function scannerGetWatchlists(env, userId) {
+    const result = await env.DB.prepare(`
+        SELECT
+            w.id,
+            w.name,
+            w.created_at,
+            w.updated_at,
+            COUNT(s.id) AS symbol_count
+        FROM trade_watchlists w
+        LEFT JOIN trade_watchlist_symbols s
+            ON s.watchlist_id = w.id
+            AND s.user_id = w.user_id
+        WHERE w.user_id = ?
+        GROUP BY w.id
+        ORDER BY w.created_at DESC
+    `).bind(userId).all();
+
+    return result.results || [];
+}
+
+async function scannerAddWatchlistSymbol(
+    env,
+    userId,
+    watchlistId,
+    symbol
+) {
+    const safeSymbol = scannerSymbol(symbol);
+
+    if (!SYMBOLS[safeSymbol]) {
+        throw new Error("Unsupported trading symbol.");
+    }
+
+    const watchlist = await env.DB.prepare(`
+        SELECT id
+        FROM trade_watchlists
+        WHERE id = ?
+        AND user_id = ?
+        LIMIT 1
+    `).bind(
+        watchlistId,
+        userId
+    ).first();
+
+    if (!watchlist) {
+        throw new Error("Watchlist not found.");
+    }
+
+    const count = await env.DB.prepare(`
+        SELECT COUNT(*) AS total
+        FROM trade_watchlist_symbols
+        WHERE watchlist_id = ?
+        AND user_id = ?
+    `).bind(
+        watchlistId,
+        userId
+    ).first();
+
+    if (
+        Number(count?.total || 0) >=
+        SCANNER_CONFIG.MAX_WATCHLIST_SYMBOLS
+    ) {
+        throw new Error("Watchlist symbol limit reached.");
+    }
+
+    await env.DB.prepare(`
+        INSERT OR IGNORE INTO trade_watchlist_symbols (
+            id,
+            watchlist_id,
+            user_id,
+            symbol,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+    `).bind(
+        scannerId(),
+        watchlistId,
+        userId,
+        safeSymbol,
+        scannerNow()
+    ).run();
+
+    return {
+        ok: true,
+        symbol: safeSymbol
+    };
+}
+
+async function scannerRemoveWatchlistSymbol(
+    env,
+    userId,
+    watchlistId,
+    symbol
+) {
+    const result = await env.DB.prepare(`
+        DELETE FROM trade_watchlist_symbols
+        WHERE watchlist_id = ?
+        AND user_id = ?
+        AND symbol = ?
+    `).bind(
+        watchlistId,
+        userId,
+        scannerSymbol(symbol)
+    ).run();
+
+    return Number(result.meta?.changes || 0) > 0;
+}
+
+async function scannerDeleteWatchlist(
+    env,
+    userId,
+    watchlistId
+) {
+    const watchlist = await env.DB.prepare(`
+        SELECT id
+        FROM trade_watchlists
+        WHERE id = ?
+        AND user_id = ?
+        LIMIT 1
+    `).bind(
+        watchlistId,
+        userId
+    ).first();
+
+    if (!watchlist) {
+        return false;
+    }
+
+    await env.DB.batch([
+        env.DB.prepare(`
+            DELETE FROM trade_watchlist_symbols
+            WHERE watchlist_id = ?
+            AND user_id = ?
+        `).bind(watchlistId, userId),
+
+        env.DB.prepare(`
+            DELETE FROM trade_watchlists
+            WHERE id = ?
+            AND user_id = ?
+        `).bind(watchlistId, userId)
+    ]);
+
+    return true;
+}
+
+async function scannerGetWatchlistSymbols(
+    env,
+    userId,
+    watchlistId
+) {
+    const result = await env.DB.prepare(`
+        SELECT s.symbol, s.created_at
+        FROM trade_watchlist_symbols s
+        INNER JOIN trade_watchlists w
+            ON w.id = s.watchlist_id
+            AND w.user_id = s.user_id
+        WHERE s.watchlist_id = ?
+        AND s.user_id = ?
+        ORDER BY s.created_at ASC
+    `).bind(
+        watchlistId,
+        userId
+    ).all();
+
+    return (result.results || []).map(row => ({
+        symbol: row.symbol,
+        createdAt: row.created_at
+    }));
+}
+async function scannerGetHistory(env, userId, limit = 50) {
+    const safeLimit = Math.max(
+        1,
+        Math.min(100, Math.floor(Number(limit) || 50))
+    );
+
+    const result = await env.DB.prepare(`
+        SELECT
+            id,
+            symbol,
+            timeframe,
+            direction,
+            confidence,
+            entry_price,
+            stop_loss,
+            take_profit,
+            created_at
+        FROM market_scan_history
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+    `).bind(
+        userId,
+        safeLimit
+    ).all();
+
+    return result.results || [];
+}
+async function handleMarketScanner(request, env, user) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method.toUpperCase();
+
+    try {
+        if (!env.DB) {
+            return json({
+                ok: false,
+                error: "Database is not configured."
+            }, 500);
+        }
+
+        // POST /api/scanner/run
+        if (
+            path === "/api/scanner/run" &&
+            method === "POST"
+        ) {
+            const input = await request.json();
+
+            const symbols = scannerValidateSymbols(
+                input.symbols || SCANNER_DEFAULT_SYMBOLS
+            );
+
+            const timeframe = scannerTimeframe(
+                input.timeframe
+            );
+
+            const minConfidence = Math.max(
+                0,
+                Math.min(
+                    100,
+                    scannerNumber(
+                        input.minConfidence,
+                        SCANNER_CONFIG.DEFAULT_MIN_CONFIDENCE
+                    )
+                )
+            );
+
+            const scan = await scannerRunBatch(
+                env,
+                symbols,
+                timeframe,
+                minConfidence
+            );
+
+            await scannerSaveHistory(
+                env,
+                user.id,
+                scan.results
+            );
+
+            return json({
+                ok: true,
+                timeframe,
+                minimumConfidence: minConfidence,
+                scanned: scan.scanned,
+                successful: scan.successful,
+                failed: scan.failed,
+                opportunities: scan.opportunities,
+                results: scan.results,
+                generatedAt: scannerNow()
+            });
+        }
+
+        // GET /api/scanner/symbols
+        if (
+            path === "/api/scanner/symbols" &&
+            method === "GET"
+        ) {
+            return json({
+                ok: true,
+                symbols: Object.keys(SYMBOLS),
+                defaultSymbols: SCANNER_DEFAULT_SYMBOLS
+            });
+        }
+
+        // GET /api/scanner/history
+        if (
+            path === "/api/scanner/history" &&
+            method === "GET"
+        ) {
+            const history = await scannerGetHistory(
+                env,
+                user.id,
+                url.searchParams.get("limit")
+            );
+
+            return json({
+                ok: true,
+                history
+            });
+        }
+
+        // GET /api/watchlists
+        if (
+            path === "/api/watchlists" &&
+            method === "GET"
+        ) {
+            return json({
+                ok: true,
+                watchlists: await scannerGetWatchlists(
+                    env,
+                    user.id
+                )
+            });
+        }
+
+        // POST /api/watchlists
+        if (
+            path === "/api/watchlists" &&
+            method === "POST"
+        ) {
+            const input = await request.json();
+
+            const watchlist = await scannerCreateWatchlist(
+                env,
+                user.id,
+                input.name
+            );
+
+            return json({
+                ok: true,
+                watchlist
+            });
+        }
+
+        // POST /api/watchlists/:id/symbols
+        const addMatch = path.match(
+            /^\/api\/watchlists\/([a-f0-9-]+)\/symbols$/i
+        );
+
+        if (addMatch && method === "POST") {
+            const input = await request.json();
+
+            const result = await scannerAddWatchlistSymbol(
+                env,
+                user.id,
+                addMatch[1],
+                input.symbol
+            );
+
+            return json(result);
+        }
+
+        // GET /api/watchlists/:id/symbols
+        if (addMatch && method === "GET") {
+            return json({
+                ok: true,
+                symbols: await scannerGetWatchlistSymbols(
+                    env,
+                    user.id,
+                    addMatch[1]
+                )
+            });
+        }
+
+        // DELETE /api/watchlists/:id/symbols/:symbol
+        const removeMatch = path.match(
+            /^\/api\/watchlists\/([a-f0-9-]+)\/symbols\/([A-Z0-9]+)$/i
+        );
+
+        if (removeMatch && method === "DELETE") {
+            const removed = await scannerRemoveWatchlistSymbol(
+                env,
+                user.id,
+                removeMatch[1],
+                removeMatch[2]
+            );
+
+            return json({
+                ok: true,
+                removed
+            });
+        }
+
+        // DELETE /api/watchlists/:id
+        const deleteMatch = path.match(
+            /^\/api\/watchlists\/([a-f0-9-]+)$/i
+        );
+
+        if (deleteMatch && method === "DELETE") {
+            const deleted = await scannerDeleteWatchlist(
+                env,
+                user.id,
+                deleteMatch[1]
+            );
+
+            return json({
+                ok: true,
+                deleted
+            });
+        }
+
+        return json({
+            ok: false,
+            error: "Scanner endpoint not found."
+        }, 404);
+
+    } catch (error) {
+        console.error(
+            "Market scanner error:",
+            error?.message || error
+        );
+
+        return json({
+            ok: false,
+            error: error?.message || "Market scan failed."
+        }, 400);
+    }
+}
+// ============================================================
+// PART 16: MARKET SCANNER AND WATCHLIST ROUTES
+// ============================================================
+
+if (
+    url.pathname.startsWith("/api/scanner") ||
+    url.pathname.startsWith("/api/watchlists")
+) {
+    const user = await requireAuth(request, env);
+
+    if (!user) {
+        return json({
+            ok: false,
+            error: "Authentication required."
+        }, 401);
+    }
+
+    const entitlement = await getSubscriptionEntitlement(
+        env,
+        user
+    );
+
+    if (!entitlement.active) {
+        return paymentRequiredResponse(entitlement);
+    }
+
+    return handleMarketScanner(
+        request,
+        env,
+        user
+    );
+}
+// ============================================================
+// PART 17: ADVANCED DASHBOARD AND PORTFOLIO ANALYTICS
+// ============================================================
+
+const DASHBOARD_CONFIG = {
+    MAX_RECENT_TRADES: 20,
+    MAX_EQUITY_POINTS: 100,
+    MAX_ACTIVITY_ITEMS: 30
+};
+
+function dashboardNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function dashboardRound(value, decimals = 2) {
+    const factor = Math.pow(10, decimals);
+
+    return Math.round(
+        dashboardNumber(value) * factor
+    ) / factor;
+}
+
+function dashboardPercentage(numerator, denominator) {
+    if (!denominator) return 0;
+
+    return dashboardRound(
+        (numerator / denominator) * 100
+    );
+}
+
+function dashboardDate(value) {
+    if (!value) return null;
+
+    const date = new Date(value);
+
+    return Number.isNaN(date.getTime())
+        ? null
+        : date.toISOString();
+}
+async function dashboardGetPortfolioSummary(env, userId) {
+    const result = await env.DB.prepare(`
+        SELECT
+            COUNT(*) AS total_trades,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'open'
+                    THEN 1 ELSE 0
+                END
+            ) AS open_trades,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'closed'
+                    THEN 1 ELSE 0
+                END
+            ) AS closed_trades,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'closed'
+                    AND COALESCE(net_pnl, 0) > 0
+                    THEN 1 ELSE 0
+                END
+            ) AS winning_trades,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'closed'
+                    AND COALESCE(net_pnl, 0) < 0
+                    THEN 1 ELSE 0
+                END
+            ) AS losing_trades,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'closed'
+                    THEN COALESCE(net_pnl, 0)
+                    ELSE 0
+                END
+            ) AS realized_pnl,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'open'
+                    THEN COALESCE(risk_amount, 0)
+                    ELSE 0
+                END
+            ) AS open_risk,
+
+            SUM(
+                CASE
+                    WHEN LOWER(status) = 'closed'
+                    THEN COALESCE(fees, 0)
+                    ELSE 0
+                END
+            ) AS total_fees
+
+        FROM trade_journal
+        WHERE user_id = ?
+    `).bind(userId).first();
+
+    const totalTrades = dashboardNumber(
+        result?.total_trades
+    );
+
+    const openTrades = dashboardNumber(
+        result?.open_trades
+    );
+
+    const closedTrades = dashboardNumber(
+        result?.closed_trades
+    );
+
+    const winningTrades = dashboardNumber(
+        result?.winning_trades
+    );
+
+    const losingTrades = dashboardNumber(
+        result?.losing_trades
+    );
+
+    const realizedPnl = dashboardNumber(
+        result?.realized_pnl
+    );
+
+    return {
+        totalTrades,
+        openTrades,
+        closedTrades,
+        winningTrades,
+        losingTrades,
+
+        breakevenTrades: Math.max(
+            0,
+            closedTrades - winningTrades - losingTrades
+        ),
+
+        realizedPnl: dashboardRound(realizedPnl),
+
+        openRisk: dashboardRound(
+            result?.open_risk
+        ),
+
+        totalFees: dashboardRound(
+            result?.total_fees
+        ),
+
+        winRate: dashboardPercentage(
+            winningTrades,
+            closedTrades
+        ),
+
+        averagePnl: closedTrades
+            ? dashboardRound(realizedPnl / closedTrades)
+            : 0
+    };
+}
+async function dashboardGetRecentTrades(
+    env,
+    userId,
+    limit = DASHBOARD_CONFIG.MAX_RECENT_TRADES
+) {
+    const safeLimit = Math.max(
+        1,
+        Math.min(50, Math.floor(Number(limit) || 20))
+    );
+
+    const result = await env.DB.prepare(`
+        SELECT
+            id,
+            symbol,
+            direction,
+            entry_price,
+            stop_loss,
+            take_profit,
+            exit_price,
+            quantity,
+            stake,
+            risk_percent,
+            risk_amount,
+            realized_pnl,
+            net_pnl,
+            strategy,
+            timeframe,
+            broker,
+            execution_mode,
+            status,
+            opened_at,
+            closed_at,
+            created_at
+        FROM trade_journal
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+    `).bind(
+        userId,
+        safeLimit
+    ).all();
+
+    return (result.results || []).map(row => ({
+        id: row.id,
+        symbol: row.symbol,
+        direction: row.direction,
+
+        entryPrice: dashboardNumber(
+            row.entry_price
+        ),
+
+        stopLoss: dashboardNumber(
+            row.stop_loss
+        ),
+
+        takeProfit: dashboardNumber(
+            row.take_profit
+        ),
+
+        exitPrice: row.exit_price === null
+            ? null
+            : dashboardNumber(row.exit_price),
+
+        quantity: dashboardNumber(row.quantity),
+        stake: dashboardNumber(row.stake),
+        riskPercent: dashboardNumber(row.risk_percent),
+        riskAmount: dashboardNumber(row.risk_amount),
+
+        realizedPnl: row.realized_pnl === null
+            ? null
+            : dashboardNumber(row.realized_pnl),
+
+        netPnl: row.net_pnl === null
+            ? null
+            : dashboardNumber(row.net_pnl),
+
+        strategy: row.strategy,
+        timeframe: row.timeframe,
+        broker: row.broker,
+        executionMode: row.execution_mode,
+        status: row.status,
+
+        openedAt: dashboardDate(row.opened_at),
+        closedAt: dashboardDate(row.closed_at),
+        createdAt: dashboardDate(row.created_at)
+    }));
+}
+
+async function dashboardGetOpenPositions(env, userId) {
+    const result = await env.DB.prepare(`
+        SELECT
+            id,
+            symbol,
+            direction,
+            entry_price,
+            stop_loss,
+            take_profit,
+            quantity,
+            stake,
+            risk_percent,
+            risk_amount,
+            strategy,
+            timeframe,
+            broker,
+            execution_mode,
+            opened_at
+        FROM trade_journal
+        WHERE user_id = ?
+        AND LOWER(status) = 'open'
+        ORDER BY opened_at DESC
+        LIMIT 100
+    `).bind(userId).all();
+
+    return (result.results || []).map(row => ({
+        id: row.id,
+        symbol: row.symbol,
+        direction: row.direction,
+        entryPrice: dashboardNumber(row.entry_price),
+        stopLoss: dashboardNumber(row.stop_loss),
+        takeProfit: dashboardNumber(row.take_profit),
+        quantity: dashboardNumber(row.quantity),
+        stake: dashboardNumber(row.stake),
+        riskPercent: dashboardNumber(row.risk_percent),
+        riskAmount: dashboardNumber(row.risk_amount),
+        strategy: row.strategy,
+        timeframe: row.timeframe,
+        broker: row.broker,
+        executionMode: row.execution_mode,
+        openedAt: dashboardDate(row.opened_at)
+    }));
+}
+async function dashboardGetEquityCurve(
+    env,
+    userId,
+    limit = DASHBOARD_CONFIG.MAX_EQUITY_POINTS
+) {
+    const safeLimit = Math.max(
+        1,
+        Math.min(250, Math.floor(Number(limit) || 100))
+    );
+
+    const result = await env.DB.prepare(`
+        SELECT
+            id,
+            symbol,
+            net_pnl,
+            closed_at,
+            created_at
+        FROM trade_journal
+        WHERE user_id = ?
+        AND LOWER(status) = 'closed'
+        ORDER BY COALESCE(closed_at, created_at) ASC
+        LIMIT 5000
+    `).bind(userId).all();
+
+    const trades = result.results || [];
+
+    let cumulative = 0;
+    let peak = 0;
+    let maxDrawdown = 0;
+
+    const points = trades.map((trade, index) => {
+        cumulative += dashboardNumber(trade.net_pnl);
+
+        peak = Math.max(peak, cumulative);
+
+        const drawdown = peak - cumulative;
+
+        maxDrawdown = Math.max(
+            maxDrawdown,
+            drawdown
+        );
+
+        return {
+            index: index + 1,
+            tradeId: trade.id,
+            symbol: trade.symbol,
+            pnl: dashboardRound(trade.net_pnl),
+            cumulativePnl: dashboardRound(cumulative),
+            drawdown: dashboardRound(drawdown),
+            date: dashboardDate(
+                trade.closed_at || trade.created_at
+            )
+        };
+    });
+
+    return {
+        points: points.slice(-safeLimit),
+        totalClosedTrades: trades.length,
+        cumulativeRealizedPnl: dashboardRound(cumulative),
+        maximumDrawdown: dashboardRound(maxDrawdown),
+        calculation: "Cumulative realized journal P&L, not broker account equity."
+    };
+}
+async function dashboardGetBreakdowns(env, userId) {
+    const [strategyResult, symbolResult] = await Promise.all([
+        env.DB.prepare(`
+            SELECT
+                COALESCE(strategy, 'Unspecified') AS strategy,
+                COUNT(*) AS trades,
+                SUM(
+                    CASE
+                        WHEN COALESCE(net_pnl, 0) > 0
+                        THEN 1 ELSE 0
+                    END
+                ) AS wins,
+                SUM(COALESCE(net_pnl, 0)) AS net_pnl
+            FROM trade_journal
+            WHERE user_id = ?
+            AND LOWER(status) = 'closed'
+            GROUP BY COALESCE(strategy, 'Unspecified')
+            ORDER BY net_pnl DESC
+            LIMIT 30
+        `).bind(userId).all(),
+
+        env.DB.prepare(`
+            SELECT
+                symbol,
+                COUNT(*) AS trades,
+                SUM(
+                    CASE
+                        WHEN COALESCE(net_pnl, 0) > 0
+                        THEN 1 ELSE 0
+                    END
+                ) AS wins,
+                SUM(COALESCE(net_pnl, 0)) AS net_pnl
+            FROM trade_journal
+            WHERE user_id = ?
+            AND LOWER(status) = 'closed'
+            GROUP BY symbol
+            ORDER BY net_pnl DESC
+            LIMIT 30
+        `).bind(userId).all()
+    ]);
+
+    const strategies = (strategyResult.results || []).map(row => ({
+        strategy: row.strategy,
+        trades: dashboardNumber(row.trades),
+        wins: dashboardNumber(row.wins),
+        winRate: dashboardPercentage(
+            row.wins,
+            row.trades
+        ),
+        netPnl: dashboardRound(row.net_pnl)
+    }));
+
+    const symbols = (symbolResult.results || []).map(row => ({
+        symbol: row.symbol,
+        trades: dashboardNumber(row.trades),
+        wins: dashboardNumber(row.wins),
+        winRate: dashboardPercentage(
+            row.wins,
+            row.trades
+        ),
+        netPnl: dashboardRound(row.net_pnl)
+    }));
+
+    return {
+        strategies,
+        symbols
+    };
+}
+async function dashboardGetActivity(env, userId) {
+    const activities = [];
+
+    const trades = await dashboardGetRecentTrades(
+        env,
+        userId,
+        15
+    );
+
+    for (const trade of trades) {
+        activities.push({
+            id: `trade_${trade.id}`,
+            type: "trade",
+            title: `${trade.symbol} ${trade.direction}`,
+            message: `Trade status: ${trade.status}`,
+            date: trade.closedAt || trade.openedAt || trade.createdAt
+        });
+    }
+
+    try {
+        const notifications = await env.DB.prepare(`
+            SELECT
+                id,
+                type,
+                title,
+                message,
+                created_at
+            FROM trade_notifications
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 15
+        `).bind(userId).all();
+
+        for (const notification of notifications.results || []) {
+            activities.push({
+                id: `notification_${notification.id}`,
+                type: notification.type,
+                title: notification.title,
+                message: notification.message,
+                date: dashboardDate(notification.created_at)
+            });
+        }
+    } catch (error) {
+        // Notification migration may not yet be installed.
+        console.warn(
+            "Dashboard notification activity unavailable:",
+            error?.message || error
+        );
+    }
+
+    return activities
+        .filter(item => item.date)
+        .sort(
+            (a, b) =>
+                new Date(b.date).getTime() -
+                new Date(a.date).getTime()
+        )
+        .slice(0, DASHBOARD_CONFIG.MAX_ACTIVITY_ITEMS);
+}
+async function handleAdvancedDashboard(request, env, user) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (request.method !== "GET") {
+        return json({
+            ok: false,
+            error: "Method not allowed."
+        }, 405);
+    }
+
+    if (!env.DB) {
+        return json({
+            ok: false,
+            error: "Database is not configured."
+        }, 500);
+    }
+
+    try {
+        // GET /api/dashboard/overview
+        if (path === "/api/dashboard/overview") {
+            const [
+                portfolio,
+                recentTrades,
+                openPositions,
+                equityCurve,
+                breakdowns,
+                activity
+            ] = await Promise.all([
+                dashboardGetPortfolioSummary(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetRecentTrades(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetOpenPositions(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetEquityCurve(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetBreakdowns(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetActivity(
+                    env,
+                    user.id
+                )
+            ]);
+
+            let unreadNotifications = 0;
+
+            try {
+                const unread = await env.DB.prepare(`
+                    SELECT COUNT(*) AS total
+                    FROM trade_notifications
+                    WHERE user_id = ?
+                    AND read_at IS NULL
+                `).bind(user.id).first();
+
+                unreadNotifications = dashboardNumber(
+                    unread?.total
+                );
+            } catch {
+                unreadNotifications = 0;
+            }
+
+            return json({
+                ok: true,
+
+                dashboard: {
+                    generatedAt: new Date().toISOString(),
+
+                    portfolio,
+
+                    positions: {
+                        openCount: openPositions.length,
+                        openPositions
+                    },
+
+                    performance: {
+                        equityCurve,
+                        strategies: breakdowns.strategies,
+                        symbols: breakdowns.symbols
+                    },
+
+                    recentTrades,
+
+                    activity,
+
+                    notifications: {
+                        unreadCount: unreadNotifications
+                    }
+                },
+
+                accountData: {
+                    source: "trade_journal",
+                    brokerBalanceAvailable: false,
+                    liveEquityAvailable: false,
+                    message:
+                        "Portfolio figures are based on recorded journal trades. Connect broker account synchronization for verified live balances and equity."
+                }
+            });
+        }
+
+        // GET /api/dashboard/portfolio
+        if (path === "/api/dashboard/portfolio") {
+            const portfolio = await dashboardGetPortfolioSummary(
+                env,
+                user.id
+            );
+
+            const openPositions = await dashboardGetOpenPositions(
+                env,
+                user.id
+            );
+
+            const equityCurve = await dashboardGetEquityCurve(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: true,
+                portfolio,
+                openPositions,
+                equityCurve
+            });
+        }
+
+        // GET /api/dashboard/performance
+        if (path === "/api/dashboard/performance") {
+            const [
+                portfolio,
+                equityCurve,
+                breakdowns
+            ] = await Promise.all([
+                dashboardGetPortfolioSummary(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetEquityCurve(
+                    env,
+                    user.id
+                ),
+
+                dashboardGetBreakdowns(
+                    env,
+                    user.id
+                )
+            ]);
+
+            return json({
+                ok: true,
+                portfolio,
+                equityCurve,
+                strategies: breakdowns.strategies,
+                symbols: breakdowns.symbols
+            });
+        }
+
+        // GET /api/dashboard/activity
+        if (path === "/api/dashboard/activity") {
+            return json({
+                ok: true,
+                activity: await dashboardGetActivity(
+                    env,
+                    user.id
+                )
+            });
+        }
+
+        return json({
+            ok: false,
+            error: "Dashboard endpoint not found."
+        }, 404);
+
+    } catch (error) {
+        console.error(
+            "Advanced dashboard error:",
+            error?.message || error
+        );
+
+        return json({
+            ok: false,
+            error: "Could not load dashboard data."
+        }, 500);
+    }
+}
+// ============================================================
+// PART 17: ADVANCED DASHBOARD ROUTES
+// ============================================================
+
+if (url.pathname.startsWith("/api/dashboard/")) {
+    const user = await requireAuth(request, env);
+
+    if (!user) {
+        return json({
+            ok: false,
+            error: "Authentication required."
+        }, 401);
+    }
+
+    const entitlement = await getSubscriptionEntitlement(
+        env,
+        user
+    );
+
+    if (!entitlement.active) {
+        return paymentRequiredResponse(entitlement);
+    }
+
+    return handleAdvancedDashboard(
+        request,
+        env,
+        user
+    );
 }
