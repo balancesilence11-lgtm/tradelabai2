@@ -9972,3 +9972,507 @@ if (url.pathname.startsWith("/api/dashboard/")) {
         user
     );
 }
+// ============================================================
+// PART 18: BROKER ACCOUNT SYNCHRONIZATION
+// ============================================================
+
+const BROKER_SYNC_CONFIG = {
+    MAX_ACCOUNTS: 20,
+    MAX_POSITIONS: 500,
+    SNAPSHOT_HISTORY_LIMIT: 50,
+    SYNC_TIMEOUT_MS: 15000,
+    ENVIRONMENT: "demo"
+};
+
+function brokerSyncId() {
+    return crypto.randomUUID();
+}
+
+function brokerSyncNow() {
+    return new Date().toISOString();
+}
+
+function brokerSyncNumber(value) {
+    if (value === null || value === undefined || value === "") {
+        return null;
+    }
+
+    const number = Number(value);
+
+    return Number.isFinite(number) ? number : null;
+}
+
+function brokerSyncText(value, max = 100) {
+    return String(value ?? "").trim().slice(0, max);
+}
+
+function brokerNormalizeName(value) {
+    const name = String(value || "").trim().toLowerCase();
+
+    if (name === "deriv") return "deriv";
+    if (name === "ctrader" || name === "c-trader") return "ctrader";
+
+    return null;
+}
+
+function brokerNormalizeAccount(account, broker) {
+    if (!account || typeof account !== "object") {
+        throw new Error("Invalid broker account response.");
+    }
+
+    return {
+        broker,
+        accountId: brokerSyncText(
+            account.account_id ??
+            account.id ??
+            account.login,
+            100
+        ),
+
+        accountType: brokerSyncText(
+            account.account_type ??
+            account.type ??
+            account.accountType,
+            50
+        ),
+
+        currency: brokerSyncText(
+            account.currency,
+            10
+        ),
+
+        balance: brokerSyncNumber(
+            account.balance
+        ),
+
+        equity: brokerSyncNumber(
+            account.equity
+        ),
+
+        margin: brokerSyncNumber(
+            account.margin
+        ),
+
+        freeMargin: brokerSyncNumber(
+            account.free_margin ??
+            account.freeMargin
+        ),
+
+        floatingPnl: brokerSyncNumber(
+            account.floating_pnl ??
+            account.unrealized_pnl ??
+            account.unrealizedPnL
+        ),
+
+        leverage: brokerSyncText(
+            account.leverage,
+            30
+        ),
+
+        environment: BROKER_SYNC_CONFIG.ENVIRONMENT
+    };
+}
+async function brokerSaveAccountSnapshot(
+    env,
+    userId,
+    account
+) {
+    if (!account.accountId) {
+        throw new Error("Broker account ID is missing.");
+    }
+
+    const now = brokerSyncNow();
+
+    await env.DB.prepare(`
+        INSERT INTO broker_account_snapshots (
+            id,
+            user_id,
+            broker,
+            account_id,
+            account_type,
+            currency,
+            balance,
+            equity,
+            margin,
+            free_margin,
+            floating_pnl,
+            leverage,
+            environment,
+            connection_status,
+            source,
+            synced_at,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+        brokerSyncId(),
+        userId,
+        account.broker,
+        account.accountId,
+        account.accountType,
+        account.currency,
+        account.balance,
+        account.equity,
+        account.margin,
+        account.freeMargin,
+        account.floatingPnl,
+        account.leverage,
+        account.environment,
+        "connected",
+        account.source || "broker_api",
+        now,
+        now
+    ).run();
+
+    return {
+        ok: true,
+        accountId: account.accountId,
+        syncedAt: now
+    };
+}
+
+async function brokerSaveSyncStatus(
+    env,
+    userId,
+    broker,
+    status,
+    error = null
+) {
+    const now = brokerSyncNow();
+
+    await env.DB.prepare(`
+        INSERT INTO broker_sync_status (
+            id,
+            user_id,
+            broker,
+            status,
+            last_sync_at,
+            last_error,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, broker)
+        DO UPDATE SET
+            status = excluded.status,
+            last_sync_at = excluded.last_sync_at,
+            last_error = excluded.last_error,
+            updated_at = excluded.updated_at
+    `).bind(
+        brokerSyncId(),
+        userId,
+        broker,
+        status,
+        status === "connected" ? now : null,
+        error ? brokerSyncText(error, 500) : null,
+        now
+    ).run();
+}
+async function brokerSyncDerivAccounts(env, userId) {
+    const accessToken = await getDerivAccessToken(
+        env,
+        userId
+    );
+
+    if (!accessToken) {
+        throw new Error("Deriv is not connected.");
+    }
+
+    // Use the existing Deriv API helper.
+    const response = await derivApiFetch(
+        env,
+        accessToken,
+        "/trading/v1/options/accounts"
+    );
+
+    if (!response || typeof response !== "object") {
+        throw new Error("Invalid Deriv account response.");
+    }
+
+    const rawAccounts = Array.isArray(response)
+        ? response
+        : response.accounts ||
+          response.data?.accounts ||
+          [];
+
+    if (!Array.isArray(rawAccounts)) {
+        throw new Error("Deriv account list was not returned.");
+    }
+
+    if (rawAccounts.length > BROKER_SYNC_CONFIG.MAX_ACCOUNTS) {
+        throw new Error("Deriv account limit exceeded.");
+    }
+
+    const accounts = rawAccounts.map(account =>
+        brokerNormalizeAccount(account, "deriv")
+    );
+
+    for (const account of accounts) {
+        if (!account.accountId) continue;
+
+        await brokerSaveAccountSnapshot(
+            env,
+            userId,
+            {
+                ...account,
+                source: "deriv_trading_api"
+            }
+        );
+    }
+
+    await brokerSaveSyncStatus(
+        env,
+        userId,
+        "deriv",
+        "connected"
+    );
+
+    return {
+        broker: "deriv",
+        environment: "demo",
+        accounts,
+        syncedAt: brokerSyncNow()
+    };
+}
+async function brokerGetCTraderSyncStatus(env, userId) {
+    const connection = await env.DB.prepare(`
+        SELECT
+            account_id,
+            environment,
+            expires_at,
+            created_at
+        FROM ctrader_connections
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+    `).bind(userId).first();
+
+    if (!connection) {
+        return {
+            broker: "ctrader",
+            connected: false,
+            accountSyncAvailable: false,
+            message: "cTrader account is not connected."
+        };
+    }
+
+    return {
+        broker: "ctrader",
+        connected: true,
+        environment: connection.environment || "demo",
+        accountId: connection.account_id || null,
+        accountSyncAvailable: false,
+        message:
+            "OAuth connection exists. Live account synchronization requires the cTrader Open API connection adapter."
+    };
+}
+async function brokerGetLatestAccounts(env, userId) {
+    const result = await env.DB.prepare(`
+        SELECT
+            broker,
+            account_id,
+            account_type,
+            currency,
+            balance,
+            equity,
+            margin,
+            free_margin,
+            floating_pnl,
+            leverage,
+            environment,
+            connection_status,
+            source,
+            synced_at
+        FROM broker_account_snapshots
+        WHERE user_id = ?
+        AND id IN (
+            SELECT MAX(id)
+            FROM broker_account_snapshots
+            WHERE user_id = ?
+            GROUP BY broker, account_id
+        )
+        ORDER BY synced_at DESC
+    `).bind(
+        userId,
+        userId
+    ).all();
+
+    return result.results || [];
+}
+
+async function brokerGetSyncStatuses(env, userId) {
+    const result = await env.DB.prepare(`
+        SELECT
+            broker,
+            status,
+            last_sync_at,
+            last_error,
+            updated_at
+        FROM broker_sync_status
+        WHERE user_id = ?
+        ORDER BY broker ASC
+    `).bind(userId).all();
+
+    return result.results || [];
+}
+async function handleBrokerSynchronization(
+    request,
+    env,
+    user
+) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method.toUpperCase();
+
+    if (!env.DB) {
+        return json({
+            ok: false,
+            error: "Database is not configured."
+        }, 500);
+    }
+
+    try {
+        // GET /api/brokers/accounts
+        if (
+            path === "/api/brokers/accounts" &&
+            method === "GET"
+        ) {
+            const accounts = await brokerGetLatestAccounts(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: true,
+                accounts
+            });
+        }
+
+        // GET /api/brokers/sync/status
+        if (
+            path === "/api/brokers/sync/status" &&
+            method === "GET"
+        ) {
+            const statuses = await brokerGetSyncStatuses(
+                env,
+                user.id
+            );
+
+            const ctrader = await brokerGetCTraderSyncStatus(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: true,
+                statuses,
+                connections: {
+                    ctrader
+                }
+            });
+        }
+
+        // POST /api/brokers/deriv/sync
+        if (
+            path === "/api/brokers/deriv/sync" &&
+            method === "POST"
+        ) {
+            const result = await brokerSyncDerivAccounts(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: true,
+                result
+            });
+        }
+
+        // POST /api/brokers/ctrader/sync
+        if (
+            path === "/api/brokers/ctrader/sync" &&
+            method === "POST"
+        ) {
+            const status = await brokerGetCTraderSyncStatus(
+                env,
+                user.id
+            );
+
+            return json({
+                ok: false,
+                broker: "ctrader",
+                accountSyncAvailable: false,
+                connection: status,
+                message:
+                    "The cTrader Open API account adapter is not yet implemented."
+            }, 501);
+        }
+
+        return json({
+            ok: false,
+            error: "Broker synchronization endpoint not found."
+        }, 404);
+
+    } catch (error) {
+        console.error(
+            "Broker synchronization error:",
+            error?.message || error
+        );
+
+        const broker = path.includes("deriv")
+            ? "deriv"
+            : path.includes("ctrader")
+                ? "ctrader"
+                : "unknown";
+
+        try {
+            if (broker !== "unknown") {
+                await brokerSaveSyncStatus(
+                    env,
+                    user.id,
+                    broker,
+                    "error",
+                    error?.message || "Synchronization failed."
+                );
+            }
+        } catch (statusError) {
+            console.error(
+                "Could not save broker sync status:",
+                statusError?.message || statusError
+            );
+        }
+
+        return json({
+            ok: false,
+            error: error?.message || "Broker synchronization failed."
+        }, 502);
+    }
+}
+// ============================================================
+// PART 18: BROKER SYNCHRONIZATION ROUTES
+// ============================================================
+
+if (url.pathname.startsWith("/api/brokers/")) {
+    const user = await requireAuth(request, env);
+
+    if (!user) {
+        return json({
+            ok: false,
+            error: "Authentication required."
+        }, 401);
+    }
+
+    const entitlement = await getSubscriptionEntitlement(
+        env,
+        user
+    );
+
+    if (!entitlement.active) {
+        return paymentRequiredResponse(entitlement);
+    }
+
+    return handleBrokerSynchronization(
+        request,
+        env,
+        user
+    );
+}
