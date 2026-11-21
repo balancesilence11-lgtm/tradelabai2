@@ -6709,15 +6709,7 @@ if (
 
   return await handleRiskSettings();
 }
-{
-  "direction": "BUY",
-  "entry": 1.08500,
-  "stopLoss": 1.08300,
-  "takeProfit": 1.08900,
-  "balance": 10000,
-  "riskPercent": 1,
-  "executionMode": "ASSISTED"
-}
+
 // ============================================================
 // TRADE JOURNAL CONFIGURATION
 // ============================================================
