@@ -1380,7 +1380,6 @@ async function handleAISignals(request, env, url, user) {
     error: "AI signal route not found"
   }, 404);
 }
-}
 /* =========================================
    TRADELAB AI SIGNAL ENGINE
    TECHNICAL ANALYSIS CORE
