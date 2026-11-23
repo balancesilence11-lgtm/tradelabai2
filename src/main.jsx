@@ -421,6 +421,88 @@ function IndicatorSuite({candles,symbol}){
 // TradeLab AI Advanced Signals Engine V1
 // Transparent, candle-based analysis. Confluence is NOT win probability.
 function AIAnalysisPanel({ candles, symbol, timeframe }) {
+  // Phase 5: fetch higher-timeframe candles independently and use their trend
+  // alignment as a weighted confirmation input. Failed feeds are excluded.
+  const higherTimeframes = useMemo(() => {
+    const map = {
+      '1min': ['5min', '15min', '1h'],
+      '5min': ['15min', '30min', '1h', '4h'],
+      '15min': ['30min', '1h', '4h', '1day'],
+      '30min': ['1h', '4h', '1day'],
+      '1h': ['4h', '1day'],
+      '4h': ['1day'],
+      '1day': []
+    };
+    return map[timeframe] || [];
+  }, [timeframe]);
+
+  const [mtf, setMtf] = useState({ loading: false, error: '', frames: [] });
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
+    if (!supportedSymbols.includes(symbol) || higherTimeframes.length === 0) {
+      setMtf({ loading: false, error: '', frames: [] });
+      return () => { active = false; controller.abort(); };
+    }
+
+    setMtf({ loading: true, error: '', frames: [] });
+    const load = async () => {
+      const results = await Promise.allSettled(higherTimeframes.map(async interval => {
+        const response = await fetch(
+          `/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&outputsize=240`,
+          { signal: controller.signal }
+        );
+        const payload = await response.json();
+        if (!response.ok || !payload.ok || !Array.isArray(payload.candles)) {
+          throw new Error(payload.details || payload.error || `${interval} feed unavailable`);
+        }
+        const rows = payload.candles.filter(c =>
+          Number.isFinite(Number(c.close)) && Number(c.close) > 0 &&
+          Number.isFinite(Number(c.high)) && Number.isFinite(Number(c.low))
+        );
+        const closes = rows.map(c => Number(c.close));
+        const ema20 = calcEMA(closes, 20).filter(Number.isFinite).at(-1);
+        const ema50 = calcEMA(closes, 50).filter(Number.isFinite).at(-1);
+        const rsi = calcRSI(closes, 14).filter(Number.isFinite).at(-1);
+        const swings = detectSwingPoints(rows.slice(-180));
+        const structureEvent = detectMarketStructure(rows.slice(-180), swings).event;
+        const bias = rows.length < 50 || ema20 == null || ema50 == null
+          ? 'INSUFFICIENT'
+          : ema20 > ema50 ? 'BULLISH' : ema20 < ema50 ? 'BEARISH' : 'MIXED';
+        return {
+          interval, count: rows.length, bias, rsi,
+          structure: structureEvent?.label || 'No recent BOS/CHoCH',
+          ready: bias === 'BULLISH' || bias === 'BEARISH'
+        };
+      }));
+      if (!active) return;
+      const frames = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+      const failures = results.filter(r => r.status === 'rejected');
+      setMtf({
+        loading: false,
+        error: frames.length === 0 && failures.length ? 'Higher-timeframe candle feeds could not be loaded.' : '',
+        frames
+      });
+    };
+    load().catch(error => {
+      if (active && error?.name !== 'AbortError') {
+        setMtf({ loading: false, error: error?.message || 'Higher-timeframe request failed.', frames: [] });
+      }
+    });
+    return () => { active = false; controller.abort(); };
+  }, [symbol, higherTimeframes]);
+
+  const mtfSummary = useMemo(() => {
+    const usable = mtf.frames.filter(frame => frame.ready);
+    const bullish = usable.filter(frame => frame.bias === 'BULLISH').length;
+    const bearish = usable.filter(frame => frame.bias === 'BEARISH').length;
+    return {
+      ready: usable.length, bullish, bearish,
+      direction: bullish > bearish ? 'BULLISH' : bearish > bullish ? 'BEARISH' : usable.length ? 'MIXED' : 'UNCONFIRMED'
+    };
+  }, [mtf.frames]);
 
   const analysis = useMemo(() => {
 
@@ -664,7 +746,19 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
     // Premium/discount is contextual location, not a standalone directional signal.
     const dealingRange = detectPremiumDiscount(data.slice(-80));
 
-    // 11. Weighted confluence calculation
+    // 11. Higher-timeframe confirmation. Each usable timeframe contributes
+    // a modest vote; it is not treated as independent proof of profitability.
+    mtf.frames.filter(frame => frame.ready).forEach(frame => {
+      const dir = frame.bias === 'BULLISH' ? 1 : -1;
+      votes.push({
+        name: `Higher timeframe · ${frame.interval}`,
+        dir,
+        weight: 2,
+        detail: `${frame.bias} EMA 20/50 alignment on ${frame.count} candles; ${frame.structure}.`
+      });
+    });
+
+    // 12. Weighted confluence calculation
     const totalWeight = votes.reduce(
       (sum, vote) => sum + vote.weight,
       0
@@ -675,10 +769,19 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       0
     );
 
-    const direction =
+    const candidateDirection =
       weightedScore >= 4 ? 'BUY' :
       weightedScore <= -4 ? 'SELL' :
       'WAIT';
+    const mtfConflict =
+      mtfSummary.ready > 0 &&
+      candidateDirection !== 'WAIT' &&
+      (mtfSummary.direction === 'MIXED' ||
+       (candidateDirection === 'BUY' && mtfSummary.direction === 'BEARISH') ||
+       (candidateDirection === 'SELL' && mtfSummary.direction === 'BULLISH'));
+    const mtfUnavailableGate =
+      higherTimeframes.length > 0 && (mtf.loading || mtfSummary.ready === 0);
+    const direction = mtfConflict || mtfUnavailableGate ? 'WAIT' : candidateDirection;
 
     const directionalWeight = votes
       .filter(v =>
@@ -709,7 +812,10 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
     const canBuildSetup =
       direction !== 'WAIT' &&
       at != null &&
-      at > 0;
+      at > 0 &&
+      !mtf.loading &&
+      !mtfUnavailableGate &&
+      (higherTimeframes.length === 0 || mtfSummary.ready > 0);
 
     const entry = canBuildSetup ? price : null;
 
@@ -778,9 +884,15 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       notes.push('Directional evidence is insufficient. The engine recommends WAIT.');
     }
 
-    notes.push(
-      'Only the selected timeframe is analysed. Higher-timeframe confirmation is not yet connected.'
-    );
+    if (mtf.loading) {
+      notes.push('Higher-timeframe confirmation is loading; directional signals are held at WAIT until confirmation is available.');
+    } else if (mtfSummary.ready === 0 && higherTimeframes.length > 0) {
+      notes.push('No higher-timeframe trend was available for confirmation; directional signals are held at WAIT rather than assuming unavailable feeds are bullish or bearish.');
+    } else if (mtfConflict) {
+      notes.push(`Signal blocked: selected-timeframe ${candidateDirection} evidence conflicts with ${mtfSummary.direction.toLowerCase()} higher-timeframe consensus. WAIT until alignment improves.`);
+    } else if (mtfSummary.ready > 0) {
+      notes.push(`Higher-timeframe consensus: ${mtfSummary.direction} (${mtfSummary.bullish} bullish / ${mtfSummary.bearish} bearish).`);
+    }
 
     return {
       ready: true,
@@ -796,6 +908,9 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       ml,
       ms,
       direction,
+      candidateDirection,
+      mtfConflict,
+      mtfUnavailableGate,
       weightedScore,
       totalWeight,
       confluence,
@@ -819,7 +934,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       dealingRange
     };
 
-  }, [candles, symbol, timeframe]);
+  }, [candles, symbol, timeframe, mtf.frames, mtf.loading, mtfSummary, higherTimeframes]);
 
   const fmt = value =>
     value == null || !Number.isFinite(Number(value))
@@ -835,7 +950,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       <div className="card">
         <div className="card-heading">
           <h3>TradeLab AI Advanced Signals Engine</h3>
-          <span className="tag">SIGNALS V2 · MARKET INTELLIGENCE</span>
+          <span className="tag">SIGNALS V3 · CONFLUENCE VALIDATION</span>
         </div>
         <div className="empty">{analysis.reason}</div>
       </div>
@@ -861,7 +976,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
             {symbol} · {timeframe} · {candles.length} candles
           </div>
         </div>
-        <span className="tag">SIGNALS V2 · MARKET INTELLIGENCE</span>
+        <span className="tag">SIGNALS V3 · CONFLUENCE VALIDATION</span>
       </div>
 
       <div className="card" style={{ marginBottom: 16, background: '#0b1728' }}>
@@ -870,12 +985,16 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
         {!mtf.loading && !mtf.error && mtf.frames.length === 0 && <div className="muted">No higher timeframes configured for this selection.</div>}
         <div className="dashboard-grid" style={{ marginBottom: 0 }}>
           {mtf.frames.map(frame => <div className="signal" key={frame.interval}>
-            <span><strong>{timeframeLabel(frame.interval)}</strong><small className="muted" style={{display:'block'}}>{frame.count} candles · {frame.structure}</small></span>
+            <span><strong>{({ '1min':'1 minute', '5min':'5 minutes', '15min':'15 minutes', '30min':'30 minutes', '1h':'1 hour', '4h':'4 hours', '1day':'1 day' }[frame.interval] || frame.interval)}</strong><small className="muted" style={{display:'block'}}>{frame.count} candles · {frame.structure}</small></span>
             <strong style={{color:frame.bias==='BULLISH'?'#21d6a0':frame.bias==='BEARISH'?'#fb7185':'#fbbf24'}}>{frame.bias}{frame.rsi != null ? ` · RSI ${frame.rsi.toFixed(1)}` : ''}</strong>
           </div>)}
         </div>
-        <div className="muted" style={{marginTop:10}}>MTF consensus: {mtfSummary.direction} · {mtfSummary.ready ? `${mtfSummary.bullish} bullish / ${mtfSummary.bearish} bearish` : 'Awaiting sufficient higher-timeframe data'}. This is contextual confirmation; it does not independently prove a trade edge.</div>
+        <div className="muted" style={{marginTop:10}}>MTF consensus: {mtfSummary.direction} · {mtfSummary.ready ? `${mtfSummary.bullish} bullish / ${mtfSummary.bearish} bearish` : 'Awaiting sufficient higher-timeframe data'}. Opposing higher-timeframe consensus blocks a directional signal and changes it to WAIT.</div>
       </div>
+      {(analysis.mtfConflict || analysis.mtfUnavailableGate) && <div className="signal" style={{marginBottom:14,border:'1px solid #fbbf24',background:'#33270d'}}>
+        <strong style={{color:'#fbbf24'}}>SIGNAL FILTERED · WAIT</strong>
+        <span className="muted" style={{display:'block',marginTop:5}}>{analysis.mtfUnavailableGate ? 'Higher-timeframe confirmation is not yet available, so no directional setup is issued.' : `Raw direction was ${analysis.candidateDirection}, but higher-timeframe consensus is ${mtfSummary.direction}. No trade setup is issued while these conflict.`}</span>
+      </div>}
 
       <div className="stats-grid" style={{ marginBottom: 16 }}>
 
