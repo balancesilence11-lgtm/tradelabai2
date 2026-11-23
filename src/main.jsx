@@ -2852,6 +2852,42 @@ function PortfolioRiskPage() {
 
 
 const TIMEFRAME_MS = { '1min':60000, '5min':300000, '15min':900000, '30min':1800000, '1h':3600000, '4h':14400000 };
+function applyLiveTickToCandles(candles, price, receivedAt, timeframe) {
+  if (!Array.isArray(candles) || candles.length === 0 || !Number.isFinite(price) || price <= 0) return candles;
+  const interval = TIMEFRAME_MS[timeframe] || 300000;
+  const tickMs = receivedAt instanceof Date ? receivedAt.getTime() : new Date(receivedAt).getTime();
+  if (!Number.isFinite(tickMs)) return candles;
+  const bucketMs = Math.floor(tickMs / interval) * interval;
+  const latest = candles[candles.length - 1];
+  const rawTime = latest.time ?? latest.datetime ?? latest.timestamp;
+  const latestMs = typeof rawTime === 'number' ? (rawTime < 1e12 ? rawTime * 1000 : rawTime) : Date.parse(rawTime);
+  if (!Number.isFinite(latestMs)) return candles;
+  const latestBucket = Math.floor(latestMs / interval) * interval;
+  const next = [...candles];
+  if (bucketMs < latestBucket) return candles; // Never rewrite a later historical candle with an older tick.
+  if (bucketMs === latestBucket) {
+    const current = next[next.length - 1];
+    next[next.length - 1] = {
+      ...current,
+      high: Math.max(Number(current.high), price),
+      low: Math.min(Number(current.low), price),
+      close: price,
+      live: true
+    };
+    return next;
+  }
+  // Start a new candle only for the current interval; do not fabricate missing interval candles.
+  next.push({
+    time: new Date(bucketMs).toISOString(),
+    open: price,
+    high: price,
+    low: price,
+    close: price,
+    volume: 0,
+    live: true
+  });
+  return next.slice(-300);
+}
 function validateMarketCandles(input, timeframe) {
   if (!Array.isArray(input) || input.length < 60) return { ok:false, message:'At least 60 candles are required for reliable analysis.', count:Array.isArray(input)?input.length:0 };
   const clean=[]; let invalid=0, duplicates=0, outOfOrder=0, gaps=0; const seen=new Set(); let previousTime=null;
@@ -4182,6 +4218,8 @@ function App() {
           const quote = Number(data.price);
           if (!Number.isFinite(quote) || quote <= 0) return;
           setMarkets(previous => previous.map(m => m.symbol === selectedMarket ? {...m, price:String(quote), live:true} : m));
+          // Merge each incoming tick into the active timeframe candle without waiting for HTTP polling.
+          setCandles(previous => applyLiveTickToCandles(previous, quote, receivedAt, period));
           setMarketStatus('LIVE');
           setStreamStatus('CONNECTED');
           setLastUpdated(receivedAt);
@@ -4435,7 +4473,7 @@ function App() {
               <div className="card">
                 <div className="card-heading">
                   <div>
-                    <h3>{selectedMarket} Live Candlestick Chart</h3>
+                    <h3>{selectedMarket} Live Candlestick Chart</h3><span className="tag">Tick-updated · {period}</span>
                     <div className="chart-price" style={{marginTop:12}}>{currentMarket?.price || '—'}</div>
                     <div className="muted">{currentMarket?.live ? 'Real-time stream quote · Twelve Data' : 'Waiting for live quote'}</div>
                   </div>
@@ -4508,7 +4546,7 @@ function App() {
             </div>
           </> : activePage === 'Historical Data' ? <HistoricalDataPage /> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Trade Planner' ? <TradePlannerPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
-            <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
+            <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><span className="tag">Live candle updates {streamStatus==='CONNECTED'?'ON':'WAITING'}</span><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>TradingView Advanced Chart · {selectedMarket}</h3><span className="muted">External chart · Analysis only</span></div><TradingViewChart symbol={selectedMarket} timeframe={period}/></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
             <MarketIntelligencePanel candles={candles} symbol={selectedMarket} timeframe={period}/>
