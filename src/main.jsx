@@ -4104,6 +4104,9 @@ function App() {
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
   const [markets, setMarkets] = useState(initialMarkets);
   const [marketStatus, setMarketStatus] = useState('Connecting…');
+  const [streamStatus, setStreamStatus] = useState('CONNECTING');
+  const [streamLastTick, setStreamLastTick] = useState(null);
+  const [streamStats, setStreamStats] = useState({provider:'twelve_data', priceUpdates:0, providerMessages:0, priceAgeSeconds:null});
   const [lastUpdated, setLastUpdated] = useState(null);
   const [period, setPeriod] = useState('5min');
   const [candles, setCandles] = useState([]);
@@ -4128,6 +4131,90 @@ function App() {
   ), [markets, search]);
 
   const currentMarket = markets.find(m => m.symbol === selectedMarket);
+
+  // Live Twelve Data WebSocket stream for the selected instrument. HTTP polling below remains as a fallback.
+  useEffect(() => {
+    if (!supportedSymbols.includes(selectedMarket)) {
+      setStreamStatus('NOT_SUPPORTED');
+      return undefined;
+    }
+    let disposed = false;
+    let socket = null;
+    let reconnectTimer = null;
+    let reconnectDelay = 1000;
+    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const streamUrl = `${scheme}//${window.location.host}/api/market/stream?symbols=${encodeURIComponent(selectedMarket)}`;
+
+    const connect = () => {
+      if (disposed) return;
+      setStreamStatus('CONNECTING');
+      try { socket = new WebSocket(streamUrl); }
+      catch (error) {
+        setStreamStatus('ERROR');
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+        return;
+      }
+      socket.onopen = () => {
+        if (disposed) return;
+        reconnectDelay = 1000;
+        setStreamStatus('CONNECTED');
+      };
+      socket.onmessage = event => {
+        if (disposed) return;
+        let message;
+        try { message = JSON.parse(event.data); } catch { return; }
+        const receivedAt = new Date();
+        if (message.type === 'connected') {
+          setStreamStatus('CONNECTED');
+          return;
+        }
+        if (message.type === 'stream_heartbeat') {
+          setStreamStatus(message.streamStatus || 'CONNECTED');
+          setStreamStats(previous => ({...previous, provider:message.provider || previous.provider, priceUpdates:message.priceUpdateCount ?? previous.priceUpdates, providerMessages:message.providerMessageCount ?? previous.providerMessages, priceAgeSeconds:message.priceUpdateAgeSeconds ?? previous.priceAgeSeconds}));
+          return;
+        }
+        if (message.type !== 'market_update') return;
+        const data = message.data || {};
+        if (data.event === 'price') {
+          const incomingSymbol = String(data.symbol || '').replaceAll('/', '').toUpperCase();
+          if (incomingSymbol !== selectedMarket.toUpperCase()) return;
+          const quote = Number(data.price);
+          if (!Number.isFinite(quote) || quote <= 0) return;
+          setMarkets(previous => previous.map(m => m.symbol === selectedMarket ? {...m, price:String(quote), live:true} : m));
+          setMarketStatus('LIVE');
+          setStreamStatus('CONNECTED');
+          setLastUpdated(receivedAt);
+          setStreamLastTick(receivedAt);
+          setStreamStats(previous => ({...previous, provider:message.provider || 'twelve_data', priceUpdates:previous.priceUpdates + 1, providerMessages:previous.providerMessages + 1, priceAgeSeconds:0}));
+        } else {
+          setStreamStats(previous => ({...previous, provider:message.provider || previous.provider, providerMessages:previous.providerMessages + 1}));
+        }
+      };
+      socket.onerror = () => { if (!disposed) setStreamStatus('ERROR'); };
+      socket.onclose = () => {
+        if (disposed) return;
+        setStreamStatus('RECONNECTING');
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      };
+    };
+    connect();
+    return () => {
+      disposed = true;
+      clearTimeout(reconnectTimer);
+      if (socket) { socket.onopen=null; socket.onmessage=null; socket.onerror=null; socket.onclose=null; socket.close(1000, 'Instrument changed or dashboard closed'); }
+    };
+  }, [selectedMarket]);
+
+  // Mark the stream stale only when no price tick has arrived recently.
+  useEffect(() => {
+    if (!streamLastTick) return undefined;
+    const timer = setInterval(() => {
+      if (Date.now() - streamLastTick.getTime() > 30000) setStreamStatus('STALE');
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [streamLastTick]);
 
   // Latest quote polling. This is periodic HTTP refresh, not tick streaming.
   useEffect(() => {
@@ -4330,13 +4417,27 @@ function App() {
               <p className="muted" role="status" style={{margin:'12px 0 0',lineHeight:1.6}}>{marketDataHealth.message} Stale candles can occur during weekends, holidays or instrument session closures. Time gaps are reported for review and are not automatically treated as missing tradable bars.</p>
             </div>
 
+            <div className="card" style={{marginTop:12,borderColor:streamStatus==='CONNECTED'?'#245b4b':streamStatus==='ERROR'||streamStatus==='STALE'?'#70404a':'#5b512c'}}>
+              <div className="card-heading">
+                <div><h3><Radio size={15} style={{display:'inline',marginRight:7}}/>Real-Time Market Stream</h3><div className="muted">Selected instrument · {selectedMarket} · Twelve Data WebSocket</div></div>
+                <span className="tag" style={{background:streamStatus==='CONNECTED'?'#153c36':streamStatus==='ERROR'||streamStatus==='STALE'?'#48232d':'#403719',color:streamStatus==='CONNECTED'?'#21d6a0':streamStatus==='ERROR'||streamStatus==='STALE'?'#fb7185':'#fbbf24'}}>{streamStatus}</span>
+              </div>
+              <div className="stats-grid" style={{marginTop:10}}>
+                <div><div className="stat-label">Latest streamed tick</div><div className="stat-value" style={{fontSize:16}}>{streamLastTick?streamLastTick.toLocaleTimeString():'Waiting'}</div></div>
+                <div><div className="stat-label">Price updates</div><div className="stat-value" style={{fontSize:16}}>{streamStats.priceUpdates}</div></div>
+                <div><div className="stat-label">Provider messages</div><div className="stat-value" style={{fontSize:16}}>{streamStats.providerMessages}</div></div>
+                <div><div className="stat-label">Price age</div><div className="stat-value" style={{fontSize:16}}>{streamStats.priceAgeSeconds == null ? '—' : `${streamStats.priceAgeSeconds}s`}</div></div>
+              </div>
+              <p className="muted" style={{marginBottom:0}}>Automatic reconnection is enabled. HTTP quote refresh remains available as a fallback; a quiet market may not produce a new tick continuously.</p>
+            </div>
+
             <div className="dashboard-grid">
               <div className="card">
                 <div className="card-heading">
                   <div>
                     <h3>{selectedMarket} Live Candlestick Chart</h3>
                     <div className="chart-price" style={{marginTop:12}}>{currentMarket?.price || '—'}</div>
-                    <div className="muted">{currentMarket?.live ? 'Latest market quote · Twelve Data' : 'Waiting for live quote'}</div>
+                    <div className="muted">{currentMarket?.live ? 'Real-time stream quote · Twelve Data' : 'Waiting for live quote'}</div>
                   </div>
                   <div className="periods">
                     {[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([value,label]) =>
