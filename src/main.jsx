@@ -261,6 +261,77 @@ function detectSupportResistance(candles) {
     .slice(0,3);
 }
 
+// Phase 3 market-intelligence helpers. These are transparent candle-based heuristics,
+// not claims of institutional order-flow or exchange-level volume data.
+function detectOrderBlock(candles, atrValue) {
+  if (!Array.isArray(candles) || candles.length < 12 || !Number.isFinite(atrValue) || atrValue <= 0) return null;
+  const end = candles.length - 1;
+  const current = candles[end];
+  const body = Math.abs(Number(current.close) - Number(current.open));
+  const range = Math.max(Number(current.high) - Number(current.low), 1e-12);
+  const displacement = body >= atrValue * 1.1 && body / range >= 0.6;
+  if (!displacement) return null;
+  const bullish = Number(current.close) > Number(current.open);
+  for (let i = end - 1; i >= Math.max(0, end - 8); i--) {
+    const c = candles[i];
+    const opposite = bullish
+      ? Number(c.close) < Number(c.open)
+      : Number(c.close) > Number(c.open);
+    if (opposite) {
+      return {
+        direction: bullish ? 1 : -1,
+        low: Math.min(Number(c.open), Number(c.close)),
+        high: Math.max(Number(c.open), Number(c.close)),
+        index: i,
+        label: bullish ? 'Bullish order-block candidate' : 'Bearish order-block candidate',
+        detail: `Last opposing candle before a displacement candle (${(body / atrValue).toFixed(2)} ATR body).`
+      };
+    }
+  }
+  return null;
+}
+
+function detectPremiumDiscount(candles, lookback=50) {
+  if (!Array.isArray(candles) || candles.length < 10) return null;
+  const sample = candles.slice(-lookback);
+  const high = Math.max(...sample.map(c => Number(c.high)));
+  const low = Math.min(...sample.map(c => Number(c.low)));
+  const price = Number(sample.at(-1).close);
+  if (!Number.isFinite(high) || !Number.isFinite(low) || high <= low) return null;
+  const equilibrium = (high + low) / 2;
+  const position = (price - low) / (high - low);
+  return {
+    high, low, equilibrium, position,
+    zone: position < 0.45 ? 'Discount' : position > 0.55 ? 'Premium' : 'Equilibrium',
+    detail: `50-candle range ${low}–${high}; equilibrium ${equilibrium}.`
+  };
+}
+
+function detectDisplacement(candles, atrValue) {
+  if (!Array.isArray(candles) || candles.length < 2 || !Number.isFinite(atrValue) || atrValue <= 0) return null;
+  const c = candles.at(-1);
+  const open = Number(c.open), close = Number(c.close), high = Number(c.high), low = Number(c.low);
+  const body = Math.abs(close - open), range = Math.max(high - low, 1e-12);
+  const bodyAtr = body / atrValue;
+  const closeLocation = (close - low) / range;
+  if (bodyAtr < 1.2) return null;
+  if (close > open && closeLocation >= 0.75) return { direction: 1, bodyAtr, label: 'Bullish displacement', detail: `Bullish candle body is ${bodyAtr.toFixed(2)} ATR and closes near its high.` };
+  if (close < open && closeLocation <= 0.25) return { direction: -1, bodyAtr, label: 'Bearish displacement', detail: `Bearish candle body is ${bodyAtr.toFixed(2)} ATR and closes near its low.` };
+  return null;
+}
+
+function detectWyckoffEvent(candles, lookback=20) {
+  if (!Array.isArray(candles) || candles.length < lookback + 1) return null;
+  const current = candles.at(-1);
+  const prior = candles.slice(-(lookback + 1), -1);
+  const rangeHigh = Math.max(...prior.map(c => Number(c.high)));
+  const rangeLow = Math.min(...prior.map(c => Number(c.low)));
+  const high = Number(current.high), low = Number(current.low), close = Number(current.close);
+  if (low < rangeLow && close > rangeLow) return { direction: 1, label: 'Potential Wyckoff spring', detail: 'Price traded below the prior range low and closed back inside the range.' };
+  if (high > rangeHigh && close < rangeHigh) return { direction: -1, label: 'Potential Wyckoff upthrust', detail: 'Price traded above the prior range high and closed back inside the range.' };
+  return null;
+}
+
 // ---------------- Technical indicator calculations ----------------
 const average = values => values.length ? values.reduce((a,b)=>a+b,0)/values.length : null;
 function calcSMA(values, period) {
@@ -574,7 +645,26 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       });
     }
 
-    // 9. Weighted confluence calculation
+    // 9. Order-block candidate and displacement analysis.
+    const orderBlock = detectOrderBlock(data.slice(-60), at);
+    const displacement = detectDisplacement(data, at);
+    if (orderBlock) {
+      votes.push({ name: 'Order-block candidate', dir: orderBlock.direction, weight: 2, detail: `${orderBlock.label}: ${orderBlock.low}–${orderBlock.high}. ${orderBlock.detail}` });
+    }
+    if (displacement) {
+      votes.push({ name: displacement.label, dir: displacement.direction, weight: 2, detail: displacement.detail });
+    }
+
+    // 10. Wyckoff-style spring/upthrust event detection.
+    const wyckoffEvent = detectWyckoffEvent(data.slice(-80));
+    if (wyckoffEvent) {
+      votes.push({ name: wyckoffEvent.label, dir: wyckoffEvent.direction, weight: 2, detail: wyckoffEvent.detail });
+    }
+
+    // Premium/discount is contextual location, not a standalone directional signal.
+    const dealingRange = detectPremiumDiscount(data.slice(-80));
+
+    // 11. Weighted confluence calculation
     const totalWeight = votes.reduce(
       (sum, vote) => sum + vote.weight,
       0
@@ -604,7 +694,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       ? 0
       : Math.round((directionalWeight / totalWeight) * 100);
 
-    // 10. Support and resistance
+    // 12. Support and resistance
     const levels = detectSupportResistance(recentCandles);
 
     const nearestSupport = levels
@@ -615,7 +705,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       .filter(l => l.type === 'Resistance' && l.price > price)
       .sort((a, b) => a.price - b.price)[0];
 
-    // 11. Entry, stop loss and three targets
+    // 13. Entry, stop loss and three targets
     const canBuildSetup =
       direction !== 'WAIT' &&
       at != null &&
@@ -643,7 +733,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       ? 1
       : null;
 
-    // 12. Signal quality
+    // 14. Signal quality
     let quality = 'Insufficient confluence';
 
     if (direction !== 'WAIT') {
@@ -656,7 +746,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       }
     }
 
-    // 13. Signal invalidation
+    // 15. Signal invalidation
     const invalidation = stop;
 
     const notes = [];
@@ -680,6 +770,9 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
     if (!fairValueGap) {
       notes.push('No recent three-candle Fair Value Gap detected.');
     }
+    if (!orderBlock) notes.push('No qualifying displacement-based order-block candidate detected.');
+    if (!displacement) notes.push('No current candle meets the displacement threshold (1.2 ATR body).');
+    if (!wyckoffEvent) notes.push('No potential spring or upthrust detected in the recent range.');
 
     if (direction === 'WAIT') {
       notes.push('Directional evidence is insufficient. The engine recommends WAIT.');
@@ -719,7 +812,11 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       nearestResistance,
       recentEvent,
       liquiditySweep,
-      fairValueGap
+      fairValueGap,
+      orderBlock,
+      displacement,
+      wyckoffEvent,
+      dealingRange
     };
 
   }, [candles, symbol, timeframe]);
@@ -738,7 +835,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       <div className="card">
         <div className="card-heading">
           <h3>TradeLab AI Advanced Signals Engine</h3>
-          <span className="tag">SIGNALS V1</span>
+          <span className="tag">SIGNALS V2 · MARKET INTELLIGENCE</span>
         </div>
         <div className="empty">{analysis.reason}</div>
       </div>
@@ -764,7 +861,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
             {symbol} · {timeframe} · {candles.length} candles
           </div>
         </div>
-        <span className="tag">SIGNALS V1</span>
+        <span className="tag">SIGNALS V2 · MARKET INTELLIGENCE</span>
       </div>
 
       <div className="stats-grid" style={{ marginBottom: 16 }}>
@@ -905,6 +1002,27 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
           </div>
         </div>
 
+      </div>
+
+      <div className="card" style={{ marginTop: 16, background: '#101d30', border: '1px solid #26364e' }}>
+        <div className="card-heading"><h4>Advanced Market Intelligence</h4><span className="tag">SMC · ICT · WYCKOFF</span></div>
+        <div className="dashboard-grid" style={{ marginBottom: 0 }}>
+          <div>
+            <div className="signal"><span>Order block</span><strong>{analysis.orderBlock ? analysis.orderBlock.label : 'Not detected'}</strong></div>
+            {analysis.orderBlock && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{fmt(analysis.orderBlock.low)} – {fmt(analysis.orderBlock.high)}</div>}
+            <div className="signal"><span>Fair Value Gap</span><strong>{analysis.fairValueGap ? analysis.fairValueGap.label : 'Not detected'}</strong></div>
+            {analysis.fairValueGap && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{fmt(analysis.fairValueGap.low)} – {fmt(analysis.fairValueGap.high)}</div>}
+            <div className="signal"><span>Displacement</span><strong>{analysis.displacement ? analysis.displacement.label : 'Not detected'}</strong></div>
+          </div>
+          <div>
+            <div className="signal"><span>Wyckoff event</span><strong>{analysis.wyckoffEvent ? analysis.wyckoffEvent.label : 'Not detected'}</strong></div>
+            <div className="signal"><span>Dealing-range location</span><strong>{analysis.dealingRange ? analysis.dealingRange.zone : 'Insufficient data'}</strong></div>
+            {analysis.dealingRange && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>Low {fmt(analysis.dealingRange.low)} · EQ {fmt(analysis.dealingRange.equilibrium)} · High {fmt(analysis.dealingRange.high)} · Position {(analysis.dealingRange.position*100).toFixed(1)}%</div>}
+            <div className="signal"><span>Market structure</span><strong>{analysis.recentEvent?.label || 'No recent BOS/CHoCH'}</strong></div>
+            <div className="signal"><span>Liquidity sweep</span><strong>{analysis.liquiditySweep?.label || 'Not detected'}</strong></div>
+          </div>
+        </div>
+        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations. Order blocks, Wyckoff events and premium/discount zones are candidates, not verified institutional order flow. Volume-based confirmation is excluded until reliable volume data is available.</p>
       </div>
 
       <div
