@@ -9023,11 +9023,21 @@ const url = new URL(request.url);
         let closed = false;
         let messageCount = 0;
         let messageWindow = Date.now();
+        let lastProviderMessageAt = Date.now();
+        let lastPriceUpdateAt = null;
+        let providerMessageCount = 0;
+        let priceUpdateCount = 0;
+        let heartbeatTimer = null;
 
         function closeConnections(code = 1000, reason = "Connection closed") {
             if (closed) return;
 
             closed = true;
+
+            if (heartbeatTimer !== null) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
 
             try {
                 server.close(code, reason);
@@ -9041,6 +9051,9 @@ const url = new URL(request.url);
         // Forward provider price updates to the authenticated client.
         upstream.addEventListener("message", event => {
             if (closed) return;
+
+            lastProviderMessageAt = Date.now();
+            providerMessageCount++;
 
             let data;
 
@@ -9061,10 +9074,21 @@ const url = new URL(request.url);
                 data.event === "price" ||
                 data.status === "ok"
             ) {
+                const receivedAt = new Date().toISOString();
+                const isPriceUpdate = data.event === "price";
+
+                if (isPriceUpdate) {
+                    lastPriceUpdateAt = Date.now();
+                    priceUpdateCount++;
+                }
+
                 streamSend(server, {
                     type: "market_update",
                     data,
-                    receivedAt: new Date().toISOString()
+                    receivedAt,
+                    streamStatus: "CONNECTED",
+                    quoteStatus: isPriceUpdate ? "LIVE_RECEIVED" : "STATUS",
+                    provider: "twelve_data"
                 });
 
                 return;
@@ -9188,6 +9212,29 @@ const url = new URL(request.url);
                 "Client connection error"
             );
         });
+
+        // Keep clients informed even when a market is quiet or closed.
+        // A quiet market is not treated as a broken connection.
+        heartbeatTimer = setInterval(() => {
+            if (closed) return;
+
+            const now = Date.now();
+            streamSend(server, {
+                type: "stream_heartbeat",
+                streamStatus: "CONNECTED",
+                provider: "twelve_data",
+                serverTime: new Date(now).toISOString(),
+                lastProviderMessageAt: new Date(lastProviderMessageAt).toISOString(),
+                lastPriceUpdateAt: lastPriceUpdateAt
+                    ? new Date(lastPriceUpdateAt).toISOString()
+                    : null,
+                providerMessageCount,
+                priceUpdateCount,
+                priceUpdateAgeSeconds: lastPriceUpdateAt === null
+                    ? null
+                    : Math.max(0, Math.floor((now - lastPriceUpdateAt) / 1000))
+            });
+        }, MARKET_STREAM_CONFIG.HEARTBEAT_INTERVAL_MS);
 
         // Subscribe only to the symbols validated by the Worker.
         upstream.send(JSON.stringify({
