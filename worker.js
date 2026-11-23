@@ -8947,15 +8947,18 @@ env.TWELVE_DATA_API_KEY || ""
         streamProviderSymbol
     );
 
-    const websocketUrl =
-        "wss://ws.twelvedata.com/v1/quotes/price" +
-        `?apikey=${encodeURIComponent(apiKey)}`;
-
-    const response = await fetch(websocketUrl, {
-        headers: {
-            Upgrade: "websocket"
+    // Cloudflare Workers' outbound WebSocket fetch uses an HTTPS URL with
+    // Upgrade: websocket. Do not pass a WSS URL to fetch(). Authenticate via
+    // Twelve Data's supported API-key header so the secret is not in the URL.
+    const response = await fetch(
+        "https://ws.twelvedata.com/v1/quotes/price",
+        {
+            headers: {
+                Upgrade: "websocket",
+                "X-TD-APIKEY": apiKey
+            }
         }
-    });
+    );
 
     if (response.status !== 101 || !response.webSocket) {
         let providerResponse = "";
@@ -8963,7 +8966,7 @@ env.TWELVE_DATA_API_KEY || ""
             providerResponse = (await response.text()).slice(0, 500);
         } catch {}
 
-        // Log provider diagnostics without logging the API key or request URL.
+        // Never log credentials, authorization headers, or request URLs.
         console.error("Twelve Data WebSocket handshake rejected:", {
             status: response.status,
             statusText: response.statusText,
@@ -8977,7 +8980,6 @@ env.TWELVE_DATA_API_KEY || ""
     }
 
     const upstream = response.webSocket;
-
     upstream.accept();
 
     return {
