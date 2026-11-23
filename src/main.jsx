@@ -1,4 +1,4 @@
-import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import TradingViewChart from "./TradingViewChart";import React, { useEffect, useMemo, useState } from 'react';
+import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import TradingViewChart from "./TradingViewChart";import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
@@ -2888,30 +2888,92 @@ function applyLiveTickToCandles(candles, price, receivedAt, timeframe) {
   });
   return next.slice(-300);
 }
+
+// Canonicalize history to one candle per timeframe bucket, then re-apply the
+// freshest selected-symbol tick so a delayed HTTP refresh cannot erase it.
+function mergeHistoricalCandlesWithLiveTick(input, tick, timeframe) {
+  if (!Array.isArray(input)) return [];
+  const interval = TIMEFRAME_MS[timeframe] || 300000;
+  const buckets = new Map();
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const rawTime = raw.time ?? raw.datetime ?? raw.timestamp;
+    const parsed = typeof rawTime === 'number' ? (rawTime < 1e12 ? rawTime * 1000 : rawTime) : Date.parse(rawTime);
+    const open = Number(raw.open), high = Number(raw.high), low = Number(raw.low), close = Number(raw.close);
+    if (!Number.isFinite(parsed) || ![open, high, low, close].every(Number.isFinite) || open <= 0 || high <= 0 || low <= 0 || close <= 0 || high < Math.max(open, close, low) || low > Math.min(open, close, high)) continue;
+    const bucket = Math.floor(parsed / interval) * interval;
+    const key = String(bucket);
+    const existing = buckets.get(key);
+    if (!existing) {
+      buckets.set(key, { ...raw, time: new Date(bucket).toISOString(), open, high, low, close, volume: Number(raw.volume) || 0 });
+    } else {
+      existing.high = Math.max(existing.high, high);
+      existing.low = Math.min(existing.low, low);
+      existing.close = close;
+      existing.volume += Number(raw.volume) || 0;
+    }
+  }
+  let merged = [...buckets.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)).slice(-300);
+  if (tick && Number.isFinite(Number(tick.price))) {
+    const tickTime = new Date(tick.time).getTime();
+    const now = Date.now();
+    const tickBucket = Math.floor(tickTime / interval) * interval;
+    const currentBucket = Math.floor(now / interval) * interval;
+    const fresh = Number.isFinite(tickTime) && now - tickTime >= -5000 && now - tickTime <= 120000;
+    if (fresh && tickBucket === currentBucket) merged = applyLiveTickToCandles(merged, Number(tick.price), new Date(tickTime), timeframe);
+  }
+  return merged;
+}
+
 function validateMarketCandles(input, timeframe) {
   if (!Array.isArray(input) || input.length < 60) return { ok:false, message:'At least 60 candles are required for reliable analysis.', count:Array.isArray(input)?input.length:0 };
-  const clean=[]; let invalid=0, duplicates=0, outOfOrder=0, gaps=0; const seen=new Set(); let previousTime=null;
+  const interval = TIMEFRAME_MS[timeframe] || 300000;
+  const candidates = [];
+  let invalid = 0, outOfOrder = 0;
+  let previousInputTime = null;
   for (const raw of input) {
     if (!raw || typeof raw !== 'object') { invalid++; continue; }
     const open=Number(raw.open), high=Number(raw.high), low=Number(raw.low), close=Number(raw.close);
-    const values=[open,high,low,close];
-    if (values.some(v=>!Number.isFinite(v) || v<=0) || high<Math.max(open,close,low) || low>Math.min(open,close,high)) { invalid++; continue; }
+    if (![open,high,low,close].every(Number.isFinite) || open<=0 || high<=0 || low<=0 || close<=0 || high<Math.max(open,close,low) || low>Math.min(open,close,high)) { invalid++; continue; }
     const rawTime=raw.time ?? raw.datetime ?? raw.timestamp;
     const parsedTime=typeof rawTime==='number' ? (rawTime<1e12?rawTime*1000:rawTime) : Date.parse(rawTime);
     if (!Number.isFinite(parsedTime)) { invalid++; continue; }
-    const key=String(parsedTime);
-    if (seen.has(key)) { duplicates++; continue; }
-    if (previousTime!==null && parsedTime<previousTime) outOfOrder++;
-    if (previousTime!==null && parsedTime>previousTime+(TIMEFRAME_MS[timeframe]||300000)*1.8) gaps++;
-    seen.add(key); previousTime=parsedTime;
-    clean.push({...raw,open,high,low,close,__timeMs:parsedTime});
+    if (previousInputTime!==null && parsedTime<previousInputTime) outOfOrder++;
+    previousInputTime=parsedTime;
+    const bucket=Math.floor(parsedTime/interval)*interval;
+    candidates.push({...raw,open,high,low,close,__timeMs:bucket,volume:Number(raw.volume)||0});
   }
-  clean.sort((a,b)=>a.__timeMs-b.__timeMs);
-  if (invalid || duplicates || outOfOrder) return { ok:false, message:`Data quality check failed: ${invalid} invalid, ${duplicates} duplicate and ${outOfOrder} out-of-order candles.`, count:clean.length, invalid, duplicates, outOfOrder, gaps };
-  if (clean.length<60) return { ok:false, message:`Only ${clean.length} valid candles remain after quality checks.`, count:clean.length, invalid, duplicates, outOfOrder, gaps };
-  const latest=clean[clean.length-1], ageMs=Math.max(0,Date.now()-latest.__timeMs), interval=TIMEFRAME_MS[timeframe]||300000;
+  // Sort first, then collapse repeated timestamps/timeframe buckets. This safely
+  // repairs provider ordering and duplicate bars rather than rejecting good data.
+  candidates.sort((a,b)=>a.__timeMs-b.__timeMs);
+  const byBucket = new Map();
+  let duplicates = 0;
+  for (const candle of candidates) {
+    const key=String(candle.__timeMs);
+    const existing=byBucket.get(key);
+    if (!existing) byBucket.set(key,candle);
+    else {
+      duplicates++;
+      existing.high=Math.max(existing.high,candle.high);
+      existing.low=Math.min(existing.low,candle.low);
+      existing.close=candle.close;
+      existing.volume+=candle.volume;
+    }
+  }
+  const clean=[...byBucket.values()].sort((a,b)=>a.__timeMs-b.__timeMs);
+  let gaps=0;
+  for(let i=1;i<clean.length;i++) if(clean[i].__timeMs-clean[i-1].__timeMs>interval*1.8) gaps++;
+  if (invalid) return { ok:false, message:`Data quality check failed: ${invalid} invalid candles. ${duplicates} duplicate bars were removed and ${outOfOrder} out-of-order bars were sorted.`, count:clean.length, invalid, duplicates, outOfOrder, gaps };
+  if (clean.length<60) return { ok:false, message:`Only ${clean.length} unique valid candles remain after duplicate removal; at least 60 are required.`, count:clean.length, invalid, duplicates, outOfOrder, gaps };
+  const latest=clean[clean.length-1], ageMs=Math.max(0,Date.now()-latest.__timeMs);
   const stale=ageMs>Math.max(interval*3,15*60000);
-  return { ok:true, candles:clean.map(({__timeMs,...c})=>c), count:clean.length, invalid, duplicates, outOfOrder, gaps, stale, ageMs, latestTime:new Date(latest.__timeMs).toISOString(), message:stale?'Latest candle is older than expected; this may be due to a closed market or delayed provider.':gaps?`${gaps} time gaps detected; session closures may explain some gaps.`:'Candle history passed basic OHLC and timestamp checks.' };
+  const normalized=clean.map(({__timeMs,...c})=>({...c,time:new Date(__timeMs).toISOString()}));
+  const notes=[];
+  if(duplicates) notes.push(`${duplicates} duplicate bars removed`);
+  if(outOfOrder) notes.push(`${outOfOrder} out-of-order bars sorted`);
+  if(gaps) notes.push(`${gaps} time gaps detected; session closures may explain some gaps`);
+  const message=stale?'Latest candle is older than expected; this may be due to a closed market or delayed provider.':notes.length?`Candle history normalized: ${notes.join('; ')}.`:'Candle history passed OHLC, timestamp, ordering and uniqueness checks.';
+  return { ok:true, candles:normalized, count:normalized.length, invalid, duplicates, outOfOrder, gaps, stale, ageMs, latestTime:new Date(latest.__timeMs).toISOString(), message };
 }
 function formatAge(ms) {
   if (!Number.isFinite(ms)) return '—';
@@ -4146,6 +4208,7 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [period, setPeriod] = useState('5min');
   const [candles, setCandles] = useState([]);
+  const latestLiveTickRef = useRef(null);
   const [candleLoading, setCandleLoading] = useState(false);
   const [candleError, setCandleError] = useState('');
   const [marketDataHealth, setMarketDataHealth] = useState({status:'WAITING', message:'Waiting for market-data response.', checkedAt:null, source:'/api/market + /api/candles', quoteAgeMs:null, candleAgeMs:null, gaps:0, invalid:0, duplicates:0});
@@ -4170,6 +4233,7 @@ function App() {
 
   // Live Twelve Data WebSocket stream for the selected instrument. HTTP polling below remains as a fallback.
   useEffect(() => {
+    latestLiveTickRef.current = null;
     if (!supportedSymbols.includes(selectedMarket)) {
       setStreamStatus('NOT_SUPPORTED');
       return undefined;
@@ -4218,7 +4282,9 @@ function App() {
           const quote = Number(data.price);
           if (!Number.isFinite(quote) || quote <= 0) return;
           setMarkets(previous => previous.map(m => m.symbol === selectedMarket ? {...m, price:String(quote), live:true} : m));
-          // Merge each incoming tick into the active timeframe candle without waiting for HTTP polling.
+          // Keep the latest tick so a historical HTTP refresh or timeframe switch
+          // can merge it back into the correct current candle.
+          latestLiveTickRef.current = { symbol: selectedMarket, price: quote, time: receivedAt.toISOString() };
           setCandles(previous => applyLiveTickToCandles(previous, quote, receivedAt, period));
           setMarketStatus('LIVE');
           setStreamStatus('CONNECTED');
@@ -4292,6 +4358,8 @@ function App() {
   // Historical candles polling.
   useEffect(() => {
     let active = true;
+    // Never display the previous symbol/timeframe while the new history is loading.
+    setCandles([]);
     if (!supportedSymbols.includes(selectedMarket)) {
       setCandles([]);
       setCandleError('Historical data is not supported for this instrument (US30 is not connected).');
@@ -4312,7 +4380,10 @@ function App() {
           setMarketDataHealth(previous=>({...previous,status:'WARNING',message:quality.message,checkedAt:new Date(),source:'Historical candle API',invalid:quality.invalid||0,duplicates:quality.duplicates||0,gaps:quality.gaps||0}));
           return;
         }
-        setCandles(quality.candles);
+        const latestTick = latestLiveTickRef.current;
+        const matchingTick = latestTick && latestTick.symbol === selectedMarket ? latestTick : null;
+        const synchronizedCandles = mergeHistoricalCandlesWithLiveTick(quality.candles, matchingTick, period);
+        setCandles(synchronizedCandles);
         setCandleError('');
         setLastCandleUpdated(new Date());
         setMarketDataHealth(previous=>({...previous,status:quality.stale?'STALE':quality.gaps?'WARNING':'HEALTHY',message:quality.message,checkedAt:new Date(),source:'Market + candle API',candleAgeMs:quality.ageMs,gaps:quality.gaps,invalid:quality.invalid,duplicates:quality.duplicates,latestCandleTime:quality.latestTime}));
