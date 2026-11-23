@@ -243,6 +243,190 @@ user: { id: user.id, email: user.email }
 });
 }
 /* =========================================
+SECURE ACCOUNT DELETION
+Requires password re-authentication, explicit confirmation,
+confirmation of closed external positions, and broker revocation.
+Financial records are retained against a pseudonymized suspended user row.
+========================================= */
+async function deleteAccount(request, env, user) {
+  let body;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ ok: false, error: "Invalid request body." }, 400);
+  }
+
+  const password = String(body.password || "");
+  const confirmation = String(body.confirmation || "");
+
+  if (password.length < 12 || password.length > 128) {
+    return json({ ok: false, error: "Enter your current password to confirm deletion." }, 400);
+  }
+  if (confirmation !== "DELETE MY ACCOUNT") {
+    return json({ ok: false, error: "Type DELETE MY ACCOUNT exactly to confirm." }, 400);
+  }
+  if (body.open_positions_closed !== true) {
+    return json({ ok: false, error: "Confirm that all open positions have been closed directly with your brokers before deleting your account." }, 400);
+  }
+  if (body.broker_access_revoked !== true) {
+    return json({ ok: false, error: "Revoke TradeLab AI access from your broker account settings first, then confirm broker access revocation." }, 400);
+  }
+
+  const account = await env.DB.prepare(`
+    SELECT id, email, password_hash, password_salt, status
+    FROM users
+    WHERE id = ?
+    LIMIT 1
+  `).bind(user.id).first();
+
+  if (!account || account.status !== "active") {
+    return json({ ok: false, error: "Account is no longer active." }, 401, {
+      "Set-Cookie": clearSessionCookie()
+    });
+  }
+
+  const suppliedHash = await hashPassword(password, account.password_salt);
+  if (!constantTimeStringEqual(suppliedHash, account.password_hash)) {
+    await logAuthEvent(env, account.id, account.email, "account_deletion_failed");
+    return json({ ok: false, error: "Password confirmation failed." }, 401);
+  }
+
+  // Do not erase the account while locally recorded positions remain open.
+  const [brokerPositions, journalPositions] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) AS total FROM broker_open_positions WHERE user_id = ?`)
+      .bind(account.id).first(),
+    env.DB.prepare(`SELECT COUNT(*) AS total FROM trade_journal WHERE user_id = ? AND LOWER(status) = 'open'`)
+      .bind(account.id).first()
+  ]);
+
+  const openBrokerPositions = Number(brokerPositions?.total || 0);
+  const openJournalTrades = Number(journalPositions?.total || 0);
+  if (openBrokerPositions > 0 || openJournalTrades > 0) {
+    return json({
+      ok: false,
+      code: "OPEN_POSITIONS_REMAIN",
+      error: "Close or resolve all open positions before deleting this account.",
+      openBrokerPositions,
+      openJournalTrades
+    }, 409);
+  }
+
+  // Cancel every active/pending subscription through the existing verified
+  // Flutterwave cancellation path. If provider cancellation cannot be
+  // confirmed, stop before deleting any account data.
+  const subscriptions = await env.DB.prepare(`
+    SELECT id, status, payment_provider, cancel_at_period_end
+    FROM subscriptions
+    WHERE user_id = ? AND status IN ('active', 'pending')
+    ORDER BY created_at DESC
+  `).bind(account.id).all();
+
+  for (const subscription of (subscriptions.results || [])) {
+    if (subscription.status === "active" &&
+        Number(subscription.cancel_at_period_end) === 1 &&
+        subscription.payment_provider === "flutterwave") {
+      continue;
+    }
+
+    if (subscription.status === "active" && subscription.payment_provider !== "flutterwave") {
+      return json({
+        ok: false,
+        code: "SUBSCRIPTION_CANCELLATION_REQUIRED",
+        error: "An active subscription uses an unsupported payment provider. Contact support to cancel it before deleting the account."
+      }, 409);
+    }
+
+    const cancellationRequest = new Request(request.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: subscription.id })
+    });
+    const cancellationResponse = await cancelBillingSubscription(cancellationRequest, env, user);
+    let cancellationResult = {};
+    try { cancellationResult = await cancellationResponse.json(); } catch {}
+
+    if (!cancellationResponse.ok || cancellationResult.ok !== true) {
+      return json({
+        ok: false,
+        code: "SUBSCRIPTION_CANCELLATION_FAILED",
+        error: "Subscription cancellation could not be confirmed. No account data was deleted.",
+        message: cancellationResult.error || cancellationResult.message || "Please cancel the subscription and retry."
+      }, 502);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const replacementEmail = `deleted-${randomId(16)}@deleted.invalid`;
+  const replacementPasswordHash = randomId(32);
+  const replacementPasswordSalt = randomId(16);
+
+  try {
+    await env.DB.batch([
+      // Child records without cascading foreign keys.
+      env.DB.prepare(`DELETE FROM historical_candles WHERE dataset_id IN (SELECT id FROM historical_datasets WHERE user_id = ?)`)
+        .bind(account.id),
+      env.DB.prepare(`DELETE FROM historical_datasets WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM ai_signal_history WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM trade_journal WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM trade_monitor_events WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM market_scan_history WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM broker_open_positions WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM broker_account_snapshots WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM broker_sync_status WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM ctrader_connections WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM ctrader_oauth_states WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM deriv_oauth WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM deriv_connections WHERE LOWER(user_email) = LOWER(?)`).bind(account.email),
+      env.DB.prepare(`DELETE FROM scheduled_job_runs WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM scheduled_jobs WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM trade_notifications WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM trade_notification_preferences WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM trade_watchlist_symbols WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM trade_watchlists WHERE user_id = ?`).bind(account.id),
+      env.DB.prepare(`DELETE FROM login_attempts WHERE LOWER(email) = LOWER(?)`).bind(account.email),
+      env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(account.id),
+
+      // Retain minimal audit facts, but remove direct identifiers and payload details.
+      env.DB.prepare(`UPDATE auth_events SET user_id = NULL, email = NULL WHERE user_id = ? OR LOWER(email) = LOWER(?)`)
+        .bind(account.id, account.email),
+      env.DB.prepare(`UPDATE billing_audit_log SET user_id = NULL, subscription_id = NULL, transaction_id = NULL, details_json = ? WHERE user_id = ?`)
+        .bind(JSON.stringify({ account_deleted: true }), account.id),
+
+      // Keep financial history for lawful accounting/dispute retention while
+      // removing provider customer/subscription identifiers from local records.
+      env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', cancel_at_period_end = 1, provider_customer_ref = NULL, provider_subscription_ref = NULL, updated_at = ? WHERE user_id = ?`)
+        .bind(now, account.id),
+      env.DB.prepare(`UPDATE payment_transactions SET description = 'Retained financial record for deleted account' WHERE user_id = ?`)
+        .bind(account.id),
+
+      // Keep a non-login tombstone because payment_transactions.user_id is NOT NULL
+      // and ON DELETE CASCADE would otherwise erase financial records.
+      env.DB.prepare(`UPDATE users SET email = ?, password_hash = ?, password_salt = ?, status = 'suspended', updated_at = ? WHERE id = ? AND status = 'active'`)
+        .bind(replacementEmail, replacementPasswordHash, replacementPasswordSalt, now, account.id),
+
+      // Minimal non-identifying record that deletion completed.
+      env.DB.prepare(`INSERT INTO auth_events (user_id, email, event_type, created_at) VALUES (NULL, NULL, 'account_deleted', ?)`)
+        .bind(now)
+    ]);
+
+    return json({
+      ok: true,
+      deleted: true,
+      message: "Your TradeLab AI account has been deleted. Required financial records were retained in a pseudonymized form.",
+      deletedAt: now
+    }, 200, {
+      "Set-Cookie": clearSessionCookie()
+    });
+  } catch (error) {
+    console.error("Account deletion failed:", error?.message || error);
+    return json({
+      ok: false,
+      error: "Account deletion could not be completed. No success was recorded; contact support before retrying."
+    }, 500);
+  }
+}
+
+/* =========================================
 LOGOUT
 ========================================= */
 async function logout(request, env) {
@@ -282,6 +466,15 @@ return login(request, env);
 }
 if (path === "/api/auth/logout" && request.method === "POST") {
 return logout(request, env);
+}
+if (path === "/api/auth/delete-account" && request.method === "POST") {
+const user = await getAuthenticatedUser(request, env);
+if (!user) {
+return json({ ok: false, error: "Authentication required." }, 401, {
+  "Set-Cookie": clearSessionCookie()
+});
+}
+return deleteAccount(request, env, user);
 }
 if (path === "/api/auth/me" && request.method === "GET") {
 const user = await getAuthenticatedUser(request, env);
