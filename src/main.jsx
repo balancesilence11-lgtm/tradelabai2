@@ -88,7 +88,8 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const visible = candles.slice(-count);
   const width = 1000, height = 310, left = 72, right = 18, top = 28, bottom = 35;
   const closes = candles.map(c => Number(c.close));
-  const ema9 = calcEMA(closes, 9), ema21 = calcEMA(closes, 21), ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);\n  const sma20 = calcSMA(closes,20), sma50 = calcSMA(closes,50), sma200 = calcSMA(closes,200);
+  const ema9 = calcEMA(closes, 9), ema21 = calcEMA(closes, 21), ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);
+  const sma20 = calcSMA(closes,20), sma50 = calcSMA(closes,50), sma200 = calcSMA(closes,200);
   const bands = calcBollinger(closes, 20, 2);
   const levels = detectSupportResistance(candles.slice(-180));
   const swings = detectSwingPoints(visible);
@@ -98,7 +99,8 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const visibleBands = bands.slice(offset), visibleEma20 = ema20.slice(offset);
   const visibleEma50 = ema50.slice(offset), visibleEma200 = ema200.slice(offset);
   const overlayValues = [
-    ...(show.ema9 ? ema9.slice(offset) : []), ...(show.ema21 ? ema21.slice(offset) : []), ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),\n    ...(show.sma20 ? sma20.slice(offset) : []), ...(show.sma50 ? sma50.slice(offset) : []), ...(show.sma200 ? sma200.slice(offset) : []),
+    ...(show.ema9 ? ema9.slice(offset) : []), ...(show.ema21 ? ema21.slice(offset) : []), ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),
+    ...(show.sma20 ? sma20.slice(offset) : []), ...(show.sma50 ? sma50.slice(offset) : []), ...(show.sma200 ? sma200.slice(offset) : []),
     ...(show.ema200 ? visibleEma200 : []), ...(show.bb ? visibleBands.flatMap(b => b ? [b.upper,b.middle,b.lower] : []) : []),
     ...(show.levels ? levels.map(level => level.price) : []),
     ...(show.trendlines ? trendlines.flatMap(line => [line.start.price, line.end.price]) : []),
@@ -305,7 +307,10 @@ function IndicatorSuite({candles,symbol}){
     <div className="dashboard-grid" style={{marginBottom:0}}><div>
       {toggle('emaFast',`EMA ${periods.emaFast}`,'Short-term trend average',fmt(ef,symbol==='USDJPY'?3:5,periods.emaFast))}
       {toggle('emaSlow',`EMA ${periods.emaSlow}`,'Medium-term trend average',fmt(es,symbol==='USDJPY'?3:5,periods.emaSlow))}
-      {toggle('emaLong',`EMA ${periods.emaLong}`,'Long-term trend filter',fmt(el,symbol==='USDJPY'?3:5,periods.emaLong))}\n      {toggle('sma20','SMA 20','Short-term simple moving average',fmt(s20,symbol==='USDJPY'?3:5,20))}\n      {toggle('sma50','SMA 50','Medium-term simple moving average',fmt(s50,symbol==='USDJPY'?3:5,50))}\n      {toggle('sma200','SMA 200','Long-term simple moving average',fmt(s200,symbol==='USDJPY'?3:5,200))}
+      {toggle('emaLong',`EMA ${periods.emaLong}`,'Long-term trend filter',fmt(el,symbol==='USDJPY'?3:5,periods.emaLong))}
+      {toggle('sma20','SMA 20','Short-term simple moving average',fmt(s20,symbol==='USDJPY'?3:5,20))}
+      {toggle('sma50','SMA 50','Medium-term simple moving average',fmt(s50,symbol==='USDJPY'?3:5,50))}
+      {toggle('sma200','SMA 200','Long-term simple moving average',fmt(s200,symbol==='USDJPY'?3:5,200))}
       {toggle('rsi',`RSI (${periods.rsi})`,'Above 70 overbought · below 30 oversold',fmt(r,2,periods.rsi+1))}
       {toggle('macd','MACD (12, 26, 9)','Momentum line versus signal',m==null?'Insufficient data':`${m.toFixed(6)} / ${fmt(ms,6)}`)}
     </div><div>
