@@ -1054,7 +1054,12 @@ env
         symbol,
         providerSymbol,
         price: result.price,
-        status: "LIVE",
+        status: result.status,
+        freshness: result.freshness,
+        ageSeconds: result.ageSeconds ?? null,
+        providerTimestamp: result.providerTimestamp
+          ? new Date(result.providerTimestamp * 1000).toISOString()
+          : null,
         source: result.source,
         timestamp: new Date().toISOString()
       });
@@ -1128,7 +1133,9 @@ url.searchParams.get("interval") || "5min";
         count: candles.length,
         candles,
         latestCandleAt: candles[candles.length - 1].time,
-        status: "LIVE",
+        status: result.status,
+        freshness: result.freshness,
+        ageSeconds: result.ageSeconds,
         source: result.source,
         timestamp: new Date().toISOString()
       });
@@ -3820,9 +3827,20 @@ const price = Number(data.price);
 if (!Number.isFinite(price) || price <= 0) {
 throw new Error("Twelve Data returned an invalid price");
 }
+const providerTimestamp = marketParseProviderTimestamp(
+  data.timestamp ?? data.time ?? data.datetime
+);
+const freshness = marketPriceFreshness(providerTimestamp);
+if (freshness.status === "STALE") {
+  throw new Error("Twelve Data quote is stale");
+}
 return {
 price,
-source: "Twelve Data"
+source: "Twelve Data",
+providerTimestamp,
+freshness: freshness.freshness,
+status: freshness.status,
+ageSeconds: freshness.ageSeconds
 };
 }
 
@@ -3851,10 +3869,18 @@ Number(data.t) <= 0
 ) {
 throw new Error("Finnhub returned no valid price");
 }
+const providerTimestamp = Number(data.t);
+const freshness = marketPriceFreshness(providerTimestamp);
+if (freshness.status !== "LIVE") {
+  throw new Error("Finnhub quote is stale or has an invalid timestamp");
+}
 return {
 price,
 source: "Finnhub",
-providerTimestamp: Number(data.t)
+providerTimestamp,
+freshness: freshness.freshness,
+status: freshness.status,
+ageSeconds: freshness.ageSeconds
 };
 }
 
@@ -4022,45 +4048,88 @@ return marketValidateCandles(candles);
 }
 
 /* =========================================
-MARKET CANDLE VALIDATION
+MARKET DATA FRESHNESS AND CANDLE VALIDATION
 ========================================= */
-function marketValidateCandles(candles) {
-if (!Array.isArray(candles)) {
-throw new Error("Invalid candle collection");
+function marketParseProviderTimestamp(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    // Provider timestamps may be seconds or milliseconds.
+    return numeric > 100000000000 ? numeric / 1000 : numeric;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed / 1000 : null;
 }
-return candles
-.filter(candle => {
-const timeIsValid =
-Boolean(candle.time) &&
-Number.isFinite(Date.parse(candle.time));
-      const pricesAreValid =
-        Number.isFinite(candle.open) &&
-        candle.open > 0 &&
-        Number.isFinite(candle.high) &&
-        candle.high > 0 &&
-        Number.isFinite(candle.low) &&
-        candle.low > 0 &&
-        Number.isFinite(candle.close) &&
-        candle.close > 0;
 
-      const rangeIsValid =
-        candle.high >= Math.max(
-          candle.open,
-          candle.close,
-          candle.low
-        ) &&
-        candle.low <= Math.min(
-          candle.open,
-          candle.close,
-          candle.high
-        );
+function marketPriceFreshness(providerTimestamp) {
+  if (!Number.isFinite(providerTimestamp) || providerTimestamp <= 0) {
+    return { status: "UNVERIFIED", freshness: "UNVERIFIED", ageSeconds: null };
+  }
+  const ageSeconds = Math.floor(Date.now() / 1000 - providerTimestamp);
+  if (ageSeconds < -30 || ageSeconds > 120) {
+    return { status: "STALE", freshness: "STALE", ageSeconds };
+  }
+  return { status: "LIVE", freshness: "FRESH", ageSeconds: Math.max(0, ageSeconds) };
+}
 
-      return timeIsValid && pricesAreValid && rangeIsValid;
-    })
-    .sort(
-      (a, b) =>
-        Date.parse(a.time) - Date.parse(b.time)
-    );
+function marketValidateCandles(candles) {
+  if (!Array.isArray(candles)) {
+    throw new Error("Invalid candle collection");
+  }
+  const now = Date.now();
+  const byTimestamp = new Map();
+  for (const candle of candles) {
+    const timeMs = Date.parse(candle?.time);
+    const pricesAreValid =
+      Number.isFinite(candle?.open) && candle.open > 0 &&
+      Number.isFinite(candle?.high) && candle.high > 0 &&
+      Number.isFinite(candle?.low) && candle.low > 0 &&
+      Number.isFinite(candle?.close) && candle.close > 0;
+    const volumeIsValid =
+      Number.isFinite(candle?.volume) && candle.volume >= 0;
+    const rangeIsValid = pricesAreValid &&
+      candle.high >= Math.max(candle.open, candle.close, candle.low) &&
+      candle.low <= Math.min(candle.open, candle.close, candle.high);
+    // Reject malformed timestamps and candles dated materially in the future.
+    if (!Number.isFinite(timeMs) || timeMs > now + 60000 ||
+        !pricesAreValid || !volumeIsValid || !rangeIsValid) continue;
+    // Duplicate timestamps are collapsed deterministically (last provider row wins).
+    byTimestamp.set(timeMs, {
+      time: candle.time,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume
+    });
+  }
+  return Array.from(byTimestamp.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(entry => entry[1]);
+}
+
+function marketCandleFreshness(candles, interval, providerSymbol) {
+  const latest = candles[candles.length - 1];
+  const latestMs = Date.parse(latest.time);
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - latestMs) / 1000));
+  const intervalSeconds = {
+    "1min": 60, "5min": 300, "15min": 900, "30min": 1800,
+    "1h": 3600, "4h": 14400, "1day": 86400
+  }[interval] || 300;
+  const utcDay = new Date().getUTCDay();
+  const weekend = utcDay === 0 || utcDay === 6;
+  // FX markets normally close over the weekend; disclose this instead of claiming LIVE.
+  const isCrypto = String(providerSymbol || "").toUpperCase() === "BTC/USD";
+  if (weekend && !isCrypto && ageSeconds <= 72 * 3600) {
+    return { status: "MARKET_CLOSED", freshness: "MARKET_CLOSED", ageSeconds };
+  }
+  const maxAgeSeconds = interval === "1day"
+    ? 4 * 86400
+    : Math.max(intervalSeconds * 3 + 90, 180);
+  if (ageSeconds > maxAgeSeconds) {
+    return { status: "STALE", freshness: "STALE", ageSeconds };
+  }
+  return { status: "LIVE", freshness: "FRESH", ageSeconds };
 }
 
 /* =========================================
@@ -4072,14 +4141,14 @@ env
 ) {
 const providers = [
 {
-name: "Twelve Data",
-enabled: Boolean(env.TWELVE_DATA_API_KEY),
-run: () => marketTwelveDataPrice(providerSymbol, env)
-},
-{
 name: "Finnhub",
 enabled: Boolean(env.FINNHUB_API_KEY),
 run: () => marketFinnhubPrice(providerSymbol, env)
+},
+{
+name: "Twelve Data",
+enabled: Boolean(env.TWELVE_DATA_API_KEY),
+run: () => marketTwelveDataPrice(providerSymbol, env)
 }
 ];
 const errors = [];
@@ -4088,10 +4157,9 @@ if (!provider.enabled) continue;
     try {
       const result = await provider.run();
 
-      return {
-        ...result,
-        status: "LIVE"
-      };
+      // Twelve Data's /price response often has no provider timestamp.
+      // Return it as UNVERIFIED rather than mislabelling it as confirmed LIVE.
+      return result;
 
     } catch (error) {
       console.error(
@@ -4151,6 +4219,7 @@ env
 }
 ];
 const errors = [];
+let staleFallback = null;
 for (const provider of providers) {
 if (!provider.enabled) continue;
     try {
@@ -4160,10 +4229,16 @@ if (!provider.enabled) continue;
         throw new Error("Provider returned no valid candles");
       }
 
-      return {
+      const freshness = marketCandleFreshness(candles, interval, providerSymbol);
+      const candidate = {
         candles,
-        source: provider.name
+        source: provider.name,
+        ...freshness
       };
+      if (freshness.status === "LIVE") return candidate;
+      if (!staleFallback || freshness.ageSeconds < staleFallback.ageSeconds) {
+        staleFallback = candidate;
+      }
 
     } catch (error) {
       console.error(
@@ -4177,6 +4252,7 @@ if (!provider.enabled) continue;
       });
     }
 }
+if (staleFallback) return staleFallback;
 throw new Error(
 errors.length
 ? "All configured historical data providers failed"
