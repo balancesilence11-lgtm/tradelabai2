@@ -243,190 +243,6 @@ user: { id: user.id, email: user.email }
 });
 }
 /* =========================================
-SECURE ACCOUNT DELETION
-Requires password re-authentication, explicit confirmation,
-confirmation of closed external positions, and broker revocation.
-Financial records are retained against a pseudonymized suspended user row.
-========================================= */
-async function deleteAccount(request, env, user) {
-  let body;
-  try {
-    body = await readJson(request);
-  } catch {
-    return json({ ok: false, error: "Invalid request body." }, 400);
-  }
-
-  const password = String(body.password || "");
-  const confirmation = String(body.confirmation || "");
-
-  if (password.length < 12 || password.length > 128) {
-    return json({ ok: false, error: "Enter your current password to confirm deletion." }, 400);
-  }
-  if (confirmation !== "DELETE MY ACCOUNT") {
-    return json({ ok: false, error: "Type DELETE MY ACCOUNT exactly to confirm." }, 400);
-  }
-  if (body.open_positions_closed !== true) {
-    return json({ ok: false, error: "Confirm that all open positions have been closed directly with your brokers before deleting your account." }, 400);
-  }
-  if (body.broker_access_revoked !== true) {
-    return json({ ok: false, error: "Revoke TradeLab AI access from your broker account settings first, then confirm broker access revocation." }, 400);
-  }
-
-  const account = await env.DB.prepare(`
-    SELECT id, email, password_hash, password_salt, status
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-  `).bind(user.id).first();
-
-  if (!account || account.status !== "active") {
-    return json({ ok: false, error: "Account is no longer active." }, 401, {
-      "Set-Cookie": clearSessionCookie()
-    });
-  }
-
-  const suppliedHash = await hashPassword(password, account.password_salt);
-  if (!constantTimeStringEqual(suppliedHash, account.password_hash)) {
-    await logAuthEvent(env, account.id, account.email, "account_deletion_failed");
-    return json({ ok: false, error: "Password confirmation failed." }, 401);
-  }
-
-  // Do not erase the account while locally recorded positions remain open.
-  const [brokerPositions, journalPositions] = await Promise.all([
-    env.DB.prepare(`SELECT COUNT(*) AS total FROM broker_open_positions WHERE user_id = ?`)
-      .bind(account.id).first(),
-    env.DB.prepare(`SELECT COUNT(*) AS total FROM trade_journal WHERE user_id = ? AND LOWER(status) = 'open'`)
-      .bind(account.id).first()
-  ]);
-
-  const openBrokerPositions = Number(brokerPositions?.total || 0);
-  const openJournalTrades = Number(journalPositions?.total || 0);
-  if (openBrokerPositions > 0 || openJournalTrades > 0) {
-    return json({
-      ok: false,
-      code: "OPEN_POSITIONS_REMAIN",
-      error: "Close or resolve all open positions before deleting this account.",
-      openBrokerPositions,
-      openJournalTrades
-    }, 409);
-  }
-
-  // Cancel every active/pending subscription through the existing verified
-  // Flutterwave cancellation path. If provider cancellation cannot be
-  // confirmed, stop before deleting any account data.
-  const subscriptions = await env.DB.prepare(`
-    SELECT id, status, payment_provider, cancel_at_period_end
-    FROM subscriptions
-    WHERE user_id = ? AND status IN ('active', 'pending')
-    ORDER BY created_at DESC
-  `).bind(account.id).all();
-
-  for (const subscription of (subscriptions.results || [])) {
-    if (subscription.status === "active" &&
-        Number(subscription.cancel_at_period_end) === 1 &&
-        subscription.payment_provider === "flutterwave") {
-      continue;
-    }
-
-    if (subscription.status === "active" && subscription.payment_provider !== "flutterwave") {
-      return json({
-        ok: false,
-        code: "SUBSCRIPTION_CANCELLATION_REQUIRED",
-        error: "An active subscription uses an unsupported payment provider. Contact support to cancel it before deleting the account."
-      }, 409);
-    }
-
-    const cancellationRequest = new Request(request.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscription_id: subscription.id })
-    });
-    const cancellationResponse = await cancelBillingSubscription(cancellationRequest, env, user);
-    let cancellationResult = {};
-    try { cancellationResult = await cancellationResponse.json(); } catch {}
-
-    if (!cancellationResponse.ok || cancellationResult.ok !== true) {
-      return json({
-        ok: false,
-        code: "SUBSCRIPTION_CANCELLATION_FAILED",
-        error: "Subscription cancellation could not be confirmed. No account data was deleted.",
-        message: cancellationResult.error || cancellationResult.message || "Please cancel the subscription and retry."
-      }, 502);
-    }
-  }
-
-  const now = new Date().toISOString();
-  const replacementEmail = `deleted-${randomId(16)}@deleted.invalid`;
-  const replacementPasswordHash = randomId(32);
-  const replacementPasswordSalt = randomId(16);
-
-  try {
-    await env.DB.batch([
-      // Child records without cascading foreign keys.
-      env.DB.prepare(`DELETE FROM historical_candles WHERE dataset_id IN (SELECT id FROM historical_datasets WHERE user_id = ?)`)
-        .bind(account.id),
-      env.DB.prepare(`DELETE FROM historical_datasets WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM ai_signal_history WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM trade_journal WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM trade_monitor_events WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM market_scan_history WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM broker_open_positions WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM broker_account_snapshots WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM broker_sync_status WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM ctrader_connections WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM ctrader_oauth_states WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM deriv_oauth WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM deriv_connections WHERE LOWER(user_email) = LOWER(?)`).bind(account.email),
-      env.DB.prepare(`DELETE FROM scheduled_job_runs WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM scheduled_jobs WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM trade_notifications WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM trade_notification_preferences WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM trade_watchlist_symbols WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM trade_watchlists WHERE user_id = ?`).bind(account.id),
-      env.DB.prepare(`DELETE FROM login_attempts WHERE LOWER(email) = LOWER(?)`).bind(account.email),
-      env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(account.id),
-
-      // Retain minimal audit facts, but remove direct identifiers and payload details.
-      env.DB.prepare(`UPDATE auth_events SET user_id = NULL, email = NULL WHERE user_id = ? OR LOWER(email) = LOWER(?)`)
-        .bind(account.id, account.email),
-      env.DB.prepare(`UPDATE billing_audit_log SET user_id = NULL, subscription_id = NULL, transaction_id = NULL, details_json = ? WHERE user_id = ?`)
-        .bind(JSON.stringify({ account_deleted: true }), account.id),
-
-      // Keep financial history for lawful accounting/dispute retention while
-      // removing provider customer/subscription identifiers from local records.
-      env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', cancel_at_period_end = 1, provider_customer_ref = NULL, provider_subscription_ref = NULL, updated_at = ? WHERE user_id = ?`)
-        .bind(now, account.id),
-      env.DB.prepare(`UPDATE payment_transactions SET description = 'Retained financial record for deleted account' WHERE user_id = ?`)
-        .bind(account.id),
-
-      // Keep a non-login tombstone because payment_transactions.user_id is NOT NULL
-      // and ON DELETE CASCADE would otherwise erase financial records.
-      env.DB.prepare(`UPDATE users SET email = ?, password_hash = ?, password_salt = ?, status = 'suspended', updated_at = ? WHERE id = ? AND status = 'active'`)
-        .bind(replacementEmail, replacementPasswordHash, replacementPasswordSalt, now, account.id),
-
-      // Minimal non-identifying record that deletion completed.
-      env.DB.prepare(`INSERT INTO auth_events (user_id, email, event_type, created_at) VALUES (NULL, NULL, 'account_deleted', ?)`)
-        .bind(now)
-    ]);
-
-    return json({
-      ok: true,
-      deleted: true,
-      message: "Your TradeLab AI account has been deleted. Required financial records were retained in a pseudonymized form.",
-      deletedAt: now
-    }, 200, {
-      "Set-Cookie": clearSessionCookie()
-    });
-  } catch (error) {
-    console.error("Account deletion failed:", error?.message || error);
-    return json({
-      ok: false,
-      error: "Account deletion could not be completed. No success was recorded; contact support before retrying."
-    }, 500);
-  }
-}
-
-/* =========================================
 LOGOUT
 ========================================= */
 async function logout(request, env) {
@@ -466,15 +282,6 @@ return login(request, env);
 }
 if (path === "/api/auth/logout" && request.method === "POST") {
 return logout(request, env);
-}
-if (path === "/api/auth/delete-account" && request.method === "POST") {
-const user = await getAuthenticatedUser(request, env);
-if (!user) {
-return json({ ok: false, error: "Authentication required." }, 401, {
-  "Set-Cookie": clearSessionCookie()
-});
-}
-return deleteAccount(request, env, user);
 }
 if (path === "/api/auth/me" && request.method === "GET") {
 const user = await getAuthenticatedUser(request, env);
@@ -1054,12 +861,7 @@ env
         symbol,
         providerSymbol,
         price: result.price,
-        status: result.status,
-        freshness: result.freshness,
-        ageSeconds: result.ageSeconds ?? null,
-        providerTimestamp: result.providerTimestamp
-          ? new Date(result.providerTimestamp * 1000).toISOString()
-          : null,
+        status: "LIVE",
         source: result.source,
         timestamp: new Date().toISOString()
       });
@@ -1133,9 +935,7 @@ url.searchParams.get("interval") || "5min";
         count: candles.length,
         candles,
         latestCandleAt: candles[candles.length - 1].time,
-        status: result.status,
-        freshness: result.freshness,
-        ageSeconds: result.ageSeconds,
+        status: "LIVE",
         source: result.source,
         timestamp: new Date().toISOString()
       });
@@ -1156,6 +956,146 @@ url.searchParams.get("interval") || "5min";
 }
 return null;
 }
+
+/* =========================================
+PHASE 6 — SIGNAL RECORDING AND OUTCOME VALIDATION
+========================================= */
+async function settlePendingSignalEvents(env, userId) {
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const pending = await env.DB.prepare(`
+    SELECT id, symbol, timeframe, signal, entry, stop_loss,
+           take_profit_json, generated_at
+    FROM ai_signal_events
+    WHERE user_id = ? AND status = 'PENDING'
+      AND (last_checked_at IS NULL OR last_checked_at < ?)
+    ORDER BY generated_at DESC
+    LIMIT 10
+  `).bind(userId, cutoff).all();
+
+  for (const event of pending.results || []) {
+    const providerSymbol = SYMBOLS[String(event.symbol || '').toUpperCase()];
+    if (!providerSymbol || !ALLOWED_INTERVALS.includes(event.timeframe)) continue;
+    try {
+      const candlesResult = await marketGetCandles(
+        providerSymbol, event.timeframe, 500, env
+      );
+      const generatedAt = Date.parse(event.generated_at);
+      const entry = Number(event.entry);
+      const stop = Number(event.stop_loss);
+      const targets = JSON.parse(event.take_profit_json || '[]');
+      const target1 = Number(Array.isArray(targets) ? targets[0] : targets?.TP1);
+      if (!Number.isFinite(generatedAt) || !Number.isFinite(entry) ||
+          !Number.isFinite(stop) || !Number.isFinite(target1)) continue;
+
+      let resolution = null;
+      for (const candle of candlesResult.candles) {
+        const candleAt = Date.parse(candle.time);
+        if (!Number.isFinite(candleAt) || candleAt <= generatedAt) continue;
+        const high = Number(candle.high);
+        const low = Number(candle.low);
+        const isBuy = event.signal === 'BUY';
+        const stopHit = isBuy ? low <= stop : high >= stop;
+        const targetHit = isBuy ? high >= target1 : low <= target1;
+        if (stopHit && targetHit) {
+          resolution = {
+            status: 'AMBIGUOUS', outcome: null, exitPrice: null,
+            rMultiple: null,
+            reason: 'TP1 and stop-loss were both touched within the same candle; intrabar order is unknown.'
+          };
+          break;
+        }
+        if (stopHit) {
+          resolution = {
+            status: 'RESOLVED', outcome: 'LOSS', exitPrice: stop,
+            rMultiple: -1, reason: 'Stop-loss touched after signal generation.'
+          };
+          break;
+        }
+        if (targetHit) {
+          resolution = {
+            status: 'RESOLVED', outcome: 'WIN', exitPrice: target1,
+            rMultiple: 1, reason: 'Take-profit 1 touched after signal generation.'
+          };
+          break;
+        }
+      }
+
+      const checkedAt = new Date().toISOString();
+      if (resolution) {
+        await env.DB.prepare(`
+          UPDATE ai_signal_events
+          SET status = ?, outcome = ?, exit_price = ?, r_multiple = ?,
+              resolved_at = ?, resolution_reason = ?, last_checked_at = ?
+          WHERE id = ? AND user_id = ? AND status = 'PENDING'
+        `).bind(
+          resolution.status, resolution.outcome, resolution.exitPrice,
+          resolution.rMultiple,
+          resolution.status === 'RESOLVED' ? checkedAt : null,
+          resolution.reason, checkedAt, event.id, userId
+        ).run();
+      } else {
+        await env.DB.prepare(`
+          UPDATE ai_signal_events SET last_checked_at = ?
+          WHERE id = ? AND user_id = ? AND status = 'PENDING'
+        `).bind(checkedAt, event.id, userId).run();
+      }
+    } catch (error) {
+      console.warn('Signal outcome validation deferred:', event.id, error.message);
+    }
+  }
+}
+
+async function getSignalPerformance(env, user, url) {
+  const requestedLimit = Number(url.searchParams.get('limit') || 100);
+  const limit = Number.isSafeInteger(requestedLimit)
+    ? Math.min(100, Math.max(1, requestedLimit)) : 100;
+  try {
+    await settlePendingSignalEvents(env, user.id);
+    const result = await env.DB.prepare(`
+      SELECT id, symbol, timeframe, signal, confluence, entry, stop_loss,
+             take_profit_json, generated_at, status, outcome, exit_price,
+             r_multiple, resolved_at, resolution_reason
+      FROM ai_signal_events
+      WHERE user_id = ?
+      ORDER BY generated_at DESC
+      LIMIT ?
+    `).bind(user.id, limit).all();
+    const events = result.results || [];
+    const aggregate = await env.DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'RESOLVED' AND outcome IN ('WIN', 'LOSS') THEN 1 ELSE 0 END) AS resolved,
+        SUM(CASE WHEN status = 'RESOLVED' AND outcome = 'WIN' THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN status = 'RESOLVED' AND outcome = 'LOSS' THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN status = 'AMBIGUOUS' THEN 1 ELSE 0 END) AS ambiguous,
+        SUM(CASE WHEN status = 'RESOLVED' THEN COALESCE(r_multiple, 0) ELSE 0 END) AS total_r,
+        AVG(CASE WHEN status = 'RESOLVED' THEN r_multiple ELSE NULL END) AS average_r
+      FROM ai_signal_events WHERE user_id = ?
+    `).bind(user.id).first();
+    const resolvedCount = Number(aggregate?.resolved || 0);
+    const wins = Number(aggregate?.wins || 0);
+    const metrics = {
+      total: Number(aggregate?.total || 0),
+      resolved: resolvedCount,
+      wins,
+      losses: Number(aggregate?.losses || 0),
+      pending: Number(aggregate?.pending || 0),
+      ambiguous: Number(aggregate?.ambiguous || 0),
+      winRate: resolvedCount ? Number((wins / resolvedCount * 100).toFixed(2)) : null,
+      averageR: resolvedCount ? Number(Number(aggregate.average_r || 0).toFixed(3)) : null,
+      totalR: Number(Number(aggregate?.total_r || 0).toFixed(3))
+    };
+    return json({ ok: true, events, metrics, validation: 'TP1 (+1R) versus stop-loss (-1R)' });
+  } catch (error) {
+    console.error('Signal performance retrieval failed:', error.message);
+    return json({
+      ok: false,
+      error: 'Signal performance storage is not configured. Apply the Phase 6 D1 migration first.'
+    }, 503);
+  }
+}
+
 /* =========================================
 AI SIGNAL API
 ========================================= */
@@ -1321,6 +1261,63 @@ error: "Method not allowed"
         message: "Signal history table is not configured"
       });
     }
+}
+if (path === "/api/ai/signals/record") {
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405, { Allow: 'POST' });
+    if (!validOrigin(request, url)) return json({ error: 'Request origin rejected' }, 403);
+    let body;
+    try { body = await readJson(request); }
+    catch { return json({ ok: false, error: 'Invalid signal payload' }, 400); }
+
+    const symbol = String(body.symbol || '').toUpperCase().replace('/', '');
+    const timeframe = String(body.timeframe || '').toLowerCase();
+    const signal = String(body.signal || '').toUpperCase();
+    const confluence = Number(body.confluence);
+    const entry = Number(body.entry);
+    const stopLoss = Number(body.stopLoss);
+    const takeProfit = Array.isArray(body.takeProfit) ? body.takeProfit.map(Number) : [];
+    const generatedAtMs = Date.parse(body.generatedAt);
+    const providerSymbol = SYMBOLS[symbol];
+
+    if (!providerSymbol || !ALLOWED_INTERVALS.includes(timeframe) || !['BUY', 'SELL'].includes(signal) ||
+        !Number.isFinite(confluence) || confluence < 0 || confluence > 100 ||
+        !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(stopLoss) || stopLoss <= 0 ||
+        !takeProfit.length || !Number.isFinite(takeProfit[0]) || takeProfit[0] <= 0 ||
+        !Number.isFinite(generatedAtMs) || generatedAtMs > Date.now() + 60000 || generatedAtMs < Date.now() - 7 * 86400000) {
+      return json({ ok: false, error: 'Signal fields are invalid or outside the permitted range.' }, 400);
+    }
+    const risk = signal === 'BUY' ? entry - stopLoss : stopLoss - entry;
+    const reward = signal === 'BUY' ? takeProfit[0] - entry : entry - takeProfit[0];
+    if (!(risk > 0) || !(reward > 0)) {
+      return json({ ok: false, error: 'Entry, stop-loss and TP1 levels do not match the signal direction.' }, 400);
+    }
+    const id = crypto.randomUUID();
+    const timestamp = new Date(generatedAtMs).toISOString();
+    try {
+      await env.DB.prepare(`
+        INSERT INTO ai_signal_events (
+          id, user_id, symbol, timeframe, signal, confluence, entry,
+          stop_loss, take_profit_json, generated_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+        ON CONFLICT(user_id, symbol, timeframe, signal, generated_at) DO NOTHING
+      `).bind(
+        id, user.id, symbol, timeframe, signal, Math.round(confluence),
+        entry, stopLoss, JSON.stringify(takeProfit), timestamp
+      ).run();
+      const saved = await env.DB.prepare(`
+        SELECT id, status FROM ai_signal_events
+        WHERE user_id = ? AND symbol = ? AND timeframe = ? AND signal = ? AND generated_at = ?
+        LIMIT 1
+      `).bind(user.id, symbol, timeframe, signal, timestamp).first();
+      return json({ ok: true, id: saved?.id || id, status: saved?.status || 'PENDING', duplicate: saved?.id !== id });
+    } catch (error) {
+      console.error('Signal event recording failed:', error.message);
+      return json({ ok: false, error: 'Signal history storage is not configured. Apply the Phase 6 D1 migration first.' }, 503);
+    }
+}
+if (path === "/api/ai/signals/performance") {
+    if (request.method !== 'GET') return json({ ok: false, error: 'Method not allowed' }, 405, { Allow: 'GET' });
+    return getSignalPerformance(env, user, url);
 }
 return json({
 ok: false,
@@ -3827,20 +3824,9 @@ const price = Number(data.price);
 if (!Number.isFinite(price) || price <= 0) {
 throw new Error("Twelve Data returned an invalid price");
 }
-const providerTimestamp = marketParseProviderTimestamp(
-  data.timestamp ?? data.time ?? data.datetime
-);
-const freshness = marketPriceFreshness(providerTimestamp);
-if (freshness.status === "STALE") {
-  throw new Error("Twelve Data quote is stale");
-}
 return {
 price,
-source: "Twelve Data",
-providerTimestamp,
-freshness: freshness.freshness,
-status: freshness.status,
-ageSeconds: freshness.ageSeconds
+source: "Twelve Data"
 };
 }
 
@@ -3869,18 +3855,10 @@ Number(data.t) <= 0
 ) {
 throw new Error("Finnhub returned no valid price");
 }
-const providerTimestamp = Number(data.t);
-const freshness = marketPriceFreshness(providerTimestamp);
-if (freshness.status !== "LIVE") {
-  throw new Error("Finnhub quote is stale or has an invalid timestamp");
-}
 return {
 price,
 source: "Finnhub",
-providerTimestamp,
-freshness: freshness.freshness,
-status: freshness.status,
-ageSeconds: freshness.ageSeconds
+providerTimestamp: Number(data.t)
 };
 }
 
@@ -4048,88 +4026,45 @@ return marketValidateCandles(candles);
 }
 
 /* =========================================
-MARKET DATA FRESHNESS AND CANDLE VALIDATION
+MARKET CANDLE VALIDATION
 ========================================= */
-function marketParseProviderTimestamp(value) {
-  if (value === undefined || value === null || value === "") return null;
-  const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 0) {
-    // Provider timestamps may be seconds or milliseconds.
-    return numeric > 100000000000 ? numeric / 1000 : numeric;
-  }
-  const parsed = Date.parse(String(value));
-  return Number.isFinite(parsed) ? parsed / 1000 : null;
-}
-
-function marketPriceFreshness(providerTimestamp) {
-  if (!Number.isFinite(providerTimestamp) || providerTimestamp <= 0) {
-    return { status: "UNVERIFIED", freshness: "UNVERIFIED", ageSeconds: null };
-  }
-  const ageSeconds = Math.floor(Date.now() / 1000 - providerTimestamp);
-  if (ageSeconds < -30 || ageSeconds > 120) {
-    return { status: "STALE", freshness: "STALE", ageSeconds };
-  }
-  return { status: "LIVE", freshness: "FRESH", ageSeconds: Math.max(0, ageSeconds) };
-}
-
 function marketValidateCandles(candles) {
-  if (!Array.isArray(candles)) {
-    throw new Error("Invalid candle collection");
-  }
-  const now = Date.now();
-  const byTimestamp = new Map();
-  for (const candle of candles) {
-    const timeMs = Date.parse(candle?.time);
-    const pricesAreValid =
-      Number.isFinite(candle?.open) && candle.open > 0 &&
-      Number.isFinite(candle?.high) && candle.high > 0 &&
-      Number.isFinite(candle?.low) && candle.low > 0 &&
-      Number.isFinite(candle?.close) && candle.close > 0;
-    const volumeIsValid =
-      Number.isFinite(candle?.volume) && candle.volume >= 0;
-    const rangeIsValid = pricesAreValid &&
-      candle.high >= Math.max(candle.open, candle.close, candle.low) &&
-      candle.low <= Math.min(candle.open, candle.close, candle.high);
-    // Reject malformed timestamps and candles dated materially in the future.
-    if (!Number.isFinite(timeMs) || timeMs > now + 60000 ||
-        !pricesAreValid || !volumeIsValid || !rangeIsValid) continue;
-    // Duplicate timestamps are collapsed deterministically (last provider row wins).
-    byTimestamp.set(timeMs, {
-      time: candle.time,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-      volume: candle.volume
-    });
-  }
-  return Array.from(byTimestamp.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(entry => entry[1]);
+if (!Array.isArray(candles)) {
+throw new Error("Invalid candle collection");
 }
+return candles
+.filter(candle => {
+const timeIsValid =
+Boolean(candle.time) &&
+Number.isFinite(Date.parse(candle.time));
+      const pricesAreValid =
+        Number.isFinite(candle.open) &&
+        candle.open > 0 &&
+        Number.isFinite(candle.high) &&
+        candle.high > 0 &&
+        Number.isFinite(candle.low) &&
+        candle.low > 0 &&
+        Number.isFinite(candle.close) &&
+        candle.close > 0;
 
-function marketCandleFreshness(candles, interval, providerSymbol) {
-  const latest = candles[candles.length - 1];
-  const latestMs = Date.parse(latest.time);
-  const ageSeconds = Math.max(0, Math.floor((Date.now() - latestMs) / 1000));
-  const intervalSeconds = {
-    "1min": 60, "5min": 300, "15min": 900, "30min": 1800,
-    "1h": 3600, "4h": 14400, "1day": 86400
-  }[interval] || 300;
-  const utcDay = new Date().getUTCDay();
-  const weekend = utcDay === 0 || utcDay === 6;
-  // FX markets normally close over the weekend; disclose this instead of claiming LIVE.
-  const isCrypto = String(providerSymbol || "").toUpperCase() === "BTC/USD";
-  if (weekend && !isCrypto && ageSeconds <= 72 * 3600) {
-    return { status: "MARKET_CLOSED", freshness: "MARKET_CLOSED", ageSeconds };
-  }
-  const maxAgeSeconds = interval === "1day"
-    ? 4 * 86400
-    : Math.max(intervalSeconds * 3 + 90, 180);
-  if (ageSeconds > maxAgeSeconds) {
-    return { status: "STALE", freshness: "STALE", ageSeconds };
-  }
-  return { status: "LIVE", freshness: "FRESH", ageSeconds };
+      const rangeIsValid =
+        candle.high >= Math.max(
+          candle.open,
+          candle.close,
+          candle.low
+        ) &&
+        candle.low <= Math.min(
+          candle.open,
+          candle.close,
+          candle.high
+        );
+
+      return timeIsValid && pricesAreValid && rangeIsValid;
+    })
+    .sort(
+      (a, b) =>
+        Date.parse(a.time) - Date.parse(b.time)
+    );
 }
 
 /* =========================================
@@ -4141,14 +4076,14 @@ env
 ) {
 const providers = [
 {
-name: "Finnhub",
-enabled: Boolean(env.FINNHUB_API_KEY),
-run: () => marketFinnhubPrice(providerSymbol, env)
-},
-{
 name: "Twelve Data",
 enabled: Boolean(env.TWELVE_DATA_API_KEY),
 run: () => marketTwelveDataPrice(providerSymbol, env)
+},
+{
+name: "Finnhub",
+enabled: Boolean(env.FINNHUB_API_KEY),
+run: () => marketFinnhubPrice(providerSymbol, env)
 }
 ];
 const errors = [];
@@ -4157,9 +4092,10 @@ if (!provider.enabled) continue;
     try {
       const result = await provider.run();
 
-      // Twelve Data's /price response often has no provider timestamp.
-      // Return it as UNVERIFIED rather than mislabelling it as confirmed LIVE.
-      return result;
+      return {
+        ...result,
+        status: "LIVE"
+      };
 
     } catch (error) {
       console.error(
@@ -4219,7 +4155,6 @@ env
 }
 ];
 const errors = [];
-let staleFallback = null;
 for (const provider of providers) {
 if (!provider.enabled) continue;
     try {
@@ -4229,16 +4164,10 @@ if (!provider.enabled) continue;
         throw new Error("Provider returned no valid candles");
       }
 
-      const freshness = marketCandleFreshness(candles, interval, providerSymbol);
-      const candidate = {
+      return {
         candles,
-        source: provider.name,
-        ...freshness
+        source: provider.name
       };
-      if (freshness.status === "LIVE") return candidate;
-      if (!staleFallback || freshness.ageSeconds < staleFallback.ageSeconds) {
-        staleFallback = candidate;
-      }
 
     } catch (error) {
       console.error(
@@ -4252,7 +4181,6 @@ if (!provider.enabled) continue;
       });
     }
 }
-if (staleFallback) return staleFallback;
 throw new Error(
 errors.length
 ? "All configured historical data providers failed"
@@ -8947,39 +8875,24 @@ env.TWELVE_DATA_API_KEY || ""
         streamProviderSymbol
     );
 
-    // Cloudflare Workers' outbound WebSocket fetch uses an HTTPS URL with
-    // Upgrade: websocket. Do not pass a WSS URL to fetch(). Authenticate via
-    // Twelve Data's supported API-key header so the secret is not in the URL.
-    const response = await fetch(
-        "https://ws.twelvedata.com/v1/quotes/price",
-        {
-            headers: {
-                Upgrade: "websocket",
-                "X-TD-APIKEY": apiKey
-            }
+    const websocketUrl =
+        "wss://ws.twelvedata.com/v1/quotes/price" +
+        `?apikey=${encodeURIComponent(apiKey)}`;
+
+    const response = await fetch(websocketUrl, {
+        headers: {
+            Upgrade: "websocket"
         }
-    );
+    });
 
     if (response.status !== 101 || !response.webSocket) {
-        let providerResponse = "";
-        try {
-            providerResponse = (await response.text()).slice(0, 500);
-        } catch {}
-
-        // Never log credentials, authorization headers, or request URLs.
-        console.error("Twelve Data WebSocket handshake rejected:", {
-            status: response.status,
-            statusText: response.statusText,
-            response: providerResponse
-        });
-
         throw new Error(
-            `Twelve Data WebSocket handshake failed (HTTP ${response.status}). ` +
-            "Check the TWELVE_DATA_API_KEY secret and your Twelve Data WebSocket access."
+            "Could not establish Twelve Data WebSocket connection."
         );
     }
 
     const upstream = response.webSocket;
+
     upstream.accept();
 
     return {
@@ -9038,26 +8951,11 @@ const url = new URL(request.url);
         let closed = false;
         let messageCount = 0;
         let messageWindow = Date.now();
-        let lastProviderMessageAt = Date.now();
-        let lastPriceUpdateAt = null;
-        let providerMessageCount = 0;
-        let priceUpdateCount = 0;
-        let heartbeatTimer = null;
-        let providerHeartbeatTimer = null;
 
         function closeConnections(code = 1000, reason = "Connection closed") {
             if (closed) return;
 
             closed = true;
-
-            if (heartbeatTimer !== null) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-            }
-            if (providerHeartbeatTimer !== null) {
-                clearInterval(providerHeartbeatTimer);
-                providerHeartbeatTimer = null;
-            }
 
             try {
                 server.close(code, reason);
@@ -9071,9 +8969,6 @@ const url = new URL(request.url);
         // Forward provider price updates to the authenticated client.
         upstream.addEventListener("message", event => {
             if (closed) return;
-
-            lastProviderMessageAt = Date.now();
-            providerMessageCount++;
 
             let data;
 
@@ -9094,21 +8989,10 @@ const url = new URL(request.url);
                 data.event === "price" ||
                 data.status === "ok"
             ) {
-                const receivedAt = new Date().toISOString();
-                const isPriceUpdate = data.event === "price";
-
-                if (isPriceUpdate) {
-                    lastPriceUpdateAt = Date.now();
-                    priceUpdateCount++;
-                }
-
                 streamSend(server, {
                     type: "market_update",
                     data,
-                    receivedAt,
-                    streamStatus: "CONNECTED",
-                    quoteStatus: isPriceUpdate ? "LIVE_RECEIVED" : "STATUS",
-                    provider: "twelve_data"
+                    receivedAt: new Date().toISOString()
                 });
 
                 return;
@@ -9232,40 +9116,6 @@ const url = new URL(request.url);
                 "Client connection error"
             );
         });
-
-        // Twelve Data recommends an application heartbeat approximately
-        // every 10 seconds to keep the upstream provider connection stable.
-        providerHeartbeatTimer = setInterval(() => {
-            if (closed || upstream.readyState !== 1) return;
-            try {
-                upstream.send(JSON.stringify({ action: "heartbeat" }));
-            } catch (error) {
-                console.error("Twelve Data heartbeat send failed:", error?.message || error);
-            }
-        }, 10000);
-
-        // Keep clients informed even when a market is quiet or closed.
-        // A quiet market is not treated as a broken connection.
-        heartbeatTimer = setInterval(() => {
-            if (closed) return;
-
-            const now = Date.now();
-            streamSend(server, {
-                type: "stream_heartbeat",
-                streamStatus: "CONNECTED",
-                provider: "twelve_data",
-                serverTime: new Date(now).toISOString(),
-                lastProviderMessageAt: new Date(lastProviderMessageAt).toISOString(),
-                lastPriceUpdateAt: lastPriceUpdateAt
-                    ? new Date(lastPriceUpdateAt).toISOString()
-                    : null,
-                providerMessageCount,
-                priceUpdateCount,
-                priceUpdateAgeSeconds: lastPriceUpdateAt === null
-                    ? null
-                    : Math.max(0, Math.floor((now - lastPriceUpdateAt) / 1000))
-            });
-        }, MARKET_STREAM_CONFIG.HEARTBEAT_INTERVAL_MS);
 
         // Subscribe only to the symbols validated by the Worker.
         upstream.send(JSON.stringify({
@@ -9978,7 +9828,7 @@ async function routeRequest(request, env, ctx) {
       if (access.response) return access.response;
       const user = access.user;
 
-      if (path === "/api/ai/signals" || path === "/api/ai/signals/history") {
+      if (["/api/ai/signals", "/api/ai/signals/history", "/api/ai/signals/record", "/api/ai/signals/performance"].includes(path)) {
         return await handleAISignals(request, env, url, user);
       }
       if (path.startsWith("/api/historical/")) {
