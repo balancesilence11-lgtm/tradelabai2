@@ -77,7 +77,7 @@ const navigation = [
 ];
 
 function CandlestickChart({ candles, loading, error, symbol }) {
-  const [show, setShow] = useState({ ema9: true, ema21: true, ema20: false, ema50: true, ema200: true, sma20: false, sma50: false, sma200: false, bb: true, levels: true, trendlines: true, structure: true });
+  const [show, setShow] = useState({ ema9: true, ema21: true, ema20: false, ema50: true, ema200: true, sma20: false, sma50: false, sma200: false, bb: true, levels: true, trendlines: true, structure: true, rsi: true, macd: true });
   const [visibleCount, setVisibleCount] = useState(100);
   const [pointer, setPointer] = useState(null);
   if (loading) return <div className="empty">Loading historical candles…</div>;
@@ -91,6 +91,10 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const ema9 = calcEMA(closes, 9), ema21 = calcEMA(closes, 21), ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);
   const sma20 = calcSMA(closes,20), sma50 = calcSMA(closes,50), sma200 = calcSMA(closes,200);
   const bands = calcBollinger(closes, 20, 2);
+  const rsiSeries = calcRSI(closes, 14);
+  const macdSeries = calcMACD(closes);
+  const visibleRsi = rsiSeries.slice(offset);
+  const visibleMacd = { line: macdSeries.line.slice(offset), signal: macdSeries.signal.slice(offset), histogram: macdSeries.histogram.slice(offset) };
   const levels = detectSupportResistance(candles.slice(-180));
   const swings = detectSwingPoints(visible);
   const trendlines = buildTrendlines(swings);
@@ -122,13 +126,14 @@ function CandlestickChart({ candles, loading, error, symbol }) {
     return v == null || !Number.isFinite(v) ? null : `${i === 0 || !visibleBands[i - 1]?.[key] ? 'M' : 'L'} ${xAt(i)} ${y(v)}`;
   }).filter(Boolean).join(' ');
   const setOverlay = key => setShow(old => ({ ...old, [key]: !old[key] }));
+  const panelPath = (values, panelY, panelHeight, panelMin, panelMax) => values.map((v,i) => v == null || !Number.isFinite(v) ? null : `${i === 0 || values[i - 1] == null ? 'M' : 'L'} ${xAt(i)} ${panelY + ((panelMax - v) / (panelMax - panelMin)) * panelHeight}`).filter(Boolean).join(' ');
   const control = (key, label, color) => <label key={key} style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:10,color,cursor:'pointer'}}><input type="checkbox" checked={show[key]} onChange={() => setOverlay(key)} />{label}</label>;
 
   return <div style={{width:'100%',height:'100%',display:'flex',flexDirection:'column',gap:7}}>
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
       <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
         {control('ema9','EMA 9','#fb923c')}{control('ema21','EMA 21','#f472b6')}{control('ema20','EMA 20','#e879f9')}{control('ema50','EMA 50','#38bdf8')}
-        {control('ema200','EMA 200','#f59e0b')}{control('sma20','SMA 20','#a3e635')}{control('sma50','SMA 50','#22d3ee')}{control('sma200','SMA 200','#facc15')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}{control('trendlines','Trendlines','#c4b5fd')}{control('structure','BOS / CHoCH','#facc15')}
+        {control('ema200','EMA 200','#f59e0b')}{control('sma20','SMA 20','#a3e635')}{control('sma50','SMA 50','#22d3ee')}{control('sma200','SMA 200','#facc15')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}{control('trendlines','Trendlines','#c4b5fd')}{control('structure','BOS / CHoCH','#facc15')}{control('rsi','RSI panel','#c084fc')}{control('macd','MACD panel','#38bdf8')}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:5}}>
         <button className="period-btn" onClick={() => {setVisibleCount(n => Math.max(20,n-20));setPointer(null);}} title="Zoom in">＋</button>
@@ -136,7 +141,7 @@ function CandlestickChart({ candles, loading, error, symbol }) {
         <button className="period-btn" onClick={() => {setVisibleCount(100);setPointer(null);}}>Reset</button>
       </div>
     </div>
-    <div style={{flex:1,minHeight:0,position:'relative'}}>
+    <div style={{flex:'1 1 310px',minHeight:260,position:'relative'}}>
       <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label={`${symbol} candlestick chart with technical overlays`}
         onMouseMove={e => { const rect=e.currentTarget.getBoundingClientRect(); const ratio=(e.clientX-rect.left)/rect.width; const index=Math.max(0,Math.min(visible.length-1,Math.floor(((ratio*width)-left)/plotWidth*visible.length))); const py=(e.clientY-rect.top)/rect.height*height; setPointer({index,py}); }}
         onMouseLeave={() => setPointer(null)}>
@@ -159,6 +164,23 @@ function CandlestickChart({ candles, loading, error, symbol }) {
         <text x={width-right} y={height-8} fill="#8290a8" fontSize="11" textAnchor="end">{visible[visible.length-1]?.time || ''}</text>
       </svg>
     </div>
+    {show.rsi && <div style={{flex:'0 0 112px',minHeight:112,borderTop:'1px solid #26364e',paddingTop:4}}>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#c4b5fd',padding:'0 8px 2px'}}><strong>RSI (14)</strong><span>{visibleRsi.filter(v=>v!=null).at(-1)?.toFixed(2) ?? 'Waiting for sufficient candles'}</span></div>
+      <svg viewBox={`0 0 ${width} 92`} width="100%" height="88" preserveAspectRatio="none" role="img" aria-label={`${symbol} RSI 14 indicator`}>
+        {[30,50,70].map(level=>{const py=8+((100-level)/100)*65;return <g key={level}><line x1={left} x2={width-right} y1={py} y2={py} stroke={level===50?'#334155':'#64748b'} strokeDasharray={level===50?'2 5':'5 4'} opacity="0.8"/><text x={left-8} y={py+3} fill="#8290a8" fontSize="10" textAnchor="end">{level}</text></g>;})}
+        <path d={panelPath(visibleRsi,8,65,0,100)} fill="none" stroke="#c084fc" strokeWidth="2"/>
+        <text x={left} y="88" fill="#8290a8" fontSize="9">{visible[0]?.time || ''}</text><text x={width-right} y="88" fill="#8290a8" fontSize="9" textAnchor="end">{visible.at(-1)?.time || ''}</text>
+      </svg>
+    </div>}
+    {show.macd && <div style={{flex:'0 0 125px',minHeight:125,borderTop:'1px solid #26364e',paddingTop:4}}>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:10,padding:'0 8px 2px'}}><strong style={{color:'#38bdf8'}}>MACD (12, 26, 9)</strong><span style={{color:'#8290a8'}}>MACD <b style={{color:'#38bdf8'}}>{visibleMacd.line.filter(v=>v!=null).at(-1)?.toFixed(6) ?? '—'}</b> · Signal <b style={{color:'#f59e0b'}}>{visibleMacd.signal.filter(v=>v!=null).at(-1)?.toFixed(6) ?? '—'}</b></span></div>
+      {(() => {const all=[...visibleMacd.line,...visibleMacd.signal,...visibleMacd.histogram].filter(v=>v!=null&&Number.isFinite(v));const bound=Math.max(...all.map(Math.abs),1e-8)*1.15;const py=v=>8+((bound-v)/(2*bound))*78;const zero=py(0);return <svg viewBox={`0 0 ${width} 92`} width="100%" height="96" preserveAspectRatio="none" role="img" aria-label={`${symbol} MACD line, signal and histogram`}>
+        <line x1={left} x2={width-right} y1={zero} y2={zero} stroke="#64748b" strokeDasharray="4 4"/>
+        {visibleMacd.histogram.map((v,i)=>v==null?null:<rect key={`hist-${i}`} x={xAt(i)-Math.max(1,candleWidth/2)} y={Math.min(zero,py(v))} width={Math.max(1,candleWidth)} height={Math.max(1,Math.abs(zero-py(v)))} fill={v>=0?'#13c99b':'#fb7185'} opacity="0.7"/>)}
+        <path d={panelPath(visibleMacd.line,8,78,-bound,bound)} fill="none" stroke="#38bdf8" strokeWidth="1.8"/><path d={panelPath(visibleMacd.signal,8,78,-bound,bound)} fill="none" stroke="#f59e0b" strokeWidth="1.6"/>
+        <text x={left} y="90" fill="#8290a8" fontSize="9">{visible[0]?.time || ''}</text><text x={width-right} y="90" fill="#8290a8" fontSize="9" textAnchor="end">{visible.at(-1)?.time || ''}</text>
+      </svg>;})()}
+    </div>}
     <div className="muted">Showing {visible.length} of {candles.length} candles · Hover over chart for OHLC crosshair · use + / − to zoom. {structure.event ? `Latest structure: ${structure.event.label} at ${structure.event.level.toFixed(decimals)}.` : 'No confirmed BOS/CHoCH break in the visible window.'}</div>
   </div>;
 }
@@ -4459,7 +4481,7 @@ function App() {
         .card-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:10px}.card-heading h3{font-size:14px;margin:0;color:#f1f5f9}
         .chart-price{font-size:23px;font-weight:700;margin-bottom:5px}.periods{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
         .period-btn{background:#1c2a40;border:0;color:#9ba9bd;border-radius:5px;padding:6px 9px;font-size:11px}.period-btn.active{background:#087d69;color:white}
-        .chart-wrap{width:100%;height:270px}.market-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #26364e;gap:10px;cursor:pointer}
+        .chart-wrap{width:100%;height:560px}.market-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #26364e;gap:10px;cursor:pointer}
         .market-row:last-child{border-bottom:0}.market-row.selected{background:#1b3044;margin:0 -9px;padding:12px 9px;border-radius:6px}
         .market-symbol{font-size:12px;font-weight:700}.market-name{color:#8290a8;font-size:10px;margin-top:4px}.market-price{font-size:12px;text-align:right}.market-change{font-size:10px;margin-top:4px;text-align:right}
         .search-box{width:100%;padding:10px;background:#0c1728;border:1px solid #2b3b52;color:white;border-radius:6px;outline:none;margin-bottom:8px;font-size:12px}
