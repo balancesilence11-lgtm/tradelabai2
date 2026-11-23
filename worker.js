@@ -8958,8 +8958,21 @@ env.TWELVE_DATA_API_KEY || ""
     });
 
     if (response.status !== 101 || !response.webSocket) {
+        let providerResponse = "";
+        try {
+            providerResponse = (await response.text()).slice(0, 500);
+        } catch {}
+
+        // Log provider diagnostics without logging the API key or request URL.
+        console.error("Twelve Data WebSocket handshake rejected:", {
+            status: response.status,
+            statusText: response.statusText,
+            response: providerResponse
+        });
+
         throw new Error(
-            "Could not establish Twelve Data WebSocket connection."
+            `Twelve Data WebSocket handshake failed (HTTP ${response.status}). ` +
+            "Check the TWELVE_DATA_API_KEY secret and your Twelve Data WebSocket access."
         );
     }
 
@@ -9028,6 +9041,7 @@ const url = new URL(request.url);
         let providerMessageCount = 0;
         let priceUpdateCount = 0;
         let heartbeatTimer = null;
+        let providerHeartbeatTimer = null;
 
         function closeConnections(code = 1000, reason = "Connection closed") {
             if (closed) return;
@@ -9037,6 +9051,10 @@ const url = new URL(request.url);
             if (heartbeatTimer !== null) {
                 clearInterval(heartbeatTimer);
                 heartbeatTimer = null;
+            }
+            if (providerHeartbeatTimer !== null) {
+                clearInterval(providerHeartbeatTimer);
+                providerHeartbeatTimer = null;
             }
 
             try {
@@ -9212,6 +9230,17 @@ const url = new URL(request.url);
                 "Client connection error"
             );
         });
+
+        // Twelve Data recommends an application heartbeat approximately
+        // every 10 seconds to keep the upstream provider connection stable.
+        providerHeartbeatTimer = setInterval(() => {
+            if (closed || upstream.readyState !== 1) return;
+            try {
+                upstream.send(JSON.stringify({ action: "heartbeat" }));
+            } catch (error) {
+                console.error("Twelve Data heartbeat send failed:", error?.message || error);
+            }
+        }, 10000);
 
         // Keep clients informed even when a market is quiet or closed.
         // A quiet market is not treated as a broken connection.
