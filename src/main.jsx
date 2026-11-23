@@ -947,13 +947,16 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
 
   if (!analysis.ready) {
     return (
-      <div className="card">
-        <div className="card-heading">
-          <h3>TradeLab AI Advanced Signals Engine</h3>
-          <span className="tag">SIGNALS V3 · CONFLUENCE VALIDATION</span>
+      <>
+        <div className="card">
+          <div className="card-heading">
+            <h3>TradeLab AI Advanced Signals Engine</h3>
+            <span className="tag">SIGNALS V3 · CONFLUENCE VALIDATION</span>
+          </div>
+          <div className="empty">{analysis.reason}</div>
         </div>
-        <div className="empty">{analysis.reason}</div>
-      </div>
+        <SignalPerformancePanel candles={candles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
+      </>
     );
   }
 
@@ -1157,6 +1160,8 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
         <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations. Order blocks, Wyckoff events and premium/discount zones are candidates, not verified institutional order flow. Volume-based confirmation is excluded until reliable volume data is available.</p>
       </div>
 
+      <SignalPerformancePanel candles={candles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
+
       <div
         style={{
           marginTop: 16,
@@ -1179,9 +1184,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
         Spread, slippage, commissions and broker contract specifications
         are not included.
 
-        {' '}Higher-timeframe confirmation, live signal tracking,
-        historical signal validation and machine-learning predictions
-        are planned for subsequent development phases.
+        {' '}Higher-timeframe confirmation is active. Directional signals are recorded in the performance ledger and outcomes are validated against subsequent candle data. Machine-learning predictions remain a separate future phase.
 
         {' '}No orders are placed automatically by this component.
       </div>
@@ -1190,6 +1193,137 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
   );
 }
   
+
+function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
+  const [performance, setPerformance] = useState({ loading: true, error: '', events: [], metrics: null });
+  const latestCandleTime = candles?.at(-1)?.time ?? candles?.at(-1)?.datetime ?? candles?.at(-1)?.timestamp ?? '';
+  const generatedAt = (() => {
+    if (typeof latestCandleTime === 'number' || /^\d+(\.\d+)?$/.test(String(latestCandleTime))) {
+      const n = Number(latestCandleTime);
+      return new Date(n < 1e12 ? n * 1000 : n).toISOString();
+    }
+    const parsed = Date.parse(latestCandleTime);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+  })();
+  const recordKey = analysis?.ready && ['BUY', 'SELL'].includes(analysis.direction) &&
+    analysis.canBuildSetup && generatedAt
+    ? `${symbol}|${timeframe}|${analysis.direction}|${generatedAt}` : '';
+
+  useEffect(() => {
+    if (!recordKey || !analysis?.ready) return;
+    let active = true;
+    const save = async () => {
+      try {
+        const response = await fetch('/api/ai/signals/record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol,
+            timeframe,
+            signal: analysis.direction,
+            confluence: analysis.confluence,
+            entry: analysis.entry,
+            stopLoss: analysis.stop,
+            takeProfit: analysis.targets,
+            generatedAt
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) throw new Error(payload.error || 'Unable to record signal');
+        const refresh = await fetch('/api/ai/signals/performance?limit=100');
+        const refreshed = await refresh.json();
+        if (active && refresh.ok && refreshed.ok) {
+          setPerformance({ loading: false, error: '', events: refreshed.events || [], metrics: refreshed.metrics || null });
+        }
+      } catch (error) {
+        if (active) setPerformance(current => ({ ...current, error: error.message || 'Signal recording failed.' }));
+      }
+    };
+    save();
+    return () => { active = false; };
+  }, [recordKey]);
+
+  const loadPerformance = async () => {
+    try {
+      const response = await fetch('/api/ai/signals/performance?limit=100');
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.error || 'Unable to load signal performance');
+      setPerformance({ loading: false, error: '', events: payload.events || [], metrics: payload.metrics || null });
+    } catch (error) {
+      setPerformance(current => ({ ...current, loading: false, error: error.message || 'Performance data unavailable.' }));
+    }
+  };
+
+  useEffect(() => {
+    loadPerformance();
+    const timer = setInterval(loadPerformance, 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const metrics = performance.metrics || {};
+  const fmt = value => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(symbol === 'USDJPY' ? 3 : symbol === 'BTCUSD' ? 1 : symbol === 'XAUUSD' ? 2 : 5);
+  const rows = performance.events || [];
+  const breakdown = Object.values(rows.reduce((acc, item) => {
+    const key = `${item.symbol}|${item.timeframe}`;
+    if (!acc[key]) acc[key] = { symbol: item.symbol, timeframe: item.timeframe, resolved: 0, wins: 0, losses: 0, pending: 0, totalR: 0 };
+    if (item.status === 'RESOLVED' && (item.outcome === 'WIN' || item.outcome === 'LOSS')) {
+      acc[key].resolved += 1;
+      if (item.outcome === 'WIN') acc[key].wins += 1;
+      else acc[key].losses += 1;
+      acc[key].totalR += Number(item.r_multiple || 0);
+    } else if (item.status === 'PENDING') acc[key].pending += 1;
+    return acc;
+  }, {}));
+
+  return (
+    <div className="card" style={{ marginTop: 18, background: '#0b1728' }}>
+      <div className="card-heading">
+        <div><h4>Signal performance validation</h4><div className="muted">D1-recorded signals · forward outcome tracking · TP1 versus stop-loss</div></div>
+        <span className="tag">{performance.loading ? 'LOADING' : 'LIVE TRACKING'}</span>
+      </div>
+      {performance.error && <div className="muted" style={{ marginBottom: 10 }}>{performance.error}</div>}
+      <div className="stats-grid" style={{ marginBottom: 14 }}>
+        <div className="card"><div className="stat-label">Resolved signals · all time</div><div className="stat-value">{metrics.resolved ?? 0}</div></div>
+        <div className="card"><div className="stat-label">All-time win rate</div><div className="stat-value">{metrics.winRate == null ? '—' : `${metrics.winRate}%`}</div><div className="muted">Resolved TP1 / SL outcomes only</div></div>
+        <div className="card"><div className="stat-label">Average R</div><div className="stat-value">{metrics.averageR == null ? '—' : `${Number(metrics.averageR).toFixed(2)}R`}</div></div>
+        <div className="card"><div className="stat-label">Pending / ambiguous</div><div className="stat-value">{metrics.pending ?? 0} / {metrics.ambiguous ?? 0}</div></div>
+      </div>
+      <div className="dashboard-grid" style={{ marginBottom: 12 }}>
+        <div className="signal"><span>Total R (resolved)</span><strong>{metrics.totalR == null ? '—' : `${Number(metrics.totalR).toFixed(2)}R`}</strong></div>
+        <div className="signal"><span>Wins / losses</span><strong>{metrics.wins ?? 0} / {metrics.losses ?? 0}</strong></div>
+        <div className="signal"><span>Tracked instrument</span><strong>{symbol} · {timeframe}</strong></div>
+      </div>
+      <div className="card" style={{ marginBottom: 12, background: '#101d30' }}>
+        <div className="card-heading"><h4>Performance by market and timeframe</h4><span className="muted">Latest 100 recorded signals</span></div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>Market</th><th>Timeframe</th><th>Resolved</th><th>Win rate</th><th>Average R</th><th>Pending</th></tr></thead>
+          <tbody>{breakdown.length === 0 ? <tr><td colSpan="6" className="empty">Breakdown will appear after signals are recorded.</td></tr> : breakdown.map(group => <tr key={`${group.symbol}-${group.timeframe}`}><td>{group.symbol}</td><td>{group.timeframe}</td><td>{group.resolved}</td><td>{group.resolved ? `${(group.wins / group.resolved * 100).toFixed(1)}%` : '—'}</td><td>{group.resolved ? `${(group.totalR / group.resolved).toFixed(2)}R` : '—'}</td><td>{group.pending}</td></tr>)}</tbody>
+        </table></div>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Market</th><th>Timeframe</th><th>Signal</th><th>Confluence</th><th>Entry</th><th>Outcome</th><th>R</th><th>Generated</th></tr></thead>
+          <tbody>
+            {rows.length === 0 ? <tr><td colSpan="8" className="empty">No recorded directional signals yet. A BUY or SELL setup will be recorded when the signal engine confirms an entry and stop.</td></tr> : rows.map(item => {
+              const outcome = item.outcome || item.status || 'PENDING';
+              const color = outcome === 'WIN' ? '#21d6a0' : outcome === 'LOSS' ? '#fb7185' : outcome === 'AMBIGUOUS' ? '#fbbf24' : '#aab8cc';
+              return <tr key={item.id}>
+                <td>{item.symbol}</td><td>{item.timeframe}</td><td className={item.signal === 'BUY' ? 'positive' : 'negative'}>{item.signal}</td>
+                <td>{item.confluence}%</td><td>{item.entry == null ? '—' : Number(item.entry).toFixed(item.symbol === 'USDJPY' ? 3 : item.symbol === 'BTCUSD' ? 1 : item.symbol === 'XAUUSD' ? 2 : 5)}</td><td><strong style={{ color }}>{outcome}</strong></td>
+                <td>{item.r_multiple == null ? '—' : `${Number(item.r_multiple).toFixed(2)}R`}</td>
+                <td>{item.generated_at ? new Date(item.generated_at).toLocaleString() : '—'}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="muted" style={{ fontSize: 11, lineHeight: 1.6, marginBottom: 0, marginTop: 10 }}>
+        Validation rule: the first TP1 (+1R) or stop-loss (-1R) touch after signal time determines the outcome. If both are touched within the same candle, the result is marked AMBIGUOUS and excluded from win-rate calculations. Open signals remain pending. Confluence is not a probability of winning. Results exclude spread, slippage, commission and financing costs.
+      </p>
+    </div>
+  );
+}
+
 
 function AIAssistant({ candles, symbol, timeframe }) {
   const [question, setQuestion] = useState('Give me a full analysis of the current market.');
