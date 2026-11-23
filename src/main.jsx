@@ -77,7 +77,7 @@ const navigation = [
 ];
 
 function CandlestickChart({ candles, loading, error, symbol }) {
-  const [show, setShow] = useState({ ema20: true, ema50: true, ema200: true, bb: true, levels: true, trendlines: true, structure: true });
+  const [show, setShow] = useState({ ema9: true, ema21: true, ema20: false, ema50: true, ema200: true, sma20: false, sma50: false, sma200: false, bb: true, levels: true, trendlines: true, structure: true });
   const [visibleCount, setVisibleCount] = useState(100);
   const [pointer, setPointer] = useState(null);
   if (loading) return <div className="empty">Loading historical candles…</div>;
@@ -88,7 +88,7 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const visible = candles.slice(-count);
   const width = 1000, height = 310, left = 72, right = 18, top = 28, bottom = 35;
   const closes = candles.map(c => Number(c.close));
-  const ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);
+  const ema9 = calcEMA(closes, 9), ema21 = calcEMA(closes, 21), ema20 = calcEMA(closes, 20), ema50 = calcEMA(closes, 50), ema200 = calcEMA(closes, 200);\n  const sma20 = calcSMA(closes,20), sma50 = calcSMA(closes,50), sma200 = calcSMA(closes,200);
   const bands = calcBollinger(closes, 20, 2);
   const levels = detectSupportResistance(candles.slice(-180));
   const swings = detectSwingPoints(visible);
@@ -98,7 +98,7 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const visibleBands = bands.slice(offset), visibleEma20 = ema20.slice(offset);
   const visibleEma50 = ema50.slice(offset), visibleEma200 = ema200.slice(offset);
   const overlayValues = [
-    ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),
+    ...(show.ema9 ? ema9.slice(offset) : []), ...(show.ema21 ? ema21.slice(offset) : []), ...(show.ema20 ? visibleEma20 : []), ...(show.ema50 ? visibleEma50 : []),\n    ...(show.sma20 ? sma20.slice(offset) : []), ...(show.sma50 ? sma50.slice(offset) : []), ...(show.sma200 ? sma200.slice(offset) : []),
     ...(show.ema200 ? visibleEma200 : []), ...(show.bb ? visibleBands.flatMap(b => b ? [b.upper,b.middle,b.lower] : []) : []),
     ...(show.levels ? levels.map(level => level.price) : []),
     ...(show.trendlines ? trendlines.flatMap(line => [line.start.price, line.end.price]) : []),
@@ -125,8 +125,8 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   return <div style={{width:'100%',height:'100%',display:'flex',flexDirection:'column',gap:7}}>
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
       <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-        {control('ema20','EMA 20','#f472b6')}{control('ema50','EMA 50','#38bdf8')}
-        {control('ema200','EMA 200','#f59e0b')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}{control('trendlines','Trendlines','#c4b5fd')}{control('structure','BOS / CHoCH','#facc15')}
+        {control('ema9','EMA 9','#fb923c')}{control('ema21','EMA 21','#f472b6')}{control('ema20','EMA 20','#e879f9')}{control('ema50','EMA 50','#38bdf8')}
+        {control('ema200','EMA 200','#f59e0b')}{control('sma20','SMA 20','#a3e635')}{control('sma50','SMA 50','#22d3ee')}{control('sma200','SMA 200','#facc15')}{control('bb','Bollinger','#a78bfa')}{control('levels','S/R levels','#fbbf24')}{control('trendlines','Trendlines','#c4b5fd')}{control('structure','BOS / CHoCH','#facc15')}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:5}}>
         <button className="period-btn" onClick={() => {setVisibleCount(n => Math.max(20,n-20));setPointer(null);}} title="Zoom in">＋</button>
@@ -140,6 +140,11 @@ function CandlestickChart({ candles, loading, error, symbol }) {
         onMouseLeave={() => setPointer(null)}>
         {[0,1,2,3,4].map(i => { const value=max-((max-min)*i/4), py=top+(plotHeight*i/4); return <g key={i}><line x1={left} x2={width-right} y1={py} y2={py} stroke="#26364e" strokeDasharray="4 4"/><text x={left-8} y={py+4} fill="#8290a8" fontSize="12" textAnchor="end">{value.toFixed(decimals)}</text></g>; })}
         {show.bb && <><path d={bandPath('upper')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9"/><path d={bandPath('middle')} fill="none" stroke="#a78bfa" strokeWidth="1" opacity="0.55"/><path d={bandPath('lower')} fill="none" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.9"/></>}
+         {show.ema9 && <path d={makePath(ema9.slice(offset))} fill="none" stroke="#fb923c" strokeWidth="1.5"/>}
+        {show.ema21 && <path d={makePath(ema21.slice(offset))} fill="none" stroke="#f472b6" strokeWidth="1.7"/>}
+        {show.sma20 && <path d={makePath(sma20.slice(offset))} fill="none" stroke="#a3e635" strokeWidth="1.4"/>}
+        {show.sma50 && <path d={makePath(sma50.slice(offset))} fill="none" stroke="#22d3ee" strokeWidth="1.4"/>}
+        {show.sma200 && <path d={makePath(sma200.slice(offset))} fill="none" stroke="#facc15" strokeWidth="1.4"/>}
         {show.ema200 && <path d={makePath(visibleEma200)} fill="none" stroke="#f59e0b" strokeWidth="2"/>}
         {show.ema50 && <path d={makePath(visibleEma50)} fill="none" stroke="#38bdf8" strokeWidth="1.8"/>}
         {show.ema20 && <path d={makePath(visibleEma20)} fill="none" stroke="#f472b6" strokeWidth="1.8"/>}
@@ -234,6 +239,19 @@ function detectSupportResistance(candles) {
 
 // ---------------- Technical indicator calculations ----------------
 const average = values => values.length ? values.reduce((a,b)=>a+b,0)/values.length : null;
+function calcSMA(values, period) {
+  const out=Array(values.length).fill(null);
+  if (!Number.isInteger(period) || period < 1) return out;
+  let sum=0;
+  for(let i=0;i<values.length;i++){
+    const value=Number(values[i]);
+    if(!Number.isFinite(value)) { sum=0; continue; }
+    sum+=value;
+    if(i>=period) sum-=Number(values[i-period]);
+    if(i>=period-1) out[i]=sum/period;
+  }
+  return out;
+}
 function calcEMA(values, period) {
   if (values.length < period) return [];
   const k=2/(period+1), out=[];
@@ -269,14 +287,14 @@ function calcADX(candles,period=14){
   return adx;
 }
 function calcStochastic(candles,kPeriod=14,dPeriod=3){const k=candles.map((c,i)=>{if(i<kPeriod-1)return null;const w=candles.slice(i-kPeriod+1,i+1),hi=Math.max(...w.map(x=>Number(x.high))),lo=Math.min(...w.map(x=>Number(x.low)));return hi===lo?50:(Number(c.close)-lo)/(hi-lo)*100;});const d=k.map((_,i)=>{const w=k.slice(Math.max(0,i-dPeriod+1),i+1).filter(v=>v!=null);return w.length===dPeriod?average(w):null;});return {k,d};}
-function buildIndicators(candles, periods){const closes=candles.map(c=>Number(c.close));return {emaFast:calcEMA(closes,periods.emaFast),emaSlow:calcEMA(closes,periods.emaSlow),emaLong:calcEMA(closes,periods.emaLong),rsi:calcRSI(closes,periods.rsi),macd:calcMACD(closes),bb:calcBollinger(closes,periods.bb,2),atr:calcATR(candles,periods.atr),adx:calcADX(candles,periods.adx),stoch:calcStochastic(candles)};}
+function buildIndicators(candles, periods){const closes=candles.map(c=>Number(c.close));return {emaFast:calcEMA(closes,periods.emaFast),emaSlow:calcEMA(closes,periods.emaSlow),emaLong:calcEMA(closes,periods.emaLong),sma20:calcSMA(closes,20),sma50:calcSMA(closes,50),sma200:calcSMA(closes,200),rsi:calcRSI(closes,periods.rsi),macd:calcMACD(closes),bb:calcBollinger(closes,periods.bb,2),atr:calcATR(candles,periods.atr),adx:calcADX(candles,periods.adx),stoch:calcStochastic(candles)};}
 function IndicatorSuite({candles,symbol}){
-  const [enabled,setEnabled]=useState({emaFast:true,emaSlow:true,emaLong:false,rsi:true,macd:true,bb:true,atr:true,adx:true,stoch:true,bbPosition:true});
-  const [periods,setPeriods]=useState({emaFast:20,emaSlow:50,emaLong:200,rsi:14,bb:20,atr:14,adx:14});
+  const [enabled,setEnabled]=useState({emaFast:true,emaSlow:true,emaLong:false,sma20:true,sma50:true,sma200:false,rsi:true,macd:true,bb:true,atr:true,adx:true,stoch:true,bbPosition:true});
+  const [periods,setPeriods]=useState({emaFast:9,emaSlow:21,emaLong:200,rsi:14,bb:20,atr:14,adx:14});
   const [showSettings,setShowSettings]=useState(false);
   const data=useMemo(()=>buildIndicators(candles,periods),[candles,periods]);
   const last=arr=>{for(let i=arr.length-1;i>=0;i--)if(arr[i]!=null)return arr[i];return null;};
-  const close=Number(candles.at(-1)?.close), ef=last(data.emaFast),es=last(data.emaSlow),el=last(data.emaLong),r=last(data.rsi),m=last(data.macd.line),ms=last(data.macd.signal),a=last(data.adx),atr=last(data.atr),sk=last(data.stoch.k),sd=last(data.stoch.d),bb=last(data.bb);
+  const close=Number(candles.at(-1)?.close), ef=last(data.emaFast),es=last(data.emaSlow),el=last(data.emaLong),s20=last(data.sma20),s50=last(data.sma50),s200=last(data.sma200),r=last(data.rsi),m=last(data.macd.line),ms=last(data.macd.signal),a=last(data.adx),atr=last(data.atr),sk=last(data.stoch.k),sd=last(data.stoch.d),bb=last(data.bb);
   const votes=[ef!=null&&es!=null?(ef>es?1:-1):0,m!=null&&ms!=null?(m>ms?1:-1):0,r!=null?(r>55?1:r<45?-1:0):0,el!=null?(close>el?1:-1):0];const score=votes.reduce((x,y)=>x+y,0);const bias=score>=2?'BULLISH':score<=-2?'BEARISH':'MIXED';
   const fmt=(v,d=5,required=0)=>v==null||!Number.isFinite(v)?`Insufficient data (need ${required || 'more'} candles; received ${candles.length})`:v.toFixed(d);
   const toggle=(key,label,desc,value)=> <div className="signal" key={key}><span><label style={{display:'flex',gap:8,alignItems:'center'}}><input type="checkbox" checked={!!enabled[key]} onChange={e=>setEnabled(p=>({...p,[key]:e.target.checked}))}/><span>{label}</span></label><small className="muted" style={{display:'block',marginLeft:23}}>{desc}</small></span><strong>{enabled[key] ? value : 'Hidden'}</strong></div>;
@@ -287,7 +305,7 @@ function IndicatorSuite({candles,symbol}){
     <div className="dashboard-grid" style={{marginBottom:0}}><div>
       {toggle('emaFast',`EMA ${periods.emaFast}`,'Short-term trend average',fmt(ef,symbol==='USDJPY'?3:5,periods.emaFast))}
       {toggle('emaSlow',`EMA ${periods.emaSlow}`,'Medium-term trend average',fmt(es,symbol==='USDJPY'?3:5,periods.emaSlow))}
-      {toggle('emaLong',`EMA ${periods.emaLong}`,'Long-term trend filter',fmt(el,symbol==='USDJPY'?3:5,periods.emaLong))}
+      {toggle('emaLong',`EMA ${periods.emaLong}`,'Long-term trend filter',fmt(el,symbol==='USDJPY'?3:5,periods.emaLong))}\n      {toggle('sma20','SMA 20','Short-term simple moving average',fmt(s20,symbol==='USDJPY'?3:5,20))}\n      {toggle('sma50','SMA 50','Medium-term simple moving average',fmt(s50,symbol==='USDJPY'?3:5,50))}\n      {toggle('sma200','SMA 200','Long-term simple moving average',fmt(s200,symbol==='USDJPY'?3:5,200))}
       {toggle('rsi',`RSI (${periods.rsi})`,'Above 70 overbought · below 30 oversold',fmt(r,2,periods.rsi+1))}
       {toggle('macd','MACD (12, 26, 9)','Momentum line versus signal',m==null?'Insufficient data':`${m.toFixed(6)} / ${fmt(ms,6)}`)}
     </div><div>
@@ -4622,7 +4640,7 @@ function App() {
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
             <MarketIntelligencePanel candles={candles} symbol={selectedMarket} timeframe={period}/>
           </> : activePage === 'Technical Indicators' ? <>
-            <div className="welcome"><div><h1>All Technical Indicators</h1><div className="muted">EMA, RSI, MACD, Bollinger Bands, ATR, ADX and Stochastic studies.</div></div><div className="demo-badge">● INDICATORS · ANALYSIS ONLY</div></div>
+            <div className="welcome"><div><h1>All Technical Indicators</h1><div className="muted">EMA 9/21/200, SMA 20/50/200, RSI, MACD, Bollinger Bands, ATR, ADX and Stochastic studies.</div></div><div className="demo-badge">● INDICATORS · ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} candlestick chart</h3><span className="muted">{candles.length} candles</span></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div></div>
             <IndicatorSuite candles={candles} symbol={selectedMarket}/>
           </> : activePage === 'AI Analysis' ? <>
