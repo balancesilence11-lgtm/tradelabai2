@@ -93,13 +93,13 @@ function CandlestickChart({ candles, loading, error, symbol }) {
   const bands = calcBollinger(closes, 20, 2);
   const rsiSeries = calcRSI(closes, 14);
   const macdSeries = calcMACD(closes);
+  const offset = candles.length - visible.length;
   const visibleRsi = rsiSeries.slice(offset);
   const visibleMacd = { line: macdSeries.line.slice(offset), signal: macdSeries.signal.slice(offset), histogram: macdSeries.histogram.slice(offset) };
   const levels = detectSupportResistance(candles.slice(-180));
   const swings = detectSwingPoints(visible);
   const trendlines = buildTrendlines(swings);
   const structure = detectMarketStructure(visible, swings);
-  const offset = candles.length - visible.length;
   const visibleBands = bands.slice(offset), visibleEma20 = ema20.slice(offset);
   const visibleEma50 = ema50.slice(offset), visibleEma200 = ema200.slice(offset);
   const overlayValues = [
@@ -862,6 +862,19 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
           </div>
         </div>
         <span className="tag">SIGNALS V2 · MARKET INTELLIGENCE</span>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16, background: '#0b1728' }}>
+        <div className="card-heading"><div><h4>Multi-timeframe confirmation</h4><div className="muted">Higher-timeframe trend alignment · independent candle-feed checks</div></div><span className="tag">{mtf.loading ? 'LOADING' : `${mtfSummary.ready}/${higherTimeframes.length} READY`}</span></div>
+        {mtf.error && <div className="muted">MTF data unavailable: {mtf.error}</div>}
+        {!mtf.loading && !mtf.error && mtf.frames.length === 0 && <div className="muted">No higher timeframes configured for this selection.</div>}
+        <div className="dashboard-grid" style={{ marginBottom: 0 }}>
+          {mtf.frames.map(frame => <div className="signal" key={frame.interval}>
+            <span><strong>{timeframeLabel(frame.interval)}</strong><small className="muted" style={{display:'block'}}>{frame.count} candles · {frame.structure}</small></span>
+            <strong style={{color:frame.bias==='BULLISH'?'#21d6a0':frame.bias==='BEARISH'?'#fb7185':'#fbbf24'}}>{frame.bias}{frame.rsi != null ? ` · RSI ${frame.rsi.toFixed(1)}` : ''}</strong>
+          </div>)}
+        </div>
+        <div className="muted" style={{marginTop:10}}>MTF consensus: {mtfSummary.direction} · {mtfSummary.ready ? `${mtfSummary.bullish} bullish / ${mtfSummary.bearish} bearish` : 'Awaiting sufficient higher-timeframe data'}. This is contextual confirmation; it does not independently prove a trade edge.</div>
       </div>
 
       <div className="stats-grid" style={{ marginBottom: 16 }}>
