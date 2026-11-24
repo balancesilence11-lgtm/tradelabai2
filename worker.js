@@ -189,19 +189,6 @@ async function miBrief(request, env) {
   });
 }
 
-export async function handleMarketIntelligence(request, env, url) {
-  if (!MI_ALLOWED_METHODS.has(request.method)) return miJson({ ok: false, error: "Method not allowed." }, 405, { Allow: "GET, POST" });
-  try {
-    if (url.pathname === "/api/market-intelligence/news" && request.method === "GET") return miJson(await miNews(url, env));
-    if (url.pathname === "/api/market-intelligence/calendar" && request.method === "GET") return miJson(await miCalendar(url, env));
-    if (url.pathname === "/api/market-intelligence/brief" && request.method === "POST") return await miBrief(request, env);
-    return miJson({ ok: false, error: "Market intelligence endpoint not found." }, 404);
-  } catch (error) {
-    console.error("Market intelligence request failed:", error?.message || error);
-    return miJson({ ok: false, error: error?.message || "Market intelligence provider unavailable." }, error?.status || 502);
-  }
-}
-
 const SYMBOLS = {
 EURUSD: "EUR/USD",
 GBPUSD: "GBP/USD",
