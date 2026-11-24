@@ -5818,7 +5818,7 @@ ok: true,
 // TRADE JOURNAL CONFIGURATION
 // ============================================================
 const TRADE_JOURNAL_CONFIG = {
-maximumNotesLength: 6000,
+maximumNotesLength: 2000,
 maximumPageSize: 100,
 allowedDirections: new Set([
 "BUY",
@@ -6024,28 +6024,6 @@ error.message
     }, 500);
 }
 }
-
-async function journalDeleteTrade(env, user, tradeId) {
-  if (!env.DB) {
-    return json({ ok: false, error: "Trade journal database is unavailable." }, 503);
-  }
-  if (!tradeId || !/^[A-Za-z0-9-]{10,64}$/.test(tradeId)) {
-    return json({ ok: false, error: "Invalid trade identifier." }, 400);
-  }
-  try {
-    const result = await env.DB.prepare(
-      "DELETE FROM trade_journal WHERE id = ? AND user_id = ?"
-    ).bind(tradeId, user.id).run();
-    if (!result.meta?.changes) {
-      return json({ ok: false, error: "Trade was not found or is not owned by this user." }, 404);
-    }
-    return json({ ok: true, message: "Trade journal record deleted." });
-  } catch (error) {
-    console.error("Trade journal deletion failed:", error.message);
-    return json({ ok: false, error: "Unable to delete trade journal record." }, 500);
-  }
-}
-
 async function journalGetTrades(request, env, user, url) {
 if (!env.DB) {
 return json({
@@ -6165,24 +6143,13 @@ error: "Valid exit price, realized P&L and fees are required."
 }
 const netPnl = realizedPnl - fees;
 const now = journalNow();
-let closedAt = now;
-if (body.closedAt) {
-  const parsedClosedAt = new Date(body.closedAt);
-  if (!Number.isFinite(parsedClosedAt.getTime())) {
-    return json({ ok: false, error: "Invalid trade close timestamp." }, 400);
-  }
-  closedAt = parsedClosedAt.toISOString();
-}
-const notes = journalText(body.notes, TRADE_JOURNAL_CONFIG.maximumNotesLength);
 try {
-const result = await env.DB.prepare(`UPDATE trade_journal SET exit_price = ?, realized_pnl = ?, fees = ?, net_pnl = ?, notes = CASE WHEN ? = '' THEN notes ELSE ? END, status = 'CLOSED', closed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'OPEN'`).bind(
+const result = await env.DB.prepare(`UPDATE trade_journal SET exit_price = ?, realized_pnl = ?, fees = ?, net_pnl = ?, status = 'CLOSED', closed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'OPEN'`).bind(
 exitPrice,
 realizedPnl,
 fees,
 netPnl,
-notes,
-notes,
-closedAt,
+now,
 now,
 tradeId,
 user.id
@@ -6204,7 +6171,7 @@ user.id
         fees,
         netPnl,
         status: "CLOSED",
-        closedAt
+        closedAt: now
       }
     });
 
@@ -7587,6 +7554,95 @@ Math.min(100, Math.floor(Number(limit) || 50))
 
     return result.results || [];
 }
+function priceAlertNormalize(row) {
+    return {
+        id: row.id, symbol: row.symbol, condition: row.condition,
+        target: Number(row.target), referencePrice: row.reference_price == null ? null : Number(row.reference_price),
+        lastPrice: row.last_price == null ? null : Number(row.last_price),
+        enabled: !!row.enabled, triggeredAt: row.triggered_at || null,
+        createdAt: row.created_at, updatedAt: row.updated_at
+    };
+}
+async function priceAlertGet(env, userId, id) {
+    const row = await env.DB.prepare(`SELECT * FROM trade_price_alerts WHERE id = ? AND user_id = ? LIMIT 1`).bind(id, userId).first();
+    return row ? priceAlertNormalize(row) : null;
+}
+async function handlePriceAlerts(request, env, user) {
+    const url = new URL(request.url), path = url.pathname, method = request.method.toUpperCase();
+    if (!env.DB) return json({ok:false,error:'Database is not configured.'},500);
+    try {
+        if (path === '/api/price-alerts' && method === 'GET') {
+            const result = await env.DB.prepare(`SELECT * FROM trade_price_alerts WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`).bind(user.id).all();
+            return json({ok:true,alerts:(result.results||[]).map(priceAlertNormalize)});
+        }
+        if (path === '/api/price-alerts' && method === 'POST') {
+            const input = await request.json();
+            const symbol = String(input?.symbol||'').trim().toUpperCase();
+            const condition = String(input?.condition||'');
+            const target = Number(input?.target);
+            const referencePrice = input?.referencePrice == null ? null : Number(input.referencePrice);
+            const lastPrice = input?.lastPrice == null ? null : Number(input.lastPrice);
+            if (!/^[A-Z0-9]{3,15}$/.test(symbol) || !['above','below','move'].includes(condition) || !Number.isFinite(target) || target <= 0) return json({ok:false,error:'Invalid symbol, condition, or target.'},400);
+            if (condition === 'move' && (!Number.isFinite(referencePrice) || referencePrice <= 0)) return json({ok:false,error:'Percentage-move alerts require a positive reference price.'},400);
+            if (lastPrice !== null && (!Number.isFinite(lastPrice) || lastPrice <= 0)) return json({ok:false,error:'Last price must be positive.'},400);
+            const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM trade_price_alerts WHERE user_id = ?`).bind(user.id).first();
+            if (Number(count?.total||0) >= 100) return json({ok:false,error:'You can keep up to 100 price alerts.'},409);
+            const id = (typeof input.id === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(input.id)) ? input.id : crypto.randomUUID();
+            const now = new Date().toISOString();
+            const createdAt = typeof input.createdAt === 'string' && !Number.isNaN(Date.parse(input.createdAt)) ? input.createdAt : now;
+            const triggeredAt = input.triggeredAt && !Number.isNaN(Date.parse(input.triggeredAt)) ? new Date(input.triggeredAt).toISOString() : null;
+            await env.DB.prepare(`INSERT INTO trade_price_alerts (id,user_id,symbol,condition,target,reference_price,last_price,enabled,triggered_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(id,user.id,symbol,condition,target,referencePrice,lastPrice,input.enabled === false ? 0 : 1,triggeredAt,createdAt,now).run();
+            const alert = await priceAlertGet(env,user.id,id);
+            if (!alert) return json({ok:false,error:'Could not save this alert.'},500);
+            if (triggeredAt) await env.DB.prepare(`INSERT OR IGNORE INTO trade_price_alert_events (id,user_id,alert_id,symbol,condition,target,trigger_price,triggered_at) VALUES (?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.id,id,symbol,condition,target,lastPrice,triggeredAt).run();
+            return json({ok:true,alert},201);
+        }
+        const triggerMatch = path.match(/^\/api\/price-alerts\/([A-Za-z0-9_-]{8,80})\/trigger$/);
+        if (triggerMatch && method === 'POST') {
+            const id=triggerMatch[1], input=await request.json(), price=Number(input?.price);
+            if (!Number.isFinite(price) || price <= 0) return json({ok:false,error:'A positive trigger price is required.'},400);
+            const alert=await priceAlertGet(env,user.id,id);
+            if (!alert) return json({ok:false,error:'Price alert not found.'},404);
+            if (alert.triggeredAt || !alert.enabled) return json({ok:true,alert,alreadyTriggered:true});
+            const hit=alert.condition==='above'?price>=alert.target:alert.condition==='below'?price<=alert.target:alert.referencePrice>0&&Math.abs((price-alert.referencePrice)/alert.referencePrice*100)>=alert.target;
+            if (!hit) return json({ok:false,error:'The supplied quote does not meet this alert condition.'},409);
+            const now=new Date().toISOString();
+            await env.DB.batch([
+                env.DB.prepare(`UPDATE trade_price_alerts SET last_price=?,triggered_at=?,enabled=0,updated_at=? WHERE id=? AND user_id=? AND triggered_at IS NULL AND enabled=1`).bind(price,now,now,id,user.id),
+                env.DB.prepare(`INSERT INTO trade_price_alert_events (id,user_id,alert_id,symbol,condition,target,trigger_price,triggered_at) SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM trade_price_alerts WHERE id=? AND user_id=? AND triggered_at=?)`).bind(crypto.randomUUID(),user.id,id,alert.symbol,alert.condition,alert.target,price,now,id,user.id,now)
+            ]);
+            const updated=await priceAlertGet(env,user.id,id);
+            return json({ok:true,alert:updated});
+        }
+        const itemMatch=path.match(/^\/api\/price-alerts\/([A-Za-z0-9_-]{8,80})$/);
+        if (itemMatch && method === 'PATCH') {
+            const id=itemMatch[1], input=await request.json(), current=await priceAlertGet(env,user.id,id);
+            if (!current) return json({ok:false,error:'Price alert not found.'},404);
+            const allowed=['enabled','lastPrice'];
+            if (!input || typeof input!=='object' || Array.isArray(input) || Object.keys(input).some(key=>!allowed.includes(key)) || !Object.keys(input).length) return json({ok:false,error:'Only enabled and lastPrice can be updated.'},400);
+            const enabled=input.enabled === undefined ? current.enabled : input.enabled;
+            const lastPrice=input.lastPrice === undefined ? current.lastPrice : Number(input.lastPrice);
+            if (typeof enabled!=='boolean' || (lastPrice!==null && (!Number.isFinite(lastPrice)||lastPrice<=0))) return json({ok:false,error:'Invalid alert update.'},400);
+            if (current.triggeredAt && enabled) return json({ok:false,error:'A triggered alert cannot be resumed. Create a new alert instead.'},409);
+            await env.DB.prepare(`UPDATE trade_price_alerts SET enabled=?,last_price=?,updated_at=? WHERE id=? AND user_id=?`).bind(enabled?1:0,lastPrice,new Date().toISOString(),id,user.id).run();
+            return json({ok:true,alert:await priceAlertGet(env,user.id,id)});
+        }
+        if (itemMatch && method === 'DELETE') {
+            const result=await env.DB.prepare(`DELETE FROM trade_price_alerts WHERE id=? AND user_id=?`).bind(itemMatch[1],user.id).run();
+            return json({ok:true,deleted:Number(result.meta?.changes||0)>0});
+        }
+        if (path === '/api/price-alerts/triggered' && method === 'DELETE') {
+            const result=await env.DB.prepare(`DELETE FROM trade_price_alerts WHERE user_id=? AND triggered_at IS NOT NULL`).bind(user.id).run();
+            await env.DB.prepare(`DELETE FROM trade_price_alert_events WHERE user_id=?`).bind(user.id).run();
+            return json({ok:true,deleted:Number(result.meta?.changes||0)});
+        }
+        return json({ok:false,error:'Price alert endpoint not found.'},404);
+    } catch(error) {
+        console.error('Price alerts error:',error?.message||error);
+        return json({ok:false,error:error?.message||'Price alert request failed.'},400);
+    }
+}
+
 async function handleMarketScanner(request, env, user) {
 const url = new URL(request.url);
 const path = url.pathname;
@@ -9885,10 +9941,6 @@ async function routeRequest(request, env, ctx) {
       if (path === "/api/trading/journal" && method === "GET") {
         return await journalGetTrades(request, env, user, url);
       }
-      const deleteJournalMatch = path.match(/^\/api\/trading\/journal\/([A-Za-z0-9-]+)$/);
-      if (deleteJournalMatch && method === "DELETE") {
-        return await journalDeleteTrade(env, user, deleteJournalMatch[1]);
-      }
       const closeMatch = path.match(/^\/api\/trading\/journal\/([A-Za-z0-9-]+)\/close$/);
       if (closeMatch && method === "POST") {
         return await journalCloseTrade(request, env, user, closeMatch[1]);
@@ -9901,6 +9953,9 @@ async function routeRequest(request, env, ctx) {
       }
       if (path === "/api/trading/monitor/events" && method === "GET") {
         return await monitorGetEvents(env, user, url);
+      }
+      if (path.startsWith("/api/price-alerts")) {
+        return await handlePriceAlerts(request, env, user);
       }
       if (path.startsWith("/api/notifications")) {
         return await handleNotifications(request, env, user);
