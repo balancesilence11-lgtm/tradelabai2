@@ -2072,6 +2072,153 @@ function RiskCentre({ symbol, marketPrice }) {
   </>;
 }
 
+
+const TRADELAB_JOURNAL_META_VERSION = 1;
+
+function tradeJournalPackNotes(item) {
+  const metadata = {
+    __tradelabJournal: TRADELAB_JOURNAL_META_VERSION,
+    notes: String(item.notes || '').slice(0, 1800),
+    tags: String(item.tags || '').slice(0, 500),
+    entryReason: String(item.entryReason || '').slice(0, 1000),
+    emotion: String(item.emotion || 'Calm / disciplined').slice(0, 120),
+    mistake: Boolean(item.mistake),
+    lesson: String(item.lesson || '').slice(0, 1000),
+    exitReason: String(item.exitReason || '').slice(0, 500)
+  };
+  return JSON.stringify(metadata);
+}
+
+function tradeJournalUnpackNotes(value) {
+  const raw = String(value || '');
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.__tradelabJournal === TRADELAB_JOURNAL_META_VERSION) {
+      return {
+        notes: String(parsed.notes || ''),
+        tags: String(parsed.tags || ''),
+        entryReason: String(parsed.entryReason || ''),
+        emotion: String(parsed.emotion || 'Calm / disciplined'),
+        mistake: Boolean(parsed.mistake),
+        lesson: String(parsed.lesson || ''),
+        exitReason: String(parsed.exitReason || '')
+      };
+    }
+  } catch {}
+  return {
+    notes: raw,
+    tags: '',
+    entryReason: '',
+    emotion: 'Calm / disciplined',
+    mistake: false,
+    lesson: '',
+    exitReason: ''
+  };
+}
+
+function tradeJournalFromApi(row) {
+  const metadata = tradeJournalUnpackNotes(row.notes);
+  const entry = Number(row.entry_price);
+  const units = Number(row.quantity ?? row.stake ?? 0);
+  const pnlValue = row.net_pnl ?? row.realized_pnl;
+  return {
+    id: String(row.id),
+    symbol: String(row.symbol || '').toUpperCase(),
+    direction: String(row.direction || 'BUY').toUpperCase(),
+    entry: Number.isFinite(entry) ? entry : 0,
+    units: Number.isFinite(units) ? units : 0,
+    setup: String(row.strategy || 'Manual'),
+    timeframe: String(row.timeframe || ''),
+    broker: String(row.broker || ''),
+    notes: metadata.notes,
+    tags: metadata.tags,
+    entryReason: metadata.entryReason,
+    emotion: metadata.emotion,
+    mistake: metadata.mistake,
+    lesson: metadata.lesson,
+    exitReason: metadata.exitReason,
+    status: String(row.status || 'OPEN').toUpperCase(),
+    openedAt: row.opened_at || row.created_at || new Date().toISOString(),
+    closedAt: row.closed_at || null,
+    exit: row.exit_price == null ? null : Number(row.exit_price),
+    pnl: pnlValue == null ? null : Number(pnlValue),
+    stopLoss: row.stop_loss == null ? null : Number(row.stop_loss),
+    takeProfit: row.take_profit == null ? null : Number(row.take_profit),
+    riskPercent: row.risk_percent == null ? null : Number(row.risk_percent),
+    riskAmount: row.risk_amount == null ? null : Number(row.risk_amount),
+    syncState: 'synced'
+  };
+}
+
+async function tradeJournalApi(path, options = {}) {
+  const headers = {
+    ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(options.headers || {})
+  };
+  const response = await fetch(path, {
+    credentials: 'include',
+    ...options,
+    headers
+  });
+  let payload;
+  try { payload = await response.json(); }
+  catch { throw new Error(`Journal service returned an invalid response (${response.status}).`); }
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.error || `Journal request failed (${response.status}).`);
+  }
+  return payload;
+}
+
+function tradeJournalFingerprint(item) {
+  const opened = item.openedAt ? new Date(item.openedAt).toISOString() : '';
+  return [
+    String(item.symbol || '').toUpperCase(),
+    String(item.direction || '').toUpperCase(),
+    Number(item.entry || 0).toPrecision(12),
+    Number(item.units || 0).toPrecision(12),
+    opened
+  ].join('|');
+}
+
+async function tradeJournalCreateOnServer(item) {
+  const payload = await tradeJournalApi('/api/trading/journal', {
+    method: 'POST',
+    body: JSON.stringify({
+      symbol: item.symbol,
+      direction: item.direction,
+      entryPrice: item.entry,
+      quantity: item.units,
+      strategy: item.setup,
+      timeframe: item.timeframe || '',
+      broker: item.broker || '',
+      executionMode: 'MANUAL',
+      stopLoss: item.stopLoss ?? null,
+      takeProfit: item.takeProfit ?? null,
+      riskPercent: item.riskPercent ?? null,
+      riskAmount: item.riskAmount ?? null,
+      openedAt: item.openedAt,
+      notes: tradeJournalPackNotes(item)
+    })
+  });
+  if (!payload.trade?.id) throw new Error('Journal service did not return a trade identifier.');
+  return payload.trade;
+}
+
+async function tradeJournalCloseOnServer(item, exit, pnl, closedAt, exitReason) {
+  const metadata = { ...item, exitReason: exitReason || item.exitReason || '' };
+  // Preserve journal notes and review fields before the server closes the record.
+  await tradeJournalApi(`/api/trading/journal/${encodeURIComponent(item.id)}/close`, {
+    method: 'POST',
+    body: JSON.stringify({
+      exitPrice: exit,
+      realizedPnl: pnl,
+      fees: 0,
+      closedAt,
+      notes: tradeJournalPackNotes(metadata)
+    })
+  });
+}
+
 function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
   const storageKey = 'tradelab_trade_journal_v1';
   const [entries, setEntries] = useState(() => {
@@ -2085,9 +2232,117 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
   const [closeInputs, setCloseInputs] = useState({});
   const [closeMeta, setCloseMeta] = useState({});
   const [message, setMessage] = useState('');
+  const [syncStatus, setSyncStatus] = useState('syncing');
 
   useEffect(() => { try { localStorage.setItem(storageKey, JSON.stringify(entries)); } catch (e) { console.warn('Journal storage unavailable', e); } }, [entries]);
   useEffect(() => { setForm(old => ({ ...old, symbol: defaultSymbol, entry: old.symbol !== defaultSymbol || !old.entry || old.entry === '—' ? (marketPrice && marketPrice !== '—' ? marketPrice : '') : old.entry })); }, [defaultSymbol, marketPrice]);
+
+  useEffect(() => {
+    let active = true;
+    const loadAndSyncJournal = async () => {
+      setSyncStatus('syncing');
+      try {
+        const localRaw = localStorage.getItem(storageKey);
+        const localItems = localRaw ? JSON.parse(localRaw) : [];
+        const safeLocal = Array.isArray(localItems) ? localItems : [];
+        const serverRows = [];
+        let offset = 0;
+        const pageSize = 100;
+        for (let page = 0; page < 50; page++) {
+          const result = await tradeJournalApi(`/api/trading/journal?limit=${pageSize}&offset=${offset}`);
+          const rows = Array.isArray(result.trades) ? result.trades : [];
+          serverRows.push(...rows);
+          if (rows.length < pageSize) break;
+          offset += rows.length;
+        }
+        const serverEntries = serverRows.map(tradeJournalFromApi);
+        const serverById = new Map(serverEntries.map(row => [row.id, row]));
+        const serverByFingerprint = new Map(serverEntries.map(row => [tradeJournalFingerprint(row), row]));
+        const syncedEntries = [];
+        const pendingEntries = [];
+
+        for (const localItem of safeLocal) {
+          if (!localItem || !localItem.symbol || !Number.isFinite(Number(localItem.entry))) continue;
+          const fingerprint = tradeJournalFingerprint(localItem);
+          const match = serverById.get(String(localItem.id)) || serverByFingerprint.get(fingerprint);
+
+          if (match) {
+            let resolved = {
+              ...localItem,
+              ...match,
+              notes: match.notes || localItem.notes || '',
+              tags: match.tags || localItem.tags || '',
+              entryReason: match.entryReason || localItem.entryReason || '',
+              emotion: match.emotion || localItem.emotion || 'Calm / disciplined',
+              mistake: Boolean(match.mistake || localItem.mistake),
+              lesson: match.lesson || localItem.lesson || '',
+              exitReason: match.exitReason || localItem.exitReason || '',
+              id: match.id,
+              syncState: 'synced'
+            };
+            // A local close may have succeeded before the browser received the response.
+            if (localItem.status === 'CLOSED' && match.status !== 'CLOSED' && Number.isFinite(Number(localItem.exit))) {
+              const localPnl = Number(localItem.pnl ?? ((localItem.direction === 'BUY' ? 1 : -1) * (Number(localItem.exit) - Number(localItem.entry)) * Number(localItem.units)));
+              try {
+                await tradeJournalCloseOnServer(resolved, Number(localItem.exit), localPnl, localItem.closedAt || new Date().toISOString(), localItem.exitReason);
+                resolved = { ...resolved, status: 'CLOSED', exit: Number(localItem.exit), pnl: localPnl, closedAt: localItem.closedAt || new Date().toISOString() };
+              } catch (closeMigrationError) {
+                pendingEntries.push({ ...localItem, syncState: 'pending' });
+                console.warn('A locally closed journal entry remains pending synchronization:', closeMigrationError);
+                continue;
+              }
+            }
+            syncedEntries.push(resolved);
+            continue;
+          }
+
+          try {
+            const created = await tradeJournalCreateOnServer(localItem);
+            let resolved = { ...localItem, id: created.id, syncState: 'synced' };
+            if (localItem.status === 'CLOSED' && Number.isFinite(Number(localItem.exit))) {
+              const localPnl = Number(localItem.pnl ?? ((localItem.direction === 'BUY' ? 1 : -1) * (Number(localItem.exit) - Number(localItem.entry)) * Number(localItem.units)));
+              await tradeJournalCloseOnServer(resolved, Number(localItem.exit), localPnl, localItem.closedAt || new Date().toISOString(), localItem.exitReason);
+              resolved = { ...resolved, pnl: localPnl };
+            }
+            syncedEntries.push(resolved);
+            serverEntries.push(resolved);
+            serverById.set(resolved.id, resolved);
+            serverByFingerprint.set(tradeJournalFingerprint(resolved), resolved);
+          } catch (migrationError) {
+            pendingEntries.push({ ...localItem, syncState: 'pending' });
+            console.warn('A legacy journal entry remains pending synchronization:', migrationError);
+          }
+        }
+
+        const localIds = new Set(safeLocal.map(item => String(item?.id || '')));
+        const serverOnlyEntries = serverEntries.filter(row => !localIds.has(row.id) && !syncedEntries.some(item => item.id === row.id));
+        if (active) {
+          setEntries([...syncedEntries, ...pendingEntries, ...serverOnlyEntries]);
+          setSyncStatus(pendingEntries.length ? 'partial' : 'synced');
+          setMessage(pendingEntries.length ? `${pendingEntries.length} journal entr${pendingEntries.length === 1 ? 'y is' : 'ies are'} waiting to sync.` : '');
+        }
+      } catch (error) {
+        if (active) {
+          setSyncStatus('offline');
+          setMessage(`Journal is using this device's saved records. Backend sync unavailable: ${error.message}`);
+        }
+      }
+    };
+    loadAndSyncJournal();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const retry = () => {
+      if (syncStatus === 'offline' || syncStatus === 'partial') {
+        setSyncStatus('syncing');
+        setMessage('Reconnecting to the Trade Journal service…');
+        window.location.reload();
+      }
+    };
+    window.addEventListener('online', retry);
+    return () => window.removeEventListener('online', retry);
+  }, [syncStatus]);
 
   const closed = entries.filter(t => t.status === 'CLOSED');
   const wins = closed.filter(t => t.pnl > 0), losses = closed.filter(t => t.pnl < 0);
@@ -2103,22 +2358,83 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
   const equityPoints = equity.map((v,i) => `${equity.length < 2 ? chartW/2 : 12 + i/(equity.length-1)*(chartW-24)},${chartH-12-(v-minEq)/rangeEq*(chartH-24)}`).join(' ');
   const money = v => `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`;
 
-  function addEntry(e) {
+  async function addEntry(e) {
     e.preventDefault();
     const entry = Number(form.entry), units = Number(form.units);
-    if (!form.symbol || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(units) || units <= 0) { setMessage('Enter a valid entry price and position units.'); return; }
-    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, symbol: form.symbol.toUpperCase().trim(), direction: form.direction, entry, units, setup: form.setup, notes: form.notes.trim(), tags: form.tags.trim(), entryReason: form.entryReason.trim(), emotion: form.emotion, mistake: !!form.mistake, lesson: form.lesson.trim(), exitReason: '', status: 'OPEN', openedAt: new Date().toISOString(), closedAt: null, exit: null, pnl: null };
+    if (!form.symbol.trim() || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(units) || units <= 0) {
+      setMessage('Enter a valid instrument, entry price and position units.');
+      return;
+    }
+    const item = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      symbol: form.symbol.toUpperCase().trim(),
+      direction: form.direction,
+      entry, units,
+      setup: form.setup,
+      notes: form.notes.trim(),
+      tags: form.tags.trim(),
+      entryReason: form.entryReason.trim(),
+      emotion: form.emotion,
+      mistake: !!form.mistake,
+      lesson: form.lesson.trim(),
+      exitReason: '',
+      status: 'OPEN',
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      exit: null,
+      pnl: null,
+      syncState: 'pending'
+    };
     setEntries(old => [item, ...old]);
     setForm(old => ({ ...old, entry: marketPrice || '', notes: '', tags: '', entryReason: '', mistake: false, lesson: '' }));
-    setMessage('Trade journal entry saved on this device.');
+    try {
+      const created = await tradeJournalCreateOnServer(item);
+      setEntries(old => old.map(row => row.id === item.id ? { ...row, id: created.id, syncState: 'synced' } : row));
+      setSyncStatus('synced');
+      setMessage('Trade journal entry saved to your TradeLab account.');
+    } catch (error) {
+      setSyncStatus('partial');
+      setMessage(`Saved on this device; server synchronization is pending. ${error.message}`);
+    }
   }
-  function closeEntry(id) {
+
+  async function closeEntry(id) {
+    const item = entries.find(row => row.id === id);
+    if (!item || item.status !== 'OPEN') return;
     const exit = Number(closeInputs[id]);
-    if (!Number.isFinite(exit) || exit <= 0) { setMessage('Enter a valid exit price before closing.'); return; }
-    setEntries(old => old.map(t => t.id !== id || t.status !== 'OPEN' ? t : { ...t, exit, exitReason: (closeMeta[id]?.reason || '').trim(), closedAt: new Date().toISOString(), status: 'CLOSED', pnl: (t.direction === 'BUY' ? exit-t.entry : t.entry-exit) * t.units }));
-    setMessage('Trade marked closed and P/L calculated using price difference × units.');
+    if (!Number.isFinite(exit) || exit <= 0) {
+      setMessage('Enter a valid exit price before closing.');
+      return;
+    }
+    const closedAt = new Date().toISOString();
+    const exitReason = (closeMeta[id]?.reason || '').trim();
+    const pnl = (item.direction === 'BUY' ? exit - item.entry : item.entry - exit) * item.units;
+    if (item.syncState === 'synced') {
+      try {
+        await tradeJournalCloseOnServer(item, exit, pnl, closedAt, exitReason);
+      } catch (error) {
+        setMessage(`Trade was not closed because server synchronization failed: ${error.message}`);
+        return;
+      }
+    }
+    setEntries(old => old.map(row => row.id !== id ? row : { ...row, exit, exitReason, closedAt, status: 'CLOSED', pnl, syncState: item.syncState || 'pending' }));
+    setMessage(item.syncState === 'synced' ? 'Trade closed and synchronized with your account.' : 'Trade closed locally; server synchronization will complete when available.');
   }
-  function deleteEntry(id) { if (window.confirm('Delete this journal entry?')) setEntries(old => old.filter(t => t.id !== id)); }
+
+  async function deleteEntry(id) {
+    const item = entries.find(row => row.id === id);
+    if (!item || !window.confirm('Delete this journal entry?')) return;
+    if (item.syncState === 'synced') {
+      try {
+        await tradeJournalApi(`/api/trading/journal/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      } catch (error) {
+        setMessage(`Trade was not deleted because server synchronization failed: ${error.message}`);
+        return;
+      }
+    }
+    setEntries(old => old.filter(row => row.id !== id));
+    setMessage('Journal entry deleted.');
+  }
   function exportCsv() {
     const cols = ['symbol','direction','status','entry','exit','units','pnl','setup','tags','entryReason','exitReason','emotion','mistake','lesson','notes','openedAt','closedAt'];
     const quote = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
@@ -2131,7 +2447,7 @@ function TradeJournal({ defaultSymbol = 'EURUSD', marketPrice }) {
   const labelStyle = {display:'block',fontSize:11,color:'#8492a9',marginBottom:6};
   const smallBtn = {background:'#1c2a40',border:'1px solid #33445e',color:'#dbeafe',borderRadius:6,padding:'8px 10px',fontSize:11};
   return <>
-    <div className="welcome"><div><h1>Trade Journal</h1><div className="muted">Record, review and learn from your simulated trading decisions.</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><span className="demo-badge">● PERSONAL / DEMO</span><button style={smallBtn} onClick={exportCsv}>Export CSV</button></div></div>
+    <div className="welcome"><div><h1>Trade Journal</h1><div className="muted">Record, review and learn from your simulated trading decisions.</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><span className="demo-badge">● PERSONAL / DEMO</span><span className="tag" title="Journal synchronization status">{syncStatus === 'synced' ? 'CLOUD SYNCED' : syncStatus === 'syncing' ? 'SYNCING…' : syncStatus === 'partial' ? 'SYNC PENDING' : 'LOCAL MODE'}</span><button style={smallBtn} onClick={exportCsv}>Export CSV</button></div></div>
     <div className="stats-grid">
       <div className="card"><div className="stat-label">Closed-trade net P/L</div><div className={`stat-value ${net>=0?'positive':'negative'}`}>{money(net)}</div><div className="muted">{closed.length} closed trades</div></div>
       <div className="card"><div className="stat-label">Win rate</div><div className="stat-value">{winRate.toFixed(1)}%</div><div className="muted">{wins.length} wins · {losses.length} losses</div></div>
