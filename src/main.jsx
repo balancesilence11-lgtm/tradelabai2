@@ -421,6 +421,26 @@ function IndicatorSuite({candles,symbol}){
 // TradeLab AI Advanced Signals Engine V1
 // Transparent, candle-based analysis. Confluence is NOT win probability.
 function AIAnalysisPanel({ candles, symbol, timeframe }) {
+  // Analyse only completed candles. The live chart may continue displaying the
+  // forming candle, but it must not influence a forward-validation signal.
+  const analysisCandles = useMemo(() => {
+    if (!Array.isArray(candles) || candles.length === 0) return [];
+    const durationMs = ({
+      '1min': 60_000, '5min': 300_000, '15min': 900_000,
+      '30min': 1_800_000, '1h': 3_600_000,
+      '4h': 14_400_000, '1day': 86_400_000
+    })[timeframe];
+    if (!durationMs) return candles;
+    const latest = candles[candles.length - 1];
+    const rawTime = latest?.time ?? latest?.datetime ?? latest?.timestamp;
+    const numericTime = typeof rawTime === 'number' || /^\d+(\.\d+)?$/.test(String(rawTime ?? ''));
+    const parsedTime = numericTime
+      ? Number(rawTime) * (Number(rawTime) < 1e12 ? 1000 : 1)
+      : Date.parse(rawTime);
+    if (!Number.isFinite(parsedTime)) return candles;
+    return Date.now() < parsedTime + durationMs ? candles.slice(0, -1) : candles;
+  }, [candles, timeframe]);
+
   // Phase 5: fetch higher-timeframe candles independently and use their trend
   // alignment as a weighted confirmation input. Failed feeds are excluded.
   const higherTimeframes = useMemo(() => {
@@ -458,10 +478,23 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
         if (!response.ok || !payload.ok || !Array.isArray(payload.candles)) {
           throw new Error(payload.details || payload.error || `${interval} feed unavailable`);
         }
-        const rows = payload.candles.filter(c =>
+        let rows = payload.candles.filter(c =>
           Number.isFinite(Number(c.close)) && Number(c.close) > 0 &&
           Number.isFinite(Number(c.high)) && Number.isFinite(Number(c.low))
         );
+        const frameDurationMs = ({
+          '1min': 60_000, '5min': 300_000, '15min': 900_000,
+          '30min': 1_800_000, '1h': 3_600_000,
+          '4h': 14_400_000, '1day': 86_400_000
+        })[interval];
+        const latestFrameTime = rows.at(-1)?.time ?? rows.at(-1)?.datetime ?? rows.at(-1)?.timestamp;
+        const frameTimeIsNumeric = typeof latestFrameTime === 'number' || /^\d+(\.\d+)?$/.test(String(latestFrameTime ?? ''));
+        const latestFrameOpen = frameTimeIsNumeric
+          ? Number(latestFrameTime) * (Number(latestFrameTime) < 1e12 ? 1000 : 1)
+          : Date.parse(latestFrameTime);
+        if (frameDurationMs && Number.isFinite(latestFrameOpen) && Date.now() < latestFrameOpen + frameDurationMs) {
+          rows = rows.slice(0, -1);
+        }
         const closes = rows.map(c => Number(c.close));
         const ema20 = calcEMA(closes, 20).filter(Number.isFinite).at(-1);
         const ema50 = calcEMA(closes, 50).filter(Number.isFinite).at(-1);
@@ -506,14 +539,14 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
 
   const analysis = useMemo(() => {
 
-    if (!Array.isArray(candles) || candles.length < 60) {
+    if (!Array.isArray(analysisCandles) || analysisCandles.length < 60) {
       return {
         ready: false,
-        reason: `At least 60 candles are required. Currently available: ${candles?.length || 0}.`
+        reason: `At least 60 candles are required. Currently available: ${analysisCandles?.length || 0}.`
       };
     }
 
-    const data = candles
+    const data = analysisCandles
       .filter(c =>
         Number.isFinite(Number(c.close)) &&
         Number(c.close) > 0
@@ -934,7 +967,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       dealingRange
     };
 
-  }, [candles, symbol, timeframe, mtf.frames, mtf.loading, mtfSummary, higherTimeframes]);
+  }, [analysisCandles, symbol, timeframe, mtf.frames, mtf.loading, mtfSummary, higherTimeframes]);
 
   const fmt = value =>
     value == null || !Number.isFinite(Number(value))
@@ -955,7 +988,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
           </div>
           <div className="empty">{analysis.reason}</div>
         </div>
-        <SignalPerformancePanel candles={candles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
+        <SignalPerformancePanel candles={analysisCandles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
       </>
     );
   }
@@ -1160,7 +1193,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
         <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations. Order blocks, Wyckoff events and premium/discount zones are candidates, not verified institutional order flow. Volume-based confirmation is excluded until reliable volume data is available.</p>
       </div>
 
-      <SignalPerformancePanel candles={candles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
+      <SignalPerformancePanel candles={analysisCandles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
 
       <div
         style={{
@@ -1198,12 +1231,19 @@ function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
   const [performance, setPerformance] = useState({ loading: true, error: '', events: [], metrics: null });
   const latestCandleTime = candles?.at(-1)?.time ?? candles?.at(-1)?.datetime ?? candles?.at(-1)?.timestamp ?? '';
   const generatedAt = (() => {
-    if (typeof latestCandleTime === 'number' || /^\d+(\.\d+)?$/.test(String(latestCandleTime))) {
-      const n = Number(latestCandleTime);
-      return new Date(n < 1e12 ? n * 1000 : n).toISOString();
-    }
-    const parsed = Date.parse(latestCandleTime);
-    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+    const durationMs = ({
+      '1min': 60_000, '5min': 300_000, '15min': 900_000,
+      '30min': 1_800_000, '1h': 3_600_000,
+      '4h': 14_400_000, '1day': 86_400_000
+    })[timeframe];
+    const numericTime = typeof latestCandleTime === 'number' || /^\d+(\.\d+)?$/.test(String(latestCandleTime));
+    const parsed = numericTime
+      ? Number(latestCandleTime) * (Number(latestCandleTime) < 1e12 ? 1000 : 1)
+      : Date.parse(latestCandleTime);
+    if (!Number.isFinite(parsed)) return '';
+    // One millisecond before the next candle opens: the resolver's strict
+    // candle-time comparison then includes the first post-signal candle.
+    return new Date(parsed + (durationMs || 0) - 1).toISOString();
   })();
   const recordKey = analysis?.ready && ['BUY', 'SELL'].includes(analysis.direction) &&
     analysis.canBuildSetup && generatedAt
