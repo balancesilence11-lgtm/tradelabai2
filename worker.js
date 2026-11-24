@@ -1,4 +1,4 @@
-
+import { handleMarketIntelligence } from "./phase2_market_intelligence.js";
 const SYMBOLS = {
 EURUSD: "EUR/USD",
 GBPUSD: "GBP/USD",
@@ -9947,9 +9947,9 @@ async function routeRequest(request, env, ctx) {
   const method = request.method.toUpperCase();
 
   try {
-    if (path.startsWith("/api/auth/")) {
-      return await handleAuth(request, env, url);
-    }
+  if (path.startsWith("/api/market-intelligence/")) {
+  return await handleMarketIntelligence(request, env, url);
+}
 
     if (path === "/api/billing/webhook" || path === "/api/flutterwave/webhook") {
       return await handleFlutterwaveWebhook(request, env);
