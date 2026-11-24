@@ -5818,7 +5818,7 @@ ok: true,
 // TRADE JOURNAL CONFIGURATION
 // ============================================================
 const TRADE_JOURNAL_CONFIG = {
-maximumNotesLength: 2000,
+maximumNotesLength: 6000,
 maximumPageSize: 100,
 allowedDirections: new Set([
 "BUY",
@@ -6024,6 +6024,28 @@ error.message
     }, 500);
 }
 }
+
+async function journalDeleteTrade(env, user, tradeId) {
+  if (!env.DB) {
+    return json({ ok: false, error: "Trade journal database is unavailable." }, 503);
+  }
+  if (!tradeId || !/^[A-Za-z0-9-]{10,64}$/.test(tradeId)) {
+    return json({ ok: false, error: "Invalid trade identifier." }, 400);
+  }
+  try {
+    const result = await env.DB.prepare(
+      "DELETE FROM trade_journal WHERE id = ? AND user_id = ?"
+    ).bind(tradeId, user.id).run();
+    if (!result.meta?.changes) {
+      return json({ ok: false, error: "Trade was not found or is not owned by this user." }, 404);
+    }
+    return json({ ok: true, message: "Trade journal record deleted." });
+  } catch (error) {
+    console.error("Trade journal deletion failed:", error.message);
+    return json({ ok: false, error: "Unable to delete trade journal record." }, 500);
+  }
+}
+
 async function journalGetTrades(request, env, user, url) {
 if (!env.DB) {
 return json({
@@ -6143,13 +6165,24 @@ error: "Valid exit price, realized P&L and fees are required."
 }
 const netPnl = realizedPnl - fees;
 const now = journalNow();
+let closedAt = now;
+if (body.closedAt) {
+  const parsedClosedAt = new Date(body.closedAt);
+  if (!Number.isFinite(parsedClosedAt.getTime())) {
+    return json({ ok: false, error: "Invalid trade close timestamp." }, 400);
+  }
+  closedAt = parsedClosedAt.toISOString();
+}
+const notes = journalText(body.notes, TRADE_JOURNAL_CONFIG.maximumNotesLength);
 try {
-const result = await env.DB.prepare(`UPDATE trade_journal SET exit_price = ?, realized_pnl = ?, fees = ?, net_pnl = ?, status = 'CLOSED', closed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'OPEN'`).bind(
+const result = await env.DB.prepare(`UPDATE trade_journal SET exit_price = ?, realized_pnl = ?, fees = ?, net_pnl = ?, notes = CASE WHEN ? = '' THEN notes ELSE ? END, status = 'CLOSED', closed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'OPEN'`).bind(
 exitPrice,
 realizedPnl,
 fees,
 netPnl,
-now,
+notes,
+notes,
+closedAt,
 now,
 tradeId,
 user.id
@@ -6171,7 +6204,7 @@ user.id
         fees,
         netPnl,
         status: "CLOSED",
-        closedAt: now
+        closedAt
       }
     });
 
@@ -9851,6 +9884,10 @@ async function routeRequest(request, env, ctx) {
       }
       if (path === "/api/trading/journal" && method === "GET") {
         return await journalGetTrades(request, env, user, url);
+      }
+      const deleteJournalMatch = path.match(/^\/api\/trading\/journal\/([A-Za-z0-9-]+)$/);
+      if (deleteJournalMatch && method === "DELETE") {
+        return await journalDeleteTrade(env, user, deleteJournalMatch[1]);
       }
       const closeMatch = path.match(/^\/api\/trading\/journal\/([A-Za-z0-9-]+)\/close$/);
       if (closeMatch && method === "POST") {
