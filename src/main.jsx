@@ -2019,6 +2019,47 @@ function RiskCentre({ symbol, marketPrice }) {
   const [dailyLoss, setDailyLoss] = useState(0);
   const [peakBalance, setPeakBalance] = useState(10000);
   const [riskMode, setRiskMode] = useState('fixed');
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState('');
+  const [settingsError, setSettingsError] = useState('');
+
+  React.useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const response = await fetch('/api/trading/risk/settings', { credentials: 'include' });
+        const result = await response.json();
+        if (!response.ok || result.ok === false) throw new Error(result.error || 'Unable to load risk settings.');
+        const saved = result.userSettings || {};
+        if (!active) return;
+        if (Number.isFinite(Number(saved.accountEquity))) { setBalance(Number(saved.accountEquity)); setPeakBalance(Number(saved.peakEquity ?? saved.accountEquity)); }
+        if (Number.isFinite(Number(saved.riskPerTradePct))) setRiskPct(Number(saved.riskPerTradePct));
+        if (Number.isFinite(Number(saved.dailyLossLimitPct))) setDailyLimitPct(Number(saved.dailyLossLimitPct));
+        if (Number.isFinite(Number(saved.maxDrawdownPct))) setDrawdownLimitPct(Number(saved.maxDrawdownPct));
+        if (Number.isFinite(Number(saved.currentDailyLoss))) setDailyLoss(Number(saved.currentDailyLoss));
+        if (saved.riskMode === 'fixed' || saved.riskMode === 'percentage') setRiskMode(saved.riskMode);
+        setSettingsMessage(saved.updatedAt ? 'Cloud settings loaded.' : 'Default settings loaded. Save to sync them to your account.');
+      } catch (error) {
+        if (active) setSettingsError(error.message || 'Unable to load cloud risk settings.');
+      } finally { if (active) setSettingsLoading(false); }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  const saveRiskSettings = async () => {
+    setSettingsSaving(true); setSettingsError(''); setSettingsMessage('');
+    try {
+      const response = await fetch('/api/trading/risk/settings', {
+        method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountEquity: balance, riskPerTradePct: riskPct, dailyLossLimitPct: dailyLimitPct, maxDrawdownPct: drawdownLimitPct, currentDailyLoss: dailyLoss, peakEquity: peakBalance, riskMode })
+      });
+      const result = await response.json();
+      if (!response.ok || result.ok === false) throw new Error(result.error || 'Unable to save risk settings.');
+      setSettingsMessage('Risk settings saved to your account.');
+    } catch (error) { setSettingsError(error.message || 'Unable to save risk settings.'); }
+    finally { setSettingsSaving(false); }
+  };
 
   const price = Number(marketPrice);
   const entryValue = Number(entry) || (Number.isFinite(price) && price > 0 ? price : 0);
@@ -2042,6 +2083,11 @@ function RiskCentre({ symbol, marketPrice }) {
     <div className="welcome"><div><h1>Risk Centre</h1><div className="muted">Position sizing, trade risk and account protection calculator.</div></div><div className="demo-badge">● RISK CONTROLS · CALCULATOR ONLY</div></div>
     <div className="card">
       <div className="card-heading"><div><h3>Account risk settings</h3><div className="muted">Configure the account assumptions and loss limits.</div></div><span className="tag">NO BROKER ENFORCEMENT</span></div>
+      <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginTop:12,marginBottom:8}}>
+        <button className="primary-button" type="button" onClick={saveRiskSettings} disabled={settingsSaving || settingsLoading}>{settingsSaving ? 'Saving…' : 'Save risk settings'}</button>
+        <span className="muted" style={{fontSize:11}}>{settingsLoading ? 'Loading account settings…' : settingsMessage}</span>
+        {settingsError && <span className="negative" style={{fontSize:11}}>{settingsError}</span>}
+      </div>
       <div className="order-grid" style={{marginTop:12}}>
         {field('Account equity (USD)', balance, v=>{const n=Math.max(0,Number(v)||0);setBalance(n);setPeakBalance(old=>Math.max(old,n));},'100')}
         <div className="field"><label>Risk per trade (%)</label><input type="number" min="0.1" max="5" step="0.1" value={riskPct} onChange={e=>setRiskPct(Math.max(0.1,Math.min(5,Number(e.target.value)||0.1)))}/></div>
