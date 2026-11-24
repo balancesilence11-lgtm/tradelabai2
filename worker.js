@@ -5777,41 +5777,94 @@ valid: true,
       "Risk assessment completed. No trade has been placed."
 });
 }
-async function handleRiskSettings() {
+const USER_RISK_DEFAULTS = {
+accountEquity: 10000,
+riskPerTradePct: 1,
+dailyLossLimitPct: 3,
+maxDrawdownPct: 10,
+currentDailyLoss: 0,
+peakEquity: 10000,
+riskMode: "fixed",
+updatedAt: null
+};
+async function riskSettingsGet(env, userId) {
+if (!env.DB) return { ...USER_RISK_DEFAULTS };
+const row = await env.DB.prepare(`
+SELECT account_equity, risk_per_trade_pct, daily_loss_limit_pct,
+       max_drawdown_pct, current_daily_loss, peak_equity, risk_mode, updated_at
+FROM user_risk_settings WHERE user_id = ?
+`).bind(userId).first();
+if (!row) return { ...USER_RISK_DEFAULTS };
+return {
+accountEquity: Number(row.account_equity),
+riskPerTradePct: Number(row.risk_per_trade_pct),
+dailyLossLimitPct: Number(row.daily_loss_limit_pct),
+maxDrawdownPct: Number(row.max_drawdown_pct),
+currentDailyLoss: Number(row.current_daily_loss),
+peakEquity: Number(row.peak_equity),
+riskMode: row.risk_mode === "percentage" ? "percentage" : "fixed",
+updatedAt: row.updated_at
+};
+}
+async function handleRiskSettings(request, env, user) {
+if (!env.DB) return json({ ok: false, error: "Risk settings database is unavailable." }, 503);
+if (request.method === "PUT") {
+let input;
+try { input = await request.json(); } catch { return json({ ok: false, error: "Invalid JSON request." }, 400); }
+if (!input || typeof input !== "object" || Array.isArray(input)) return json({ ok: false, error: "Invalid risk settings." }, 400);
+const number = (value, fallback) => value === undefined || value === null || value === "" ? fallback : Number(value);
+const settings = {
+accountEquity: number(input.accountEquity, USER_RISK_DEFAULTS.accountEquity),
+riskPerTradePct: number(input.riskPerTradePct, USER_RISK_DEFAULTS.riskPerTradePct),
+dailyLossLimitPct: number(input.dailyLossLimitPct, USER_RISK_DEFAULTS.dailyLossLimitPct),
+maxDrawdownPct: number(input.maxDrawdownPct, USER_RISK_DEFAULTS.maxDrawdownPct),
+currentDailyLoss: number(input.currentDailyLoss, USER_RISK_DEFAULTS.currentDailyLoss),
+peakEquity: number(input.peakEquity, USER_RISK_DEFAULTS.peakEquity),
+riskMode: input.riskMode === "percentage" ? "percentage" : "fixed"
+};
+if (!Object.values(settings).filter(v => typeof v === "number").every(Number.isFinite) ||
+settings.accountEquity <= 0 || settings.accountEquity > 1000000000 ||
+settings.riskPerTradePct < 0.1 || settings.riskPerTradePct > 5 ||
+settings.dailyLossLimitPct < 0.5 || settings.dailyLossLimitPct > 20 ||
+settings.maxDrawdownPct < 1 || settings.maxDrawdownPct > 50 ||
+settings.currentDailyLoss < 0 || settings.currentDailyLoss > 1000000000 ||
+settings.peakEquity < settings.accountEquity || settings.peakEquity > 1000000000) {
+return json({ ok: false, error: "Risk settings are outside the permitted limits. Check equity, risk percentages and loss values." }, 400);
+}
+const updatedAt = new Date().toISOString();
+await env.DB.prepare(`
+INSERT INTO user_risk_settings (
+user_id, account_equity, risk_per_trade_pct, daily_loss_limit_pct,
+max_drawdown_pct, current_daily_loss, peak_equity, risk_mode, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(user_id) DO UPDATE SET
+account_equity = excluded.account_equity,
+risk_per_trade_pct = excluded.risk_per_trade_pct,
+daily_loss_limit_pct = excluded.daily_loss_limit_pct,
+max_drawdown_pct = excluded.max_drawdown_pct,
+current_daily_loss = excluded.current_daily_loss,
+peak_equity = excluded.peak_equity,
+risk_mode = excluded.risk_mode,
+updated_at = excluded.updated_at
+`).bind(user.id, settings.accountEquity, settings.riskPerTradePct,
+settings.dailyLossLimitPct, settings.maxDrawdownPct, settings.currentDailyLoss,
+settings.peakEquity, settings.riskMode, updatedAt).run();
+return json({ ok: true, userSettings: { ...settings, updatedAt }, message: "Risk settings saved." });
+}
+const userSettings = await riskSettingsGet(env, user.id);
 return json({
 ok: true,
-    risk: {
-      minimumRiskPercent:
-        TRADE_RISK_CONFIG.minimumRiskPercent,
-
-      maximumRiskPercent:
-        TRADE_RISK_CONFIG.maximumRiskPercent,
-
-      defaultRiskPercent:
-        TRADE_RISK_CONFIG.defaultRiskPercent,
-
-      maximumOpenTrades:
-        TRADE_RISK_CONFIG.maximumOpenTrades,
-
-      maximumDailyLossPercent:
-        TRADE_RISK_CONFIG.maximumDailyLossPercent,
-
-      minimumRiskReward:
-        TRADE_RISK_CONFIG.minimumRiskReward
-    },
-
-    deriv: {
-      maximumStakeUSD:
-        TRADE_RISK_CONFIG.maximumDerivStakeUSD,
-
-      demoOnly: true
-    },
-
-    executionModes: [
-      "MANUAL",
-      "ASSISTED",
-      "AUTOMATED"
-    ]
+userSettings,
+risk: {
+minimumRiskPercent: TRADE_RISK_CONFIG.minimumRiskPercent,
+maximumRiskPercent: TRADE_RISK_CONFIG.maximumRiskPercent,
+defaultRiskPercent: TRADE_RISK_CONFIG.defaultRiskPercent,
+maximumOpenTrades: TRADE_RISK_CONFIG.maximumOpenTrades,
+maximumDailyLossPercent: TRADE_RISK_CONFIG.maximumDailyLossPercent,
+minimumRiskReward: TRADE_RISK_CONFIG.minimumRiskReward
+},
+deriv: { maximumStakeUSD: TRADE_RISK_CONFIG.maximumDerivStakeUSD, demoOnly: true },
+executionModes: ["MANUAL", "ASSISTED", "AUTOMATED"]
 });
 }
 // ============================================================
@@ -8338,6 +8391,13 @@ const path = url.pathname;
                 )
             ]);
 
+            let accountRiskSettings = { ...USER_RISK_DEFAULTS };
+            try {
+                accountRiskSettings = await riskSettingsGet(env, user.id);
+            } catch (riskSettingsError) {
+                console.warn("Dashboard risk settings sync unavailable:", riskSettingsError?.message || riskSettingsError);
+            }
+
             let unreadNotifications = 0;
 
             try {
@@ -8362,6 +8422,8 @@ const path = url.pathname;
                     generatedAt: new Date().toISOString(),
 
                     portfolio,
+
+                    riskSettings: accountRiskSettings,
 
                     positions: {
                         openCount: openPositions.length,
@@ -9932,8 +9994,8 @@ async function routeRequest(request, env, ctx) {
       if (path === "/api/trading/risk/assess" && method === "POST") {
         return await handleRiskAssessment(request, env, user);
       }
-      if (path === "/api/trading/risk/settings" && method === "GET") {
-        return await handleRiskSettings();
+      if (path === "/api/trading/risk/settings" && (method === "GET" || method === "PUT")) {
+        return await handleRiskSettings(request, env, user);
       }
       if (path === "/api/trading/journal" && method === "POST") {
         return await journalCreateTrade(request, env, user);
