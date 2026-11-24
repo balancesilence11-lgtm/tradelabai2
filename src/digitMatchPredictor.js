@@ -136,13 +136,23 @@ export class DigitMatchPredictor {
     const frequencyProbabilities = historical.map(item => item.posteriorProbability);
     const trendProbabilities = recent.map(item => item.posteriorProbability);
     const markovProbabilities = transition.probabilities.map(item => item.probability);
+
+    // Keep the ensemble fully normalized in both operating states.
+    // With enough transition observations: 35% + 30% + 20% + 15% = 100%.
+    // Without enough transition observations: 35% + 30% + 35% = 100%.
+    const frequencyWeight = 0.35;
+    const trendWeight = 0.30;
+    const transitionWeight = transitionUsable ? 0.15 : 0;
+    const weightedWeight = transitionUsable ? 0.20 : 0.35;
+    const totalModelWeight = frequencyWeight + trendWeight + transitionWeight + weightedWeight;
+
+    if (Math.abs(totalModelWeight - 1) > 1e-12) {
+      throw new Error(`Digit predictor model weights must total 100%; received ${(totalModelWeight * 100).toFixed(2)}%.`);
+    }
+
     const scores = [];
 
     for (let digit = 0; digit < DIGITS; digit++) {
-      const transitionWeight = transitionUsable ? 0.15 : 0;
-      const frequencyWeight = 0.35;
-      const trendWeight = 0.30;
-      const weightedWeight = 0.20 - transitionWeight;
       const score = frequencyProbabilities[digit] * frequencyWeight
         + trendProbabilities[digit] * trendWeight
         + weighted[digit].probability * weightedWeight
@@ -190,7 +200,7 @@ export class DigitMatchPredictor {
         frequency: { weight: 0.35, probabilities: frequencyProbabilities },
         trend: { weight: 0.30, probabilities: trendProbabilities },
         markov: { weight: transitionUsable ? 0.15 : 0, observations: transition.observations, probabilities: markovProbabilities },
-        weightedFrequency: { weight: transitionUsable ? 0.05 : 0.20, probabilities: weighted.map(item => item.probability) }
+        weightedFrequency: { weight: weightedWeight, probabilities: weighted.map(item => item.probability) }
       },
       timestamp: Date.now()
     };
