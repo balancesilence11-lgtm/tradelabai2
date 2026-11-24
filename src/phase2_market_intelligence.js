@@ -1,3 +1,4 @@
+import { handleMarketIntelligence } from "./phase2_market_intelligence.js";
 /*
  * TradeLab AI — Phase 2 Market Intelligence (additive module)
  * Requires existing Cloudflare Worker bindings: DB (D1), FINNHUB_API_KEY.
