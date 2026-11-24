@@ -3517,10 +3517,10 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
   const [watchlistId, setWatchlistId] = useState(null);
   const [watchlistLoading, setWatchlistLoading] = useState(true);
   const [watchlistSync, setWatchlistSync] = useState('loading');
-  const [alerts, setAlerts] = useState(() => {
-    try { const saved=JSON.parse(localStorage.getItem('tradelab_price_alerts_v1')||'[]'); return Array.isArray(saved)?saved:[]; }
-    catch { return []; }
-  });
+  const [alerts, setAlerts] = useState([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertsSync, setAlertsSync] = useState('loading');
+  const alertRequests = useRef(new Set());
   const [newSymbol,setNewSymbol]=useState(selectedMarket||'EURUSD');
   const [condition,setCondition]=useState('above');
   const [target,setTarget]=useState('');
@@ -3534,6 +3534,49 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
     if (!response.ok || result.ok === false) throw new Error(result.error || `Watchlist request failed (${response.status}).`);
     return result;
   };
+  const alertsApi = async (path, options = {}) => {
+    const response = await fetch(path, { credentials: 'include', ...options });
+    let result = {};
+    try { result = await response.json(); } catch {}
+    if (!response.ok || result.ok === false) throw new Error(result.error || `Price alert request failed (${response.status}).`);
+    return result;
+  };
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await alertsApi('/api/price-alerts');
+        let serverAlerts = Array.isArray(result.alerts) ? result.alerts : [];
+        const localAlerts = (() => { try { const value=JSON.parse(localStorage.getItem('tradelab_price_alerts_v1')||'[]'); return Array.isArray(value)?value:[]; } catch { return []; } })();
+        const migrationKey = 'tradelab_price_alerts_cloud_migrated_v1';
+        if (localAlerts.length && localStorage.getItem(migrationKey) !== 'true') {
+          let migrationComplete = true;
+          const knownIds = new Set(serverAlerts.map(item => String(item.id)));
+          for (const alert of localAlerts.slice(0,100)) {
+            if (knownIds.has(String(alert.id))) continue;
+            try {
+              const saved = await alertsApi('/api/price-alerts', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:alert.id, symbol:alert.symbol, condition:alert.condition, target:alert.target, referencePrice:alert.referencePrice, lastPrice:alert.lastPrice, enabled:alert.enabled !== false, triggeredAt:alert.triggeredAt || null, createdAt:alert.createdAt || new Date().toISOString() }) });
+              if (saved.alert) { serverAlerts.push(saved.alert); knownIds.add(String(saved.alert.id)); }
+              else migrationComplete = false;
+            } catch (migrationError) { migrationComplete = false; console.warn('Price alert migration skipped:', migrationError); }
+          }
+          if (migrationComplete) localStorage.setItem(migrationKey,'true');
+          const refreshed = await alertsApi('/api/price-alerts');
+          serverAlerts = Array.isArray(refreshed.alerts) ? refreshed.alerts : serverAlerts;
+        } else if (!localAlerts.length && localStorage.getItem(migrationKey) !== 'true') {
+          localStorage.setItem(migrationKey,'true');
+        }
+        if (!cancelled) { setAlerts(serverAlerts); setAlertsSync('synced'); }
+      } catch (error) {
+        console.error('Cloud price alerts unavailable:', error);
+        if (!cancelled) {
+          try { const saved=JSON.parse(localStorage.getItem('tradelab_price_alerts_v1')||'[]'); setAlerts(Array.isArray(saved)?saved:[]); } catch { setAlerts([]); }
+          setAlertsSync('offline'); setNotice(`Cloud price alerts unavailable: ${error.message}. Local alert data is retained.`);
+        }
+      } finally { if (!cancelled) setAlertsLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -3571,18 +3614,37 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
   useEffect(()=>{try { localStorage.setItem('tradelab_watchlist_v1',JSON.stringify(watchlist)); } catch {}},[watchlist]);
   useEffect(()=>{try { localStorage.setItem('tradelab_price_alerts_v1',JSON.stringify(alerts)); } catch {}},[alerts]);
   useEffect(()=>{
-    setAlerts(previous=>previous.map(a=>{
-      if(!a.enabled||a.triggeredAt)return a;
-      const price=priceFor(a.symbol); if(price===null)return a;
-      const hit=a.condition==='above'?price>=a.target:a.condition==='below'?price<=a.target:Math.abs((price-a.referencePrice)/a.referencePrice*100)>=a.target;
-      if(!hit)return {...a,lastPrice:price};
-      const triggeredAt=new Date().toISOString();
-      if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
-        try { new Notification(`TradeLab price alert · ${a.symbol}`,{body:`${a.condition==='move'?'Move threshold reached':a.condition==='above'?'Price reached or exceeded':'Price reached or fell below'} ${a.target}${a.condition==='move'?'%':` · Current ${price}`}.`}); } catch {}
+    if (alertsSync !== 'synced') return;
+    for (const alert of alerts) {
+      if (!alert.enabled || alert.triggeredAt || alertRequests.current.has(String(alert.id))) continue;
+      const price = priceFor(alert.symbol);
+      if (price === null) continue;
+      const baseline = Number(alert.referencePrice);
+      const targetValue = Number(alert.target);
+      const hit = alert.condition === 'above' ? price >= targetValue : alert.condition === 'below' ? price <= targetValue : Number.isFinite(baseline) && baseline > 0 && Math.abs((price-baseline)/baseline*100) >= targetValue;
+      if (!hit) {
+        if (Number(alert.lastPrice) !== price) {
+          alertRequests.current.add(String(alert.id));
+          alertsApi(`/api/price-alerts/${encodeURIComponent(alert.id)}`, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({lastPrice:price})})
+            .then(({alert:updated})=>{ if(updated) setAlerts(previous=>previous.map(item=>String(item.id)===String(updated.id)?updated:item)); })
+            .catch(error=>console.warn('Could not update alert quote:',error))
+            .finally(()=>alertRequests.current.delete(String(alert.id)));
+        }
+        continue;
       }
-      return {...a,lastPrice:price,triggeredAt};
-    }));
-  },[markets]);
+      alertRequests.current.add(String(alert.id));
+      alertsApi(`/api/price-alerts/${encodeURIComponent(alert.id)}/trigger`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({price})})
+        .then(({alert:updated})=>{
+          if (!updated) return;
+          setAlerts(previous=>previous.map(item=>String(item.id)===String(updated.id)?updated:item));
+          if (typeof Notification!=='undefined' && Notification.permission==='granted') {
+            try { new Notification(`TradeLab price alert · ${updated.symbol}`,{body:`${updated.condition==='move'?'Move threshold reached':updated.condition==='above'?'Price reached or exceeded':'Price reached or fell below'} ${updated.target}${updated.condition==='move'?'%':` · Current ${price}`}.`}); } catch {}
+          }
+        })
+        .catch(error=>console.error('Price alert trigger could not be saved:',error))
+        .finally(()=>alertRequests.current.delete(String(alert.id)));
+    }
+  },[markets,alerts,alertsSync]);
   const addWatch=async(symbol)=>{
     if (watchlist.includes(symbol)) return;
     if (!watchlistId) { setNotice('Cloud watchlist is not connected. Your existing local list is unchanged.'); return; }
@@ -3598,12 +3660,17 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
       setWatchlist(v=>v.filter(item=>item!==symbol)); setWatchlistSync('synced'); setNotice(`${symbol} removed from your cloud watchlist.`);
     } catch(error) { setNotice(`Could not remove ${symbol}: ${error.message}`); }
   };
-  const addAlert=()=>{
+  const addAlert=async()=>{
     const value=Number(target),price=priceFor(newSymbol);
     if(!Number.isFinite(value)||value<=0){setNotice('Enter a target greater than zero.');return;}
     if(condition==='move'&&(!price||price<=0)){setNotice('A confirmed live price is required to set a percentage-move baseline.');return;}
-    setAlerts(v=>[{id:`${Date.now()}-${Math.random().toString(16).slice(2)}`,symbol:newSymbol,condition,target:value,referencePrice:condition==='move'?price:null,lastPrice:price,enabled:true,triggeredAt:null,createdAt:new Date().toISOString()},...v].slice(0,100));
-    void addWatch(newSymbol);setTarget('');setNotice('Price alert saved on this browser.');
+    const payload={symbol:newSymbol,condition,target:value,referencePrice:condition==='move'?price:null,lastPrice:price,enabled:true};
+    try {
+      const result=await alertsApi('/api/price-alerts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      if(!result.alert) throw new Error('The server did not return the saved alert.');
+      setAlerts(v=>[result.alert,...v.filter(item=>String(item.id)!==String(result.alert.id))].slice(0,100));
+      setAlertsSync('synced');void addWatch(newSymbol);setTarget('');setNotice('Price alert saved to your account.');
+    } catch(error) { setAlertsSync('offline');setNotice(`Could not save alert to your account: ${error.message}. Existing alerts remain available locally.`); }
   };
   const enableNotifications=async()=>{
     if(typeof Notification==='undefined'){setNotice('Browser notifications are not supported here.');return;}
@@ -3612,11 +3679,11 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
   };
   const fmt=(symbol,value)=>value==null?'—':Number(value).toLocaleString(undefined,{maximumFractionDigits:symbol==='USDJPY'?3:symbol==='XAUUSD'||symbol==='BTCUSD'||symbol==='US30'?2:5});
   return <>
-    <div className="welcome"><div><h1>Market Watchlist & Price Alerts</h1><div className="muted">Track selected instruments and monitor price levels using confirmed quotes received by this browser.</div></div><div className="demo-badge">● {watchlistSync === 'synced' ? 'CLOUD WATCHLIST SYNCED' : watchlistSync === 'loading' ? 'CONNECTING WATCHLIST' : 'LOCAL WATCHLIST FALLBACK'}</div></div>
+    <div className="welcome"><div><h1>Market Watchlist & Price Alerts</h1><div className="muted">Track selected instruments and monitor price levels using confirmed quotes received by this browser.</div></div><div className="demo-badge">● {watchlistSync === 'synced' ? 'CLOUD WATCHLIST SYNCED' : watchlistSync === 'loading' ? 'CONNECTING WATCHLIST' : 'LOCAL WATCHLIST FALLBACK'} · {alertsSync==='synced'?'CLOUD ALERTS SYNCED':alertsSync==='loading'?'CONNECTING ALERTS':'LOCAL ALERT FALLBACK'}</div></div>
     <div className="stats-grid">
       <div className="card"><div className="stat-label">Watchlist instruments</div><div className="stat-value">{watchlist.length}</div><div className="muted">{watchlistSync === 'synced' ? 'Synced to your account' : 'Browser copy retained'}</div></div>
       <div className="card"><div className="stat-label">Active alerts</div><div className="stat-value">{alerts.filter(a=>a.enabled&&!a.triggeredAt).length}</div><div className="muted">Waiting for a qualifying quote</div></div>
-      <div className="card"><div className="stat-label">Triggered alerts</div><div className="stat-value">{alerts.filter(a=>!!a.triggeredAt).length}</div><div className="muted">Stored in local alert history</div></div>
+      <div className="card"><div className="stat-label">Triggered alerts</div><div className="stat-value">{alerts.filter(a=>!!a.triggeredAt).length}</div><div className="muted">{alertsSync==='synced'?'Stored in your account':'Stored in browser fallback'}</div></div>
       <div className="card"><div className="stat-label">Browser notifications</div><div className="stat-value" style={{fontSize:18}}>{permission==='granted'?'Enabled':permission==='unsupported'?'Unsupported':permission==='denied'?'Blocked':'Not enabled'}</div><button className="period-btn" style={{marginTop:8}} onClick={enableNotifications}>Enable notifications</button></div>
     </div>
     <div className="bottom-grid" style={{marginTop:16}}>
@@ -3633,9 +3700,9 @@ function MarketWatchAlerts({ markets, selectedMarket, onSelectMarket }) {
         {notice&&<p className="muted" role="status">{notice}</p>}
       </div>
     </div>
-    <div className="card" style={{marginTop:16}}><div className="card-heading"><div><h3>Alert Monitor & History</h3><div className="muted">Triggered alerts remain in history until you remove them.</div></div><button className="period-btn" onClick={()=>setAlerts(v=>v.filter(a=>!a.triggeredAt))}>Clear triggered history</button></div>
-      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Condition</th><th>Threshold</th><th>Latest quote</th><th>Status</th><th>Triggered</th><th>Action</th></tr></thead><tbody>{alerts.length===0?<tr><td colSpan="7" className="empty">No price alerts configured.</td></tr>:alerts.map(a=><tr key={a.id}><td>{a.symbol}</td><td>{a.condition==='above'?'Price above':a.condition==='below'?'Price below':'Absolute move'}</td><td>{a.condition==='move'?`${a.target}%` :fmt(a.symbol,a.target)}</td><td>{fmt(a.symbol,priceFor(a.symbol)??a.lastPrice)}</td><td><span className="tag" style={{background:a.triggeredAt?'#3b2630':a.enabled?'#153c36':'#26364e',color:a.triggeredAt?'#ff8da1':a.enabled?'#21d6a0':'#aab5c5'}}>{a.triggeredAt?'TRIGGERED':a.enabled?'ACTIVE':'PAUSED'}</span></td><td>{a.triggeredAt?new Date(a.triggeredAt).toLocaleString():'—'}</td><td><div style={{display:'flex',gap:5}}>{!a.triggeredAt&&<button className="period-btn" onClick={()=>setAlerts(v=>v.map(x=>x.id===a.id?{...x,enabled:!x.enabled}:x))}>{a.enabled?'Pause':'Resume'}</button>}<button className="period-btn" onClick={()=>setAlerts(v=>v.filter(x=>x.id!==a.id))}><Trash2 size={14}/></button></div></td></tr>)}</tbody></table></div>
-      <p className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:12}}>Important: quote checks use the platform's existing periodic market-data refresh, not a continuous tick stream. Alerts only evaluate while TradeLab is open and the relevant instrument is being refreshed; browser notifications depend on permission and browser support. Watchlists sync to your account when connected. Price-alert rules and trigger history remain local to this browser for now. No orders are placed when an alert triggers.</p>
+    <div className="card" style={{marginTop:16}}><div className="card-heading"><div><h3>Alert Monitor & History</h3><div className="muted">Triggered alerts remain in history until you remove them.</div></div><button className="period-btn" onClick={async()=>{try{await alertsApi('/api/price-alerts/triggered',{method:'DELETE'});setAlerts(v=>v.filter(a=>!a.triggeredAt));setNotice('Triggered alert history cleared from your account.');}catch(e){setNotice(`Could not clear alert history: ${e.message}`);}}}>Clear triggered history</button></div>
+      <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Condition</th><th>Threshold</th><th>Latest quote</th><th>Status</th><th>Triggered</th><th>Action</th></tr></thead><tbody>{alertsLoading?<tr><td colSpan="7" className="empty">Loading your account price alerts…</td></tr>:alerts.length===0?<tr><td colSpan="7" className="empty">No price alerts configured.</td></tr>:alerts.map(a=><tr key={a.id}><td>{a.symbol}</td><td>{a.condition==='above'?'Price above':a.condition==='below'?'Price below':'Absolute move'}</td><td>{a.condition==='move'?`${a.target}%` :fmt(a.symbol,a.target)}</td><td>{fmt(a.symbol,priceFor(a.symbol)??a.lastPrice)}</td><td><span className="tag" style={{background:a.triggeredAt?'#3b2630':a.enabled?'#153c36':'#26364e',color:a.triggeredAt?'#ff8da1':a.enabled?'#21d6a0':'#aab5c5'}}>{a.triggeredAt?'TRIGGERED':a.enabled?'ACTIVE':'PAUSED'}</span></td><td>{a.triggeredAt?new Date(a.triggeredAt).toLocaleString():'—'}</td><td><div style={{display:'flex',gap:5}}>{!a.triggeredAt&&<button className="period-btn" onClick={async()=>{try{const result=await alertsApi(`/api/price-alerts/${encodeURIComponent(a.id)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!a.enabled})});if(result.alert)setAlerts(v=>v.map(x=>String(x.id)===String(a.id)?result.alert:x));}catch(e){setNotice(`Could not update alert: ${e.message}`);}}}>{a.enabled?'Pause':'Resume'}</button>}<button className="period-btn" onClick={async()=>{try{await alertsApi(`/api/price-alerts/${encodeURIComponent(a.id)}`,{method:'DELETE'});setAlerts(v=>v.filter(x=>String(x.id)!==String(a.id)));}catch(e){setNotice(`Could not delete alert: ${e.message}`);}}}><Trash2 size={14}/></button></div></td></tr>)}</tbody></table></div>
+      <p className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:12}}>Important: quote checks use the platform's existing periodic market-data refresh, not a continuous tick stream. Alerts only evaluate while TradeLab is open and the relevant instrument is being refreshed; browser notifications depend on permission and browser support. Watchlists sync to your account when connected. Price-alert rules and trigger history sync to your account; quote evaluation still runs while this browser is open. No orders are placed when an alert triggers.</p>
     </div>
   </>;
 }
