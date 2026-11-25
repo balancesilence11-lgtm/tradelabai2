@@ -508,15 +508,155 @@ function calcATR(candles, period = 14) {
 
   return out;
 }
-  const n=candles.length, tr=[],pdm=[],mdm=[];
-  for(let i=0;i<n;i++){if(!i){tr.push(null);pdm.push(0);mdm.push(0);continue;}const up=Number(candles[i].high)-Number(candles[i-1].high),down=Number(candles[i-1].low)-Number(candles[i].low);pdm.push(up>down&&up>0?up:0);mdm.push(down>up&&down>0?down:0);tr.push(Math.max(Number(candles[i].high)-Number(candles[i].low),Math.abs(Number(candles[i].high)-Number(candles[i-1].close)),Math.abs(Number(candles[i].low)-Number(candles[i-1].close))));}
-  const smooth=a=>{let out=Array(n).fill(null);if(n<=period)return out;let v=a.slice(1,period+1).reduce((x,y)=>x+y,0);out[period]=v;for(let i=period+1;i<n;i++){v=v-v/period+a[i];out[i]=v;}return out;};
-  const atr=smooth(tr.map(v=>v??0)),ps=smooth(pdm),ms=smooth(mdm),dx=Array(n).fill(null);
-  for(let i=period;i<n;i++){if(atr[i]>0){const p=100*ps[i]/atr[i],m=100*ms[i]/atr[i];dx[i]=p+m?100*Math.abs(p-m)/(p+m):0;}}
-  const adx=Array(n).fill(null);let valid=dx.map((v,i)=>v==null?null:{v,i}).filter(Boolean);if(valid.length>=period){let start=valid.slice(0,period).reduce((a,x)=>a+x.v,0)/period;adx[valid[period-1].i]=start;for(let k=period;k<valid.length;k++){start=(start*(period-1)+valid[k].v)/period;adx[valid[k].i]=start;}}
-  return adx;
+  function calcADX(candles, period = 14) {
+  const n = candles.length;
+  const adx = Array(n).fill(null);
+
+  if (!Number.isInteger(period) || period < 2 || n < period * 2) {
+    return adx;
+  }
+
+  const validOHLC = c =>
+    c &&
+    Number.isFinite(Number(c.high)) &&
+    Number.isFinite(Number(c.low)) &&
+    Number.isFinite(Number(c.close)) &&
+    Number(c.high) >= Number(c.low);
+
+  const tr = Array(n).fill(null);
+  const pdm = Array(n).fill(null);
+  const mdm = Array(n).fill(null);
+
+  for (let i = 1; i < n; i++) {
+    const current = candles[i];
+    const previous = candles[i - 1];
+
+    if (!validOHLC(current) || !validOHLC(previous)) continue;
+
+    const high = Number(current.high);
+    const low = Number(current.low);
+    const prevHigh = Number(previous.high);
+    const prevLow = Number(previous.low);
+    const prevClose = Number(previous.close);
+
+    const upMove = high - prevHigh;
+    const downMove = prevLow - low;
+
+    tr[i] = Math.max(
+      high - low,
+      Math.abs(high - prevClose),
+      Math.abs(low - prevClose)
+    );
+
+    pdm[i] = upMove > downMove && upMove > 0 ? upMove : 0;
+    mdm[i] = downMove > upMove && downMove > 0 ? downMove : 0;
+  }
+
+  function wilderSmooth(values) {
+    const result = Array(n).fill(null);
+    let sum = 0;
+    let count = 0;
+    let previous = null;
+
+    for (let i = 0; i < n; i++) {
+      const value = values[i];
+
+      if (!Number.isFinite(value)) {
+        sum = 0;
+        count = 0;
+        previous = null;
+        continue;
+      }
+
+      if (previous === null) {
+        sum += value;
+        count++;
+
+        if (count === period) {
+          previous = sum;
+          result[i] = previous;
+        }
+      } else {
+        previous = previous - previous / period + value;
+        result[i] = previous;
+      }
+    }
+
+    return result;
+  }
+
+  const smoothTR = wilderSmooth(tr);
+  const smoothPDM = wilderSmooth(pdm);
+  const smoothMDM = wilderSmooth(mdm);
+
+  const dx = Array(n).fill(null);
+
+  for (let i = 0; i < n; i++) {
+    if (
+      smoothTR[i] === null ||
+      smoothTR[i] <= 0 ||
+      smoothPDM[i] === null ||
+      smoothMDM[i] === null
+    ) continue;
+
+    const plusDI = 100 * smoothPDM[i] / smoothTR[i];
+    const minusDI = 100 * smoothMDM[i] / smoothTR[i];
+
+    const denominator = plusDI + minusDI;
+
+    dx[i] = denominator === 0
+      ? 0
+      : 100 * Math.abs(plusDI - minusDI) / denominator;
+  }
+
+  return wilderSmooth(dx);
 }
-function calcStochastic(candles,kPeriod=14,dPeriod=3){const k=candles.map((c,i)=>{if(i<kPeriod-1)return null;const w=candles.slice(i-kPeriod+1,i+1),hi=Math.max(...w.map(x=>Number(x.high))),lo=Math.min(...w.map(x=>Number(x.low)));return hi===lo?50:(Number(c.close)-lo)/(hi-lo)*100;});const d=k.map((_,i)=>{const w=k.slice(Math.max(0,i-dPeriod+1),i+1).filter(v=>v!=null);return w.length===dPeriod?average(w):null;});return {k,d};}
+function calcStochastic(candles, kPeriod = 14, dPeriod = 3) {
+  const n = candles.length;
+
+  const k = Array(n).fill(null);
+  const d = Array(n).fill(null);
+
+  if (
+    !Number.isInteger(kPeriod) || kPeriod < 1 ||
+    !Number.isInteger(dPeriod) || dPeriod < 1
+  ) {
+    return { k, d };
+  }
+
+  const validOHLC = c =>
+    c &&
+    Number.isFinite(Number(c.high)) &&
+    Number.isFinite(Number(c.low)) &&
+    Number.isFinite(Number(c.close)) &&
+    Number(c.high) >= Number(c.low);
+
+  for (let i = kPeriod - 1; i < n; i++) {
+    const window = candles.slice(i - kPeriod + 1, i + 1);
+
+    if (!window.every(validOHLC)) continue;
+
+    const highest = Math.max(...window.map(c => Number(c.high)));
+    const lowest = Math.min(...window.map(c => Number(c.low)));
+    const close = Number(candles[i].close);
+
+    k[i] = highest === lowest
+      ? 50
+      : ((close - lowest) / (highest - lowest)) * 100;
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (i < dPeriod - 1) continue;
+
+    const window = k.slice(i - dPeriod + 1, i + 1);
+
+    if (window.every(Number.isFinite)) {
+      d[i] = average(window);
+    }
+  }
+
+  return { k, d };
+}
 function buildIndicators(candles, periods){const closes=candles.map(c=>Number(c.close));return {emaFast:calcEMA(closes,periods.emaFast),emaSlow:calcEMA(closes,periods.emaSlow),emaLong:calcEMA(closes,periods.emaLong),sma20:calcSMA(closes,20),sma50:calcSMA(closes,50),sma200:calcSMA(closes,200),rsi:calcRSI(closes,periods.rsi),macd:calcMACD(closes),bb:calcBollinger(closes,periods.bb,2),atr:calcATR(candles,periods.atr),adx:calcADX(candles,periods.adx),stoch:calcStochastic(candles)};}
 function IndicatorSuite({candles,symbol}){
   const [enabled,setEnabled]=useState({emaFast:true,emaSlow:true,emaLong:false,sma20:true,sma50:true,sma200:false,rsi:true,macd:true,bb:true,atr:true,adx:true,stoch:true,bbPosition:true});
