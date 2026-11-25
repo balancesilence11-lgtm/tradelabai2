@@ -445,8 +445,69 @@ function calcMACD(values, fast=12, slow=26, signal=9){
   return {line,signal:sig,histogram:line.map((v,i)=>v!=null&&sig[i]!=null?v-sig[i]:null)};
 }
 function calcBollinger(values,period=20,mult=2){return values.map((_,i)=>{if(i<period-1)return null;const a=values.slice(i-period+1,i+1),m=average(a),sd=Math.sqrt(average(a.map(v=>(v-m)**2)));return {middle:m,upper:m+mult*sd,lower:m-mult*sd};});}
-function calcATR(candles,period=14){const tr=candles.map((c,i)=>i===0?Number(c.high)-Number(c.low):Math.max(Number(c.high)-Number(c.low),Math.abs(Number(c.high)-Number(candles[i-1].close)),Math.abs(Number(c.low)-Number(candles[i-1].close))));if(tr.length<period)return [];let prev=average(tr.slice(0,period)),out=Array(tr.length).fill(null);out[period-1]=prev;for(let i=period;i<tr.length;i++){prev=((prev*(period-1))+tr[i])/period;out[i]=prev;}return out;}
-function calcADX(candles,period=14){
+function calcATR(candles, period = 14) {
+  const out = Array(candles.length).fill(null);
+
+  if (!Number.isInteger(period) || period < 1) return out;
+
+  const validOHLC = c =>
+    c &&
+    Number.isFinite(Number(c.high)) &&
+    Number.isFinite(Number(c.low)) &&
+    Number.isFinite(Number(c.close)) &&
+    Number(c.high) >= Number(c.low);
+
+  const tr = candles.map((c, i) => {
+    if (!validOHLC(c)) return null;
+
+    const high = Number(c.high);
+    const low = Number(c.low);
+
+    if (i === 0) return high - low;
+
+    const previous = candles[i - 1];
+
+    if (!validOHLC(previous)) return null;
+
+    const previousClose = Number(previous.close);
+
+    return Math.max(
+      high - low,
+      Math.abs(high - previousClose),
+      Math.abs(low - previousClose)
+    );
+  });
+
+  let sum = 0;
+  let count = 0;
+  let previousATR = null;
+
+  for (let i = 0; i < tr.length; i++) {
+    if (tr[i] === null || !Number.isFinite(tr[i])) {
+      sum = 0;
+      count = 0;
+      previousATR = null;
+      continue;
+    }
+
+    if (previousATR === null) {
+      sum += tr[i];
+      count++;
+
+      if (count === period) {
+        previousATR = sum / period;
+        out[i] = previousATR;
+      }
+    } else {
+      previousATR =
+        (previousATR * (period - 1) + tr[i]) / period;
+
+      out[i] = previousATR;
+    }
+  }
+
+  return out;
+}
   const n=candles.length, tr=[],pdm=[],mdm=[];
   for(let i=0;i<n;i++){if(!i){tr.push(null);pdm.push(0);mdm.push(0);continue;}const up=Number(candles[i].high)-Number(candles[i-1].high),down=Number(candles[i-1].low)-Number(candles[i].low);pdm.push(up>down&&up>0?up:0);mdm.push(down>up&&down>0?down:0);tr.push(Math.max(Number(candles[i].high)-Number(candles[i].low),Math.abs(Number(candles[i].high)-Number(candles[i-1].close)),Math.abs(Number(candles[i].low)-Number(candles[i-1].close))));}
   const smooth=a=>{let out=Array(n).fill(null);if(n<=period)return out;let v=a.slice(1,period+1).reduce((x,y)=>x+y,0);out[period]=v;for(let i=period+1;i<n;i++){v=v-v/period+a[i];out[i]=v;}return out;};
