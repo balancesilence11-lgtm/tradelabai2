@@ -333,18 +333,41 @@ function detectWyckoffEvent(candles, lookback=20) {
 }
 
 // ---------------- Technical indicator calculations ----------------
-const average = values => values.length ? values.reduce((a,b)=>a+b,0)/values.length : null;
+const average = values =>
+  values.length && values.every(Number.isFinite)
+    ? values.reduce((a, b) => a + b, 0) / values.length
+    : null;
+
 function calcSMA(values, period) {
-  const out=Array(values.length).fill(null);
+  const out = Array(values.length).fill(null);
+
   if (!Number.isInteger(period) || period < 1) return out;
-  let sum=0;
-  for(let i=0;i<values.length;i++){
-    const value=Number(values[i]);
-    if(!Number.isFinite(value)) { sum=0; continue; }
-    sum+=value;
-    if(i>=period) sum-=Number(values[i-period]);
-    if(i>=period-1) out[i]=sum/period;
+
+  let sum = 0;
+  let validCount = 0;
+
+  for (let i = 0; i < values.length; i++) {
+    const value = Number(values[i]);
+
+    if (Number.isFinite(value)) {
+      sum += value;
+      validCount++;
+    }
+
+    if (i >= period) {
+      const oldValue = Number(values[i - period]);
+
+      if (Number.isFinite(oldValue)) {
+        sum -= oldValue;
+        validCount--;
+      }
+    }
+
+    if (i >= period - 1 && validCount === period) {
+      out[i] = sum / period;
+    }
   }
+
   return out;
 }
 function calcEMA(values, period) {
@@ -355,13 +378,64 @@ function calcEMA(values, period) {
   for(let i=period;i<values.length;i++){ prev=values[i]*k+prev*(1-k); out[i]=prev; }
   return out;
 }
-function calcRSI(values, period=14) {
-  if(values.length<=period) return [];
-  let gains=0,losses=0;
-  for(let i=1;i<=period;i++){const d=values[i]-values[i-1];if(d>=0)gains+=d;else losses-=d;}
-  let avgGain=gains/period,avgLoss=losses/period,out=Array(values.length).fill(null);
-  out[period]=avgLoss===0?100:100-100/(1+avgGain/avgLoss);
-  for(let i=period+1;i<values.length;i++){const d=values[i]-values[i-1];avgGain=(avgGain*(period-1)+Math.max(d,0))/period;avgLoss=(avgLoss*(period-1)+Math.max(-d,0))/period;out[i]=avgLoss===0?100:100-100/(1+avgGain/avgLoss);}
+function calcRSI(values, period = 14) {
+  const out = Array(values.length).fill(null);
+
+  if (!Number.isInteger(period) || period < 1) return out;
+
+  let gains = 0;
+  let losses = 0;
+  let validChanges = 0;
+
+  for (let i = 1; i < values.length; i++) {
+    const current = Number(values[i]);
+    const previous = Number(values[i - 1]);
+
+    if (!Number.isFinite(current) || !Number.isFinite(previous)) {
+      gains = 0;
+      losses = 0;
+      validChanges = 0;
+      continue;
+    }
+
+    const change = current - previous;
+
+    if (validChanges < period) {
+      gains += Math.max(change, 0);
+      losses += Math.max(-change, 0);
+      validChanges++;
+
+      if (validChanges === period) {
+        const avgGain = gains / period;
+        const avgLoss = losses / period;
+
+        out[i] = avgGain === 0 && avgLoss === 0
+          ? 50
+          : avgLoss === 0
+            ? 100
+            : avgGain === 0
+              ? 0
+              : 100 - 100 / (1 + avgGain / avgLoss);
+
+        gains = avgGain;
+        losses = avgLoss;
+      }
+
+      continue;
+    }
+
+    gains = (gains * (period - 1) + Math.max(change, 0)) / period;
+    losses = (losses * (period - 1) + Math.max(-change, 0)) / period;
+
+    out[i] = gains === 0 && losses === 0
+      ? 50
+      : losses === 0
+        ? 100
+        : gains === 0
+          ? 0
+          : 100 - 100 / (1 + gains / losses);
+  }
+
   return out;
 }
 function calcMACD(values, fast=12, slow=26, signal=9){
