@@ -54,6 +54,7 @@ const TIMEFRAME_OPTIONS = [
 const navigation = [
   { name: 'Dashboard', icon: LayoutDashboard },
 { name: 'Historical Data', icon: BarChart3 },  { name: 'Market Analysis', icon: BarChart3 },
+  { name: 'Market Intelligence', icon: Newspaper },
   { name: 'Market Watch & Alerts', icon: Bell },
   { name: 'Economic Calendar', icon: CalendarDays },
   { name: 'News & Sentiment', icon: Newspaper },
@@ -5109,6 +5110,121 @@ const text = decodeFile(fileBuffer);
     </div>
   );
 }
+
+function MarketIntelligencePage({ selectedMarket, candles, timeframe }) {
+  const [tab, setTab] = useState('news');
+  const [news, setNews] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [brief, setBrief] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadNews = async () => {
+    setLoading(true); setError('');
+    try {
+      const response = await fetch(`/api/market-intelligence/news?symbol=${encodeURIComponent(selectedMarket)}`, { credentials: 'include' });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `News request failed (${response.status})`);
+      setNews(Array.isArray(data.articles) ? data.articles : []);
+      setLastUpdated(data.generatedAt || new Date().toISOString());
+    } catch (err) { setError(err.message || 'Unable to load market news.'); }
+    finally { setLoading(false); }
+  };
+
+  const loadCalendar = async () => {
+    setLoading(true); setError('');
+    try {
+      const from = new Date().toISOString().slice(0, 10);
+      const to = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+      const response = await fetch(`/api/market-intelligence/calendar?from=${from}&to=${to}`, { credentials: 'include' });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `Calendar request failed (${response.status})`);
+      setEvents(Array.isArray(data.events) ? data.events : []);
+      setLastUpdated(data.generatedAt || new Date().toISOString());
+    } catch (err) { setError(err.message || 'Unable to load economic calendar.'); }
+    finally { setLoading(false); }
+  };
+
+  const loadBrief = async () => {
+    setLoading(true); setError('');
+    try {
+      const response = await fetch('/api/market-intelligence/brief', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: selectedMarket, timeframe, candles })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `Market brief failed (${response.status})`);
+      setBrief(data); setLastUpdated(data.generatedAt || new Date().toISOString());
+    } catch (err) { setError(err.message || 'Unable to generate market brief.'); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => {
+    if (tab === 'news') loadNews();
+    else if (tab === 'calendar') loadCalendar();
+    else loadBrief();
+  }, [tab, selectedMarket, timeframe, candles.length]);
+
+  const fmtTime = value => {
+    if (!value) return 'Time not supplied';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+  };
+  const impactStyle = impact => ({ color: String(impact).toLowerCase() === 'high' ? '#fb7185' : String(impact).toLowerCase() === 'medium' ? '#fbbf24' : '#21d6a0' });
+
+  return <>
+    <div className="welcome">
+      <div><h1>Market Intelligence</h1><div className="muted">Provider-backed market headlines, macroeconomic events and quantitative candle context.</div></div>
+      <div className="demo-badge">● ANALYSIS ONLY · {selectedMarket}</div>
+    </div>
+    <div className="card" style={{marginBottom:16}}>
+      <div className="periods">
+        <button className={`period-btn ${tab==='news'?'active':''}`} onClick={()=>setTab('news')}>Market News</button>
+        <button className={`period-btn ${tab==='calendar'?'active':''}`} onClick={()=>setTab('calendar')}>Economic Calendar</button>
+        <button className={`period-btn ${tab==='brief'?'active':''}`} onClick={()=>setTab('brief')}>Candle Intelligence</button>
+        <button className="period-btn" onClick={()=>tab==='news'?loadNews():tab==='calendar'?loadCalendar():loadBrief()} disabled={loading}>Refresh</button>
+      </div>
+      <div className="muted" style={{marginTop:10}}>Source: {tab==='brief'?'TradeLab quantitative confluence engine':'Finnhub'} · {lastUpdated ? `Updated ${fmtTime(lastUpdated)}` : 'Not yet loaded'}</div>
+    </div>
+    {loading && <div className="card">Loading {tab==='news'?'market headlines':tab==='calendar'?'economic events':'candle analysis'}…</div>}
+    {error && <div className="card" role="alert"><strong>Market intelligence unavailable</strong><div className="muted" style={{marginTop:6}}>{error}</div><div className="muted" style={{marginTop:6}}>Check authentication and the FINNHUB_API_KEY Worker secret for provider-backed news and calendar data.</div></div>}
+    {!loading && !error && tab==='news' && <div className="card">
+      <div className="card-heading"><h3>Latest market headlines</h3><span className="tag">{news.length} articles</span></div>
+      {news.length===0 ? <div className="muted">The provider returned no headlines.</div> : news.map((item,index)=><article key={item.id ?? `${item.datetime}-${index}`} style={{padding:'14px 0',borderBottom:'1px solid var(--border,#263247)'}}>
+        <div style={{display:'flex',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}><strong>{item.headline}</strong><span className="muted">{fmtTime(item.datetime ? item.datetime*1000 : null)}</span></div>
+        <div className="muted" style={{marginTop:5}}>{item.source || 'Finnhub'} · {item.category || 'General'}{item.related ? ` · ${item.related}` : ''}</div>
+        {item.summary && <p style={{margin:'8px 0'}}>{item.summary}</p>}
+        {item.url && <a href={item.url} target="_blank" rel="noreferrer">Read source ↗</a>}
+      </article>)}
+      <div className="muted" style={{marginTop:10}}>General market headlines; relevance to {selectedMarket} may vary. News sentiment is not inferred as a trading signal.</div>
+    </div>}
+    {!loading && !error && tab==='calendar' && <div className="card">
+      <div className="card-heading"><h3>Upcoming economic events</h3><span className="tag">{events.length} events · next 7 days</span></div>
+      {events.length===0 ? <div className="muted">No events were returned for this period.</div> : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Country</th><th>Event</th><th>Impact</th><th>Actual</th><th>Estimate</th><th>Previous</th></tr></thead><tbody>
+        {events.map((event,index)=><tr key={`${event.date}-${event.event}-${index}`}><td>{event.date} {event.time}</td><td>{event.country}</td><td>{event.event}</td><td style={impactStyle(event.impact)}>{event.impact || '—'}</td><td>{event.actual ?? '—'} {event.unit}</td><td>{event.estimate ?? '—'} {event.unit}</td><td>{event.prev ?? '—'} {event.unit}</td></tr>)}
+      </tbody></table></div>}
+      <div className="muted" style={{marginTop:10}}>Event times and provider data may be revised. Confirm high-impact releases with the original source.</div>
+    </div>}
+    {!loading && !error && tab==='brief' && <div className="card">
+      <div className="card-heading"><h3>{selectedMarket} · {timeframe} quantitative brief</h3><span className="tag">{brief?.metrics?.candlesAnalyzed ?? 0} candles analyzed</span></div>
+      {!brief ? <div className="muted">Waiting for candle analysis.</div> : <>
+        <div className="stats-grid">
+          <div className="card stat-card"><div className="muted">Directional bias</div><div className="stat-value" style={{fontSize:22}}>{brief.direction}</div></div>
+          <div className="card stat-card"><div className="muted">Confluence score</div><div className="stat-value">{brief.confluenceScore}</div></div>
+          <div className="card stat-card"><div className="muted">Quality score</div><div className="stat-value">{brief.quality}/100</div></div>
+          <div className="card stat-card"><div className="muted">Change in sample</div><div className="stat-value">{brief.metrics?.changePercent}%</div></div>
+        </div>
+        <p>{brief.interpretation}</p>
+        <div className="muted">Sample range: {brief.metrics?.rangeLow} – {brief.metrics?.rangeHigh} · Last close: {brief.metrics?.lastClose}</div>
+        <div className="muted" style={{marginTop:10}}>{brief.riskNotice}</div>
+      </>}
+      {candles.length<5 && <div className="muted">At least five valid candles are required. Load sufficient market history first.</div>}
+    </div>}
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -5527,7 +5643,7 @@ function App() {
                 </tbody>
               </table></div>
             </div>
-          </> : activePage === 'Historical Data' ? <HistoricalDataPage /> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Trade Planner' ? <TradePlannerPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
+          </> : activePage === 'Market Intelligence' ? <MarketIntelligencePage selectedMarket={selectedMarket} candles={candles} timeframe={period}/> : activePage === 'Historical Data' ? <HistoricalDataPage /> : activePage === 'Market Watch & Alerts' ? <MarketWatchAlerts markets={markets} selectedMarket={selectedMarket} onSelectMarket={symbol=>{setSelectedMarket(symbol);setActivePage('Market Analysis');}}/> : activePage === 'Economic Calendar' ? <EconomicCalendarPage selectedMarket={selectedMarket}/> : activePage === 'News & Sentiment' ? <NewsSentimentPage selectedMarket={selectedMarket}/> : activePage === 'Trade Planner' ? <TradePlannerPage selectedMarket={selectedMarket}/> : activePage === 'Market Analysis' ? <>
             <div className="welcome"><div><h1>Market Analysis & Indicators</h1><div className="muted">Technical studies for the selected instrument and timeframe.</div></div><div className="demo-badge">● ANALYSIS ONLY</div></div>
             <div className="card"><div className="card-heading"><h3>{selectedMarket} · {period} chart</h3><span className="tag">Live candle updates {streamStatus==='CONNECTED'?'ON':'WAITING'}</span><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div><div className="chart-wrap"><CandlestickChart candles={candles} loading={candleLoading} error={candleError} symbol={selectedMarket}/></div><div className="muted">{candles.length} historical candles. Indicator values are computed only when sufficient candle history exists.</div></div>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>TradingView Advanced Chart · {selectedMarket}</h3><span className="muted">External chart · Analysis only</span></div><TradingViewChart symbol={selectedMarket} timeframe={period}/></div>
