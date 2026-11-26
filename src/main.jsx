@@ -2,6 +2,7 @@ import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { analyzeMarketIntelligence, buildMarketIntelligenceExplanation } from './market-intelligence.js';
+import { runHistoricalBacktest } from './backtesting.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -1568,6 +1569,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
 
 function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
   const [performance, setPerformance] = useState({ loading: true, error: '', events: [], metrics: null });
+  const [backtestCostR, setBacktestCostR] = useState('0.05');
   const latestCandleTime = candles?.at(-1)?.time ?? candles?.at(-1)?.datetime ?? candles?.at(-1)?.timestamp ?? '';
   const generatedAt = (() => {
     const durationMs = ({
@@ -1642,6 +1644,9 @@ function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
   const metrics = performance.metrics || {};
   const fmt = value => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(symbol === 'USDJPY' ? 3 : symbol === 'BTCUSD' ? 1 : symbol === 'XAUUSD' ? 2 : 5);
   const rows = performance.events || [];
+  const backtestSignals = rows.filter(item => item.symbol === symbol && item.timeframe === timeframe);
+  const backtest = runHistoricalBacktest(backtestSignals, candles || [], { costR: Number(backtestCostR), asOf: Date.now() });
+  const backtestMetrics = backtest.metrics;
   const breakdown = Object.values(rows.reduce((acc, item) => {
     const key = `${item.symbol}|${item.timeframe}`;
     if (!acc[key]) acc[key] = { symbol: item.symbol, timeframe: item.timeframe, resolved: 0, wins: 0, losses: 0, pending: 0, totalR: 0 };
@@ -1666,6 +1671,28 @@ function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
         <div className="card"><div className="stat-label">All-time win rate</div><div className="stat-value">{metrics.winRate == null ? '—' : `${metrics.winRate}%`}</div><div className="muted">Resolved TP1 / SL outcomes only</div></div>
         <div className="card"><div className="stat-label">Average R</div><div className="stat-value">{metrics.averageR == null ? '—' : `${Number(metrics.averageR).toFixed(2)}R`}</div></div>
         <div className="card"><div className="stat-label">Pending / ambiguous</div><div className="stat-value">{metrics.pending ?? 0} / {metrics.ambiguous ?? 0}</div></div>
+      </div>
+      <div className="card" style={{ marginBottom: 12, background: '#101d30' }}>
+        <div className="card-heading"><div><h4>Historical signal backtest</h4><div className="muted">Recorded {symbol} · {timeframe} signals tested against the loaded completed candles</div></div><span className="tag">EVENT-BASED</span></div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+          <label className="muted" htmlFor="backtest-cost-r">Estimated round-trip costs (R)</label>
+          <input id="backtest-cost-r" type="number" min="0" max="5" step="0.01" value={backtestCostR} onChange={event => setBacktestCostR(event.target.value)} style={{ width: 90 }} />
+          <span className="muted">Applied per resolved trade; 0.05R = five-hundredths of initial risk.</span>
+        </div>
+        <div className="stats-grid" style={{ marginBottom: 10 }}>
+          <div className="card"><div className="stat-label">Tested / resolved</div><div className="stat-value">{backtestMetrics.totalSignals} / {backtestMetrics.resolved}</div></div>
+          <div className="card"><div className="stat-label">Win rate</div><div className="stat-value">{backtestMetrics.winRate == null ? '—' : `${backtestMetrics.winRate}%`}</div></div>
+          <div className="card"><div className="stat-label">Expectancy · net</div><div className="stat-value">{backtestMetrics.expectancyR == null ? '—' : `${backtestMetrics.expectancyR.toFixed(2)}R`}</div></div>
+          <div className="card"><div className="stat-label">Profit factor</div><div className="stat-value">{backtestMetrics.profitFactor == null ? (backtestMetrics.noLosingTrades ? '∞*' : '—') : backtestMetrics.profitFactor.toFixed(2)}</div></div>
+        </div>
+        <div className="dashboard-grid" style={{ marginBottom: 8 }}>
+          <div className="signal"><span>Net R</span><strong>{backtestMetrics.netR.toFixed(2)}R</strong></div>
+          <div className="signal"><span>Maximum drawdown</span><strong>{backtestMetrics.maxDrawdownR.toFixed(2)}R</strong></div>
+          <div className="signal"><span>Unresolved / ambiguous</span><strong>{backtestMetrics.unresolved} / {backtestMetrics.ambiguous}</strong></div>
+        </div>
+        <p className="muted" style={{ fontSize: 11, lineHeight: 1.6, margin: 0 }}>
+          {backtest.methodology} TP1 wins use the actual reward-to-risk distance; costs are a user-entered R estimate. Signals are evaluated independently, so overlapping trades are not a portfolio simulation. *No losing trades in the sample; profit factor is undefined/infinite. Only the latest 100 recorded signals and currently loaded candle history are included.
+        </p>
       </div>
       <div className="dashboard-grid" style={{ marginBottom: 12 }}>
         <div className="signal"><span>Total R (resolved)</span><strong>{metrics.totalR == null ? '—' : `${Number(metrics.totalR).toFixed(2)}R`}</strong></div>
