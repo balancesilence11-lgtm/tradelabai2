@@ -31,11 +31,16 @@ export function simulateTradeExecution({ side, candles, entryIndex, stop, target
   }
   const halfSpread = model.spreadBps / 20000;
   const slip = model.slippageBps / 10000;
-  const rawEntry = Number(candles[entryIndex].open);
-  if (!(rawEntry > 0)) return { status: 'INVALID', outcome: null, grossR: null, netR: null };
+  const entryCandle = candles[entryIndex];
+  const rawEntry = Number(entryCandle?.open);
+  const entryHigh = Number(entryCandle?.high), entryLow = Number(entryCandle?.low), entryClose = Number(entryCandle?.close);
+  if (![rawEntry, entryHigh, entryLow, entryClose].every(Number.isFinite) || !(rawEntry > 0) || entryLow > Math.min(rawEntry, entryClose) || entryHigh < Math.max(rawEntry, entryClose) || !(Number.isFinite(stop) && Number.isFinite(target))) {
+    return { status: 'INVALID', outcome: null, grossR: null, netR: null };
+  }
   const entryFill = rawEntry * (1 + direction * (halfSpread + slip));
   const actualRisk = side === 'BUY' ? entryFill - stop : stop - entryFill;
-  if (!(actualRisk > 0)) return { status: 'INVALID', outcome: null, grossR: null, netR: null, entryFill, rawEntry };
+  const validTarget = side === 'BUY' ? target > entryFill : target < entryFill;
+  if (!(actualRisk > 0) || !validTarget) return { status: 'INVALID', outcome: null, grossR: null, netR: null, entryFill, rawEntry };
   const last = Math.min(candles.length - 1, entryIndex + Math.max(1, Math.floor(Number(horizon) || 10)) - 1);
   let exitFill = null, exitIndex = null, outcome = null, status = 'UNRESOLVED', reason = 'No stop or target touch within the configured holding horizon.';
   for (let i = entryIndex; i <= last; i++) {
@@ -47,7 +52,7 @@ export function simulateTradeExecution({ side, candles, entryIndex, stop, target
     const targetHit = targetGap || (side === 'BUY' ? high >= target : low <= target);
     if (stopHit && targetHit) {
       if (stopGap) { outcome = 'LOSS'; exitFill = open * (1 - direction * slip); status = 'RESOLVED'; reason = 'Gap through stop: filled at the worse opening price.'; }
-      else if (targetGap) { outcome = 'WIN'; exitFill = target * (1 - direction * halfSpread); status = 'RESOLVED'; reason = 'Opening gap through target: conservative target-price fill.'; }
+      else if (targetGap) { outcome = 'WIN'; exitFill = target * (1 - direction * (halfSpread + slip)); status = 'RESOLVED'; reason = 'Opening gap through target: conservative target-price fill.'; }
       else { status = 'AMBIGUOUS'; reason = 'Stop and target touched in the same candle; intrabar order is unknown.'; }
       exitIndex = i; break;
     }
@@ -58,13 +63,13 @@ export function simulateTradeExecution({ side, candles, entryIndex, stop, target
     }
     if (targetHit) {
       outcome = 'WIN'; const rawExit = targetGap ? target : target;
-      exitFill = rawExit * (1 - direction * halfSpread); status = 'RESOLVED'; exitIndex = i;
+      exitFill = rawExit * (1 - direction * (halfSpread + slip)); status = 'RESOLVED'; exitIndex = i;
       reason = targetGap ? 'Opening gap through target: conservative target-price fill.' : 'Target touched; exit spread applied.'; break;
     }
   }
   if (status !== 'RESOLVED') return { status, outcome: null, grossR: null, netR: null, entryFill, rawEntry, exitIndex, reason, actualRisk };
   const grossR = direction * (exitFill - entryFill) / actualRisk;
-  const commissionR = (model.commissionBps * 2 / 10000 * entryFill) / actualRisk;
+  const commissionR = (model.commissionBps / 10000 * (entryFill + exitFill)) / actualRisk;
   const netR = grossR - commissionR;
   return { status, outcome, grossR: Number(grossR.toFixed(5)), netR: Number(netR.toFixed(5)), entryFill,
     rawEntry, exitFill, exitIndex, actualRisk, commissionR: Number(commissionR.toFixed(5)), reason };
