@@ -5499,7 +5499,9 @@ function PaperDataBackupPage() {
       const result = previewPaperRestore(parsed);
       if (!result.ok) { setNotice(result.reason); return; }
       setBackup(parsed); setPreview(result);
-      setNotice('Backup validated. Review the restore preview before continuing.');
+      setNotice(result.migrated
+        ? 'Older version 1 backup validated and migrated in memory to version 2. Review the preview before restoring; the original file is unchanged.'
+        : 'Version 2 backup validated, including its integrity manifest. Review the restore preview before continuing.');
     } catch (error) { setNotice(error.message || 'Could not read the selected backup.'); }
     event.target.value = '';
   };
@@ -5519,7 +5521,7 @@ function PaperDataBackupPage() {
       <div className="card"><div className="card-heading"><h3>Restore backup</h3><span className="tag">Validate first</span></div><p className="muted">Choose a TradeLab AI JSON backup. The file is validated and previewed before any browser data is changed.</p><input type="file" accept=".json,application/json" onChange={selectBackup}/></div>
     </div>
     {notice && <div className="card" role="status" style={{marginTop:16}}>{notice}</div>}
-    {preview?.ok && <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Restore preview</h3><span className="tag">Backup {preview.createdAt ? new Date(preview.createdAt).toLocaleString() : 'date unavailable'}</span></div><div className="table-wrap"><table><thead><tr><th>Record type</th><th>Current</th><th>In backup</th><th>New records</th><th>Duplicates skipped</th></tr></thead><tbody>{Object.entries(preview.counts).map(([name,c])=><tr key={name}><td>{name==='autoTrades'?'Automation paper trades':name==='autoLog'?'Automation logs':'Paper orders'}</td><td>{c.current}</td><td>{c.incoming}</td><td>{c.added}</td><td>{c.duplicates}</td></tr>)}</tbody></table></div><button className="execute-btn" style={{marginTop:14}} disabled={busy} onClick={restore}>{busy?'Restoring…':'Confirm merge and restore'}</button></div>}
+    {preview?.ok && <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Restore preview</h3><span className="tag">v{preview.sourceVersion} {preview.migrated ? '→ v2 migrated' : 'verified'} · {preview.createdAt ? new Date(preview.createdAt).toLocaleString() : 'date unavailable'}</span></div>{preview.migrated && <p className="muted">This older backup has been migrated in memory. Your selected source file will not be changed.</p>}<div className="table-wrap"><table><thead><tr><th>Record type</th><th>Current</th><th>In backup</th><th>New records</th><th>Duplicates skipped</th></tr></thead><tbody>{Object.entries(preview.counts).map(([name,c])=><tr key={name}><td>{name==='autoTrades'?'Automation paper trades':name==='autoLog'?'Automation logs':'Paper orders'}</td><td>{c.current}</td><td>{c.incoming}</td><td>{c.added}</td><td>{c.duplicates}</td></tr>)}</tbody></table></div><button className="execute-btn" style={{marginTop:14}} disabled={busy} onClick={restore}>{busy?'Restoring…':'Confirm merge and restore'}</button></div>}
     <div className="card" style={{marginTop:16,borderColor:'#5b4520'}}><strong style={{color:'#fbbf24'}}>Important backup scope</strong><p className="muted" style={{fontSize:12,lineHeight:1.7}}>This backup includes browser-local paper orders, automation paper trades and automation logs. It does not include account balances, equity, risk limits, broker credentials, market history, strategy settings or trade journal entries. Those are intentionally excluded to prevent a restore from overwriting account state or duplicating realised P/L. Keep backup files private and store them outside this browser.</p></div>
   </>;
 }
