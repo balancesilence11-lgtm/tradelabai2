@@ -1,0 +1,9 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readPaperBackupAudit, recordPaperBackupAudit, clearPaperBackupAudit, PAPER_BACKUP_AUDIT_KEY, PAPER_BACKUP_AUDIT_LIMIT } from '../src/paper-backup-audit.js';
+class MemoryStorage { constructor(){this.data=new Map()} getItem(k){return this.data.get(k)??null} setItem(k,v){this.data.set(k,String(v))} removeItem(k){this.data.delete(k)} }
+test('records supported audit events with bounded safe metadata',()=>{const s=new MemoryStorage();const r=recordPaperBackupAudit('backup_created',{sourceVersion:2,records:4,message:'downloaded'},s,'2026-11-26T12:00:00.000Z');assert.equal(r.ok,true);assert.equal(readPaperBackupAudit(s)[0].records,4);assert.equal(readPaperBackupAudit(s)[0].action,'backup_created')});
+test('rejects unsupported actions and sanitises control characters',()=>{const s=new MemoryStorage();assert.equal(recordPaperBackupAudit('unknown',{},s).ok,false);recordPaperBackupAudit('restore_failed',{message:'bad\ninput'},s);assert.equal(readPaperBackupAudit(s)[0].message,'bad input')});
+test('retains only the newest 200 events',()=>{const s=new MemoryStorage();for(let i=0;i<PAPER_BACKUP_AUDIT_LIMIT+5;i++)recordPaperBackupAudit('validation_passed',{records:i},s,`2026-11-26T12:${String(i%60).padStart(2,'0')}:00.000Z`);assert.equal(readPaperBackupAudit(s).length,200)});
+test('handles corrupt stored audit data and supports clearing',()=>{const s=new MemoryStorage();s.setItem(PAPER_BACKUP_AUDIT_KEY,'{');assert.deepEqual(readPaperBackupAudit(s),[]);recordPaperBackupAudit('backup_created',{},s);assert.equal(clearPaperBackupAudit(s),true);assert.deepEqual(readPaperBackupAudit(s),[])});
+test('does not throw when storage writes fail',()=>{const s={getItem(){return null},setItem(){throw Error('quota')}};assert.equal(recordPaperBackupAudit('backup_created',{},s).ok,false)});
