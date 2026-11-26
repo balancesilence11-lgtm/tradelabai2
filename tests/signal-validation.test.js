@@ -11,11 +11,22 @@ test('accepts a valid BUY signal and calculates reward/risk', () => {
   const result = validateSignalRecord(base, { now });
   assert.equal(result.ok, true);
   assert.equal(result.value.rewardRisk, 1);
+  assert.equal(result.value.engineId, 'legacy-unspecified');
 });
 
 test('rejects BUY stop-loss above entry and reversed targets', () => {
   assert.equal(validateSignalRecord({ ...base, stopLoss: 1.101 }, { now }).ok, false);
   assert.equal(validateSignalRecord({ ...base, takeProfit: [1.11, 1.105] }, { now }).ok, false);
+});
+
+test('accepts and preserves the canonical advanced engine identifier', () => {
+  const result = validateSignalRecord({ ...base, engineId: 'advanced-client-confluence-v1' }, { now });
+  assert.equal(result.ok, true);
+  assert.equal(result.value.engineId, 'advanced-client-confluence-v1');
+});
+
+test('rejects an unrecognised signal engine identifier', () => {
+  assert.equal(validateSignalRecord({ ...base, engineId: 'unknown-engine' }, { now }).ok, false);
 });
 
 test('rejects invalid timeframe and future-dated signal', () => {
