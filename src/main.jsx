@@ -10,6 +10,7 @@ import { closePaperOrder, cancelPaperOrder, applyPaperRealizedPnl } from './pape
 import { buildPaperPerformance } from './paper-performance.js';
 import { buildPaperTradesCsv, buildPaperSummaryCsv } from './paper-performance-export.js';
 import { createPaperBackup, previewPaperRestore, restorePaperBackup } from './paper-backup.js';
+import { restoreWorkspaceEntries } from './backup-coordinator.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -3563,11 +3564,15 @@ function SecurityCentrePage() {
         if(value.length>750000)throw new Error('A backup entry exceeds the safety limit.');
         if(!['tradelab_auto_last_candle_v1','tradelab_account_label'].includes(key))JSON.parse(value);
       }
-      if(!window.confirm(`Restore ${entries.length} TradeLab data entries? Current values for matching entries will be replaced.`))return;
-      entries.forEach(([key,value])=>localStorage.setItem(key,value));
+      const paperKeys = ['tradelab_demo_orders','tradelab_auto_trades_v1','tradelab_auto_log_v1'];
+      const paperEntries = entries.filter(([key])=>paperKeys.includes(key));
+      const previewText = paperEntries.length ? ` Paper-trading records in this workspace backup will be merged; existing records will not be overwritten.` : '';
+      if(!window.confirm(`Restore ${entries.length} TradeLab data entries? Matching non-paper workspace settings may be replaced.${previewText}`))return;
+      const result = restoreWorkspaceEntries(entries, STORAGE_KEYS, localStorage);
+      if(!result.ok) throw new Error(result.reason || 'Workspace restore failed.');
       setLockEnabled(localStorage.getItem('tradelab_paper_lock')==='true');
-      setBackupMessage(`Restore complete: ${entries.length} entries imported. Reload the app to refresh all sections.`);
-      recordSecurityEvent('Workspace backup restored',`${entries.length} entries imported from ${file.name}`);
+      setBackupMessage(`Restore complete: ${result.imported} entries imported. Paper records were merged with duplicate detection. Reload the app to refresh all sections.`);
+      recordSecurityEvent('Workspace backup restored',`${result.imported} entries imported from ${file.name}; paper records merged`);
       checkIntegrity();
     } catch(error) { setBackupMessage(error.message||'Backup restore failed.'); recordSecurityEvent('Backup restore rejected',error.message||'Invalid backup'); }
     finally { event.target.value=''; }
