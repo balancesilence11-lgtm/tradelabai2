@@ -1,3 +1,4 @@
+import { buildExecutionModel, simulateTradeExecution } from './execution-realism.js';
 // Phase 2.6: chronological strategy replay and empirical confidence calibration.
 // A signal at bar i is formed only from bars <= i; outcome bars begin at i+1.
 const mean = a => a.reduce((s,v)=>s+v,0)/a.length;
@@ -26,16 +27,21 @@ export function replayStrategy(candles, config={}, options={}) {
     if(i<lookback)return {side:0,strength:0}; const prior=closes.slice(i-lookback,i),hi=Math.max(...prior),lo=Math.min(...prior); const side=p>hi?1:p<lo?-1:0; return {side,strength:scoreStrength(side,side>0?(p-hi)/p:(lo-p)/p,.002)};
   };
   const trades=[]; let priorSide=0;
-  for(let i=0;i<clean.length-1;i++){
+  const startIndex=Math.max(0,Math.floor(Number(options.startIndex??0)));
+  const endIndex=Math.min(clean.length-2,Math.floor(Number(options.endIndex??(clean.length-2))));
+  const execution=buildExecutionModel({spreadBps:options.spreadBps??config.spreadBps,commissionBps:options.commissionBps??config.commissionBps,slippageBps:options.slippageBps??config.slippageBps});
+  for(let i=0;i<=endIndex;i++){
     const s=signalAt(i); if(!s.side){priorSide=0;continue;} if(s.side===priorSide)continue; priorSide=s.side;
-    const entry=clean[i].close,stop=s.side===1?entry*(1-stopPct):entry*(1+stopPct),target=s.side===1?entry*(1+targetPct):entry*(1-targetPct);
-    let status='UNRESOLVED',outcome=null,exitIndex=Math.min(clean.length-1,i+horizon);
-    for(let j=i+1;j<=exitIndex;j++) { const c=clean[j],sl=s.side===1?c.low<=stop:c.high>=stop,tp=s.side===1?c.high>=target:c.low<=target; if(sl&&tp){status='AMBIGUOUS';break;} if(sl){status='RESOLVED';outcome='LOSS';exitIndex=j;break;} if(tp){status='RESOLVED';outcome='WIN';exitIndex=j;break;} }
-    trades.push({index:i,time:clean[i].time,side:s.side===1?'BUY':'SELL',confidence:Number(s.strength.toFixed(1)),status,outcome,entry,stop,target,exitIndex});
+    if(i<startIndex) continue;
+    const entryBar=i+1; const rawEntry=clean[entryBar].open;
+    const entry=rawEntry; const stop=s.side===1?entry*(1-stopPct):entry*(1+stopPct),target=s.side===1?entry*(1+targetPct):entry*(1-targetPct);
+    const executionResult=simulateTradeExecution({side:s.side===1?'BUY':'SELL',candles:clean,entryIndex:entryBar,stop,target,risk:Math.abs(entry-stop),execution,horizon});
+    trades.push({index:i,time:clean[i].time,side:s.side===1?'BUY':'SELL',confidence:Number(s.strength.toFixed(1)),entrySignalClose:clean[i].close,entry,stop,target,...executionResult});
   }
   const resolved=trades.filter(t=>t.status==='RESOLVED'),wins=resolved.filter(t=>t.outcome==='WIN');
-  const metrics={signals:trades.length,resolved:resolved.length,wins:wins.length,losses:resolved.length-wins.length,unresolved:trades.filter(t=>t.status==='UNRESOLVED').length,ambiguous:trades.filter(t=>t.status==='AMBIGUOUS').length,winRate:resolved.length?Number((wins.length/resolved.length*100).toFixed(2)):null};
-  return {trades,metrics,methodology:'Walk-forward candle replay. Signals use information available through the signal candle only; outcomes start on the next candle. Stop/target touched in the same candle are excluded as ambiguous.'};
+  const netValues=resolved.map(t=>t.netR); const grossProfit=netValues.filter(v=>v>0).reduce((a,b)=>a+b,0),grossLoss=Math.abs(netValues.filter(v=>v<0).reduce((a,b)=>a+b,0));
+  const metrics={signals:trades.length,resolved:resolved.length,wins:wins.length,losses:resolved.length-wins.length,unresolved:trades.filter(t=>t.status==='UNRESOLVED').length,ambiguous:trades.filter(t=>t.status==='AMBIGUOUS').length,invalid:trades.filter(t=>t.status==='INVALID').length,winRate:resolved.length?Number((wins.length/resolved.length*100).toFixed(2)):null,netR:Number(netValues.reduce((a,b)=>a+b,0).toFixed(4)),expectancyR:resolved.length?Number((netValues.reduce((a,b)=>a+b,0)/resolved.length).toFixed(4)):null,profitFactor:grossLoss?Number((grossProfit/grossLoss).toFixed(4)):null,executionCosts:execution};
+  return {trades,metrics,execution,methodology:'Strict chronological replay: signal formed at candle close; entry at the next candle open with adverse half-spread and slippage; exit spread/slippage and round-trip commission applied. Stop gaps fill at the worse opening price; target gaps use conservative target-price fills. Same-candle stop/target touches without an opening-gap resolution are marked ambiguous. Training/test ranges can be isolated with startIndex/endIndex.'};
 }
 export function calibrateConfidence(trades, options={}) {
   const minSample=Math.max(1,Math.floor(Number(options.minSample??100)));
