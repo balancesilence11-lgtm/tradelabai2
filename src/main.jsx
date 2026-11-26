@@ -1259,6 +1259,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
 
     return {
       ready: true,
+      engineId: 'advanced-client-confluence-v1',
       symbol,
       timeframe,
       price,
@@ -1613,6 +1614,7 @@ function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
           body: JSON.stringify({
             symbol,
             timeframe,
+            engineId: analysis.engineId || 'advanced-client-confluence-v1',
             signal: analysis.direction,
             confluence: analysis.confluence,
             entry: analysis.entry,
@@ -1674,7 +1676,7 @@ function SignalPerformancePanel({ candles, symbol, timeframe, analysis }) {
   return (
     <div className="card" style={{ marginTop: 18, background: '#0b1728' }}>
       <div className="card-heading">
-        <div><h4>Signal performance validation</h4><div className="muted">D1-recorded signals · forward outcome tracking · TP1 versus stop-loss</div></div>
+        <div><h4>Signal performance validation</h4><div className="muted">Canonical source: advanced candle-confluence engine · D1-recorded output · forward outcome tracking · TP1 versus stop-loss</div></div>
         <span className="tag">{performance.loading ? 'LOADING' : 'LIVE TRACKING'}</span>
       </div>
       {performance.error && <div className="muted" style={{ marginBottom: 10 }}>{performance.error}</div>}
