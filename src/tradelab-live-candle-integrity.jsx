@@ -1,6 +1,8 @@
 import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import TradingViewChart from "./TradingViewChart";import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import JSZip from 'jszip';import {
+import JSZip from 'jszip';
+import { analyzeVSA } from './vsa.js';
+import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
   Moon, Radio, Settings, ShieldCheck, SlidersHorizontal, Sparkles,
@@ -1052,6 +1054,18 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       votes.push({ name: wyckoffEvent.label, dir: wyckoffEvent.direction, weight: 2, detail: wyckoffEvent.detail });
     }
 
+    // 10a. Volume Spread Analysis. Only directional, defined patterns contribute
+    // a low-weight vote; unavailable/ambiguous volume never creates a direction.
+    const vsa = analyzeVSA(data.slice(-21));
+    if (vsa.ready && vsa.direction !== 0) {
+      votes.push({
+        name: vsa.label,
+        dir: vsa.direction,
+        weight: 1,
+        detail: `${vsa.detail} Source: ${vsa.source}.`
+      });
+    }
+
     // Premium/discount is contextual location, not a standalone directional signal.
     const dealingRange = detectPremiumDiscount(data.slice(-80));
 
@@ -1188,6 +1202,8 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
     if (!orderBlock) notes.push('No qualifying displacement-based order-block candidate detected.');
     if (!displacement) notes.push('No current candle meets the displacement threshold (1.2 ATR body).');
     if (!wyckoffEvent) notes.push('No potential spring or upthrust detected in the recent range.');
+    if (!vsa.ready) notes.push('VSA is unavailable: reliable, non-zero volume data is required for the selected lookback.');
+    else if (vsa.signal === 'EFFORT_NO_RESULT') notes.push('VSA detected high effort with limited price result; direction remains neutral pending confirmation.');
 
     if (direction === 'WAIT') {
       notes.push('Directional evidence is insufficient. The engine recommends WAIT.');
@@ -1240,6 +1256,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       orderBlock,
       displacement,
       wyckoffEvent,
+      vsa,
       dealingRange
     };
 
@@ -1449,7 +1466,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       </div>
 
       <div className="card" style={{ marginTop: 16, background: '#101d30', border: '1px solid #26364e' }}>
-        <div className="card-heading"><h4>Advanced Market Intelligence</h4><span className="tag">SMC · ICT · WYCKOFF</span></div>
+        <div className="card-heading"><h4>Advanced Market Intelligence</h4><span className="tag">SMC · ICT · WYCKOFF · VSA</span></div>
         <div className="dashboard-grid" style={{ marginBottom: 0 }}>
           <div>
             <div className="signal"><span>Order block</span><strong>{analysis.orderBlock ? analysis.orderBlock.label : 'Not detected'}</strong></div>
@@ -1460,13 +1477,16 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
           </div>
           <div>
             <div className="signal"><span>Wyckoff event</span><strong>{analysis.wyckoffEvent ? analysis.wyckoffEvent.label : 'Not detected'}</strong></div>
+            <div className="signal"><span>VSA event</span><strong>{analysis.vsa?.label || 'Unavailable'}</strong></div>
+            {analysis.vsa?.ready && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>Relative volume {analysis.vsa.relativeVolume.toFixed(2)}× · Spread {analysis.vsa.spreadRatio.toFixed(2)}× · {analysis.vsa.source}</div>}
+            {analysis.vsa?.ready && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{analysis.vsa.detail}</div>}
             <div className="signal"><span>Dealing-range location</span><strong>{analysis.dealingRange ? analysis.dealingRange.zone : 'Insufficient data'}</strong></div>
             {analysis.dealingRange && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>Low {fmt(analysis.dealingRange.low)} · EQ {fmt(analysis.dealingRange.equilibrium)} · High {fmt(analysis.dealingRange.high)} · Position {(analysis.dealingRange.position*100).toFixed(1)}%</div>}
             <div className="signal"><span>Market structure</span><strong>{analysis.recentEvent?.label || 'No recent BOS/CHoCH'}</strong></div>
             <div className="signal"><span>Liquidity sweep</span><strong>{analysis.liquiditySweep?.label || 'Not detected'}</strong></div>
           </div>
         </div>
-        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations. Order blocks, Wyckoff events and premium/discount zones are candidates, not verified institutional order flow. Volume-based confirmation is excluded until reliable volume data is available.</p>
+        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations. Order blocks, Wyckoff events and premium/discount zones are candidates, not verified institutional order flow. VSA uses reported candle volume and spread only when the 20-bar sample is complete; tick volume is labelled separately and is not represented as exchange-traded volume.</p>
       </div>
 
       <SignalPerformancePanel candles={analysisCandles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
@@ -4574,6 +4594,7 @@ function HistoricalDataPage() {
   let lowIndex = 3;
   let closeIndex = 4;
   let volumeIndex = 5;
+  let volumeType = "tick_volume"; // Headerless MT5 exports use Tickvol as the first volume column.
 
   if (hasHeader) {
     const headers = firstColumns.map(value =>
@@ -4590,6 +4611,9 @@ function HistoricalDataPage() {
     lowIndex = findColumn(["low"]);
     closeIndex = findColumn(["close"]);
     volumeIndex = findColumn(["tickvol", "tick_volume", "volume", "vol"]);
+    const volumeHeader = volumeIndex >= 0 ? headers[volumeIndex] : "";
+    volumeType = /tick/.test(volumeHeader) ? "tick_volume" :
+      /real|exchange/.test(volumeHeader) ? "real_volume" : "unspecified";
 
     if (
       dateIndex < 0 ||
@@ -4682,7 +4706,8 @@ function HistoricalDataPage() {
       high,
       low,
       close,
-      volume
+      volume,
+      volumeType
     });
   }
 
