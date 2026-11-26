@@ -8,6 +8,7 @@ export const PAPER_BACKUP_KEYS = Object.freeze({
   autoLog: 'tradelab_auto_log_v1'
 });
 const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+const MAX_BACKUP_RECORDS = 50000;
 const FORMAT = 'TradeLabAI.PaperTradingBackup';
 
 function readArray(storage, key) {
@@ -89,12 +90,25 @@ export function validatePaperBackup(input) {
   if (typeof input === 'string') {
     if (new TextEncoder().encode(input).length > MAX_BACKUP_BYTES) return { ok: false, reason: 'Backup exceeds the 10 MB limit.' };
     try { backup = JSON.parse(input); } catch { return { ok: false, reason: 'File is not valid JSON.' }; }
+  } else if (input && typeof input === 'object') {
+    // Apply the same byte ceiling to direct object callers, not only uploaded files.
+    // JSON.stringify also rejects cyclic or otherwise non-serialisable input safely.
+    try {
+      const serialized = JSON.stringify(input);
+      if (typeof serialized !== 'string' || new TextEncoder().encode(serialized).length > MAX_BACKUP_BYTES) {
+        return { ok: false, reason: 'Backup exceeds the 10 MB limit.' };
+      }
+    } catch {
+      return { ok: false, reason: 'Backup object cannot be safely serialized.' };
+    }
   }
   if (!backup || typeof backup !== 'object' || Array.isArray(backup)) return { ok: false, reason: 'Backup must be a JSON object.' };
   if (backup.format !== FORMAT || backup.scope !== 'browser-local-paper-records') return { ok: false, reason: 'Unsupported backup format.' };
   if (![1, 2].includes(backup.version)) return { ok: false, reason: `Unsupported backup version: ${String(backup.version)}.` };
   const dataError = validateData(backup.data);
   if (dataError) return { ok: false, reason: dataError };
+  const totalRecords = Object.values(recordCounts(backup.data)).reduce((sum, count) => sum + count, 0);
+  if (totalRecords > MAX_BACKUP_RECORDS) return { ok: false, reason: `Backup exceeds the ${MAX_BACKUP_RECORDS.toLocaleString()} record limit.` };
   if (backup.version === 1) {
     const migrated = migrateV1ToV2(backup);
     return { ok: true, backup: migrated, sourceVersion: 1, migrated: true, warnings: ['Version 1 backup was migrated in memory to version 2. The source file was not modified.'] };
