@@ -1,4 +1,5 @@
 import { handleMarketIntelligence } from "./phase2_market_intelligence.js";
+import { validateSignalRecord, resolveSignalOutcome } from "./src/signal-validation.js";
 /*
  * TradeLab AI — Phase 2 Market Intelligence (additive module)
  * Requires existing Cloudflare Worker bindings: DB (D1), FINNHUB_API_KEY.
@@ -1177,38 +1178,7 @@ async function settlePendingSignalEvents(env, userId) {
       if (!Number.isFinite(generatedAt) || !Number.isFinite(entry) ||
           !Number.isFinite(stop) || !Number.isFinite(target1)) continue;
 
-      let resolution = null;
-      for (const candle of candlesResult.candles) {
-        const candleAt = Date.parse(candle.time);
-        if (!Number.isFinite(candleAt) || candleAt <= generatedAt) continue;
-        const high = Number(candle.high);
-        const low = Number(candle.low);
-        const isBuy = event.signal === 'BUY';
-        const stopHit = isBuy ? low <= stop : high >= stop;
-        const targetHit = isBuy ? high >= target1 : low <= target1;
-        if (stopHit && targetHit) {
-          resolution = {
-            status: 'AMBIGUOUS', outcome: null, exitPrice: null,
-            rMultiple: null,
-            reason: 'TP1 and stop-loss were both touched within the same candle; intrabar order is unknown.'
-          };
-          break;
-        }
-        if (stopHit) {
-          resolution = {
-            status: 'RESOLVED', outcome: 'LOSS', exitPrice: stop,
-            rMultiple: -1, reason: 'Stop-loss touched after signal generation.'
-          };
-          break;
-        }
-        if (targetHit) {
-          resolution = {
-            status: 'RESOLVED', outcome: 'WIN', exitPrice: target1,
-            rMultiple: 1, reason: 'Take-profit 1 touched after signal generation.'
-          };
-          break;
-        }
-      }
+      const resolution = resolveSignalOutcome(event, candlesResult.candles);
 
       const checkedAt = new Date().toISOString();
       if (resolution) {
@@ -1459,30 +1429,11 @@ if (path === "/api/ai/signals/record") {
     try { body = await readJson(request); }
     catch { return json({ ok: false, error: 'Invalid signal payload' }, 400); }
 
-    const symbol = String(body.symbol || '').toUpperCase().replace('/', '');
-    const timeframe = String(body.timeframe || '').toLowerCase();
-    const signal = String(body.signal || '').toUpperCase();
-    const confluence = Number(body.confluence);
-    const entry = Number(body.entry);
-    const stopLoss = Number(body.stopLoss);
-    const takeProfit = Array.isArray(body.takeProfit) ? body.takeProfit.map(Number) : [];
-    const generatedAtMs = Date.parse(body.generatedAt);
-    const providerSymbol = SYMBOLS[symbol];
-
-    if (!providerSymbol || !ALLOWED_INTERVALS.includes(timeframe) || !['BUY', 'SELL'].includes(signal) ||
-        !Number.isFinite(confluence) || confluence < 0 || confluence > 100 ||
-        !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(stopLoss) || stopLoss <= 0 ||
-        !takeProfit.length || !Number.isFinite(takeProfit[0]) || takeProfit[0] <= 0 ||
-        !Number.isFinite(generatedAtMs) || generatedAtMs > Date.now() + 60000 || generatedAtMs < Date.now() - 7 * 86400000) {
-      return json({ ok: false, error: 'Signal fields are invalid or outside the permitted range.' }, 400);
-    }
-    const risk = signal === 'BUY' ? entry - stopLoss : stopLoss - entry;
-    const reward = signal === 'BUY' ? takeProfit[0] - entry : entry - takeProfit[0];
-    if (!(risk > 0) || !(reward > 0)) {
-      return json({ ok: false, error: 'Entry, stop-loss and TP1 levels do not match the signal direction.' }, 400);
-    }
+    const validated = validateSignalRecord(body, { allowedSymbols: Object.keys(SYMBOLS) });
+    if (!validated.ok) return json({ ok: false, error: validated.error }, 400);
+    const { symbol, timeframe, signal, confluence, entry, stopLoss, takeProfit } = validated.value;
+    const timestamp = validated.value.generatedAt;
     const id = crypto.randomUUID();
-    const timestamp = new Date(generatedAtMs).toISOString();
     try {
       await env.DB.prepare(`
         INSERT INTO ai_signal_events (
