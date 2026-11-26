@@ -8,6 +8,7 @@ import { splitWalkForward } from './execution-realism.js';
 import { evaluatePaperOrderRisk } from './portfolio-risk-guard.js';
 import { closePaperOrder, cancelPaperOrder, applyPaperRealizedPnl } from './paper-order-lifecycle.js';
 import { buildPaperPerformance } from './paper-performance.js';
+import { buildPaperTradesCsv, buildPaperSummaryCsv } from './paper-performance-export.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -5425,8 +5426,16 @@ function PaperPerformancePage() {
   const low = Math.min(...values), high = Math.max(...values), range = high - low || 1;
   const points = values.map((v, i) => `${values.length < 2 ? chartW / 2 : 12 + i / (values.length - 1) * (chartW - 24)},${chartH - 12 - (v - low) / range * (chartH - 24)}`).join(' ');
   const input = { background:'#0b1728', border:'1px solid #2b3b52', color:'#fff', borderRadius:6, padding:9, fontSize:12 };
+  const downloadCsv = (filename, content) => {
+    const blob = new Blob([`\uFEFF${content}`], { type:'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = filename;
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    URL.revokeObjectURL(url);
+  };
   return <>
-    <div className="welcome"><div><h1>Paper Trading Performance</h1><div className="muted">Performance statistics from closed paper orders recorded in this browser.</div></div><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><span className="demo-badge">● PAPER DATA ONLY</span><button className="period-btn" onClick={refresh}>Refresh history</button></div></div>
+    <div className="welcome"><div><h1>Paper Trading Performance</h1><div className="muted">Performance statistics from closed paper orders recorded in this browser.</div></div><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><span className="demo-badge">● PAPER DATA ONLY</span><button className="period-btn" onClick={refresh}>Refresh history</button><button className="period-btn" onClick={()=>downloadCsv('tradelab-paper-trades.csv',buildPaperTradesCsv(stats.trades))}>Export trades CSV</button><button className="period-btn" onClick={()=>downloadCsv('tradelab-paper-summary.csv',buildPaperSummaryCsv(stats,{symbol,from,to}))}>Export summary CSV</button></div></div>
     <div className="card" style={{marginBottom:16}}><div className="card-heading"><h3>Performance filters</h3><span className="muted">{stats.total} matching closed orders</span></div><div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'end'}}>
       <label style={{fontSize:11,color:'#9ba9bd'}}>Instrument<br/><select style={input} value={symbol} onChange={e=>setSymbol(e.target.value)}><option value="ALL">All instruments</option>{symbols.map(s=><option key={s} value={s}>{s}</option>)}</select></label>
       <label style={{fontSize:11,color:'#9ba9bd'}}>From date<br/><input style={input} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></label>
