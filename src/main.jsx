@@ -5,6 +5,7 @@ import { analyzeMarketIntelligence, buildMarketIntelligenceExplanation } from '.
 import { runHistoricalBacktest } from './backtesting.js';
 import { replayStrategy, calibrateConfidence } from './strategy-replay.js';
 import { splitWalkForward } from './execution-realism.js';
+import { evaluatePaperOrderRisk } from './portfolio-risk-guard.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -2781,11 +2782,21 @@ function TradingTerminalPage({ symbol, price, candles }) {
     if (!Number.isFinite(stop) || !Number.isFinite(target) || stop <= 0 || target <= 0) return setMessage('Enter valid stop-loss and take-profit prices.');
     if (side === 'BUY' && !(stop < open && target > open)) return setMessage('For a BUY, stop loss must be below entry and take profit above entry.');
     if (side === 'SELL' && !(stop > open && target < open)) return setMessage('For a SELL, stop loss must be above entry and take profit below entry.');
-    const order = { id: Date.now(), symbol, side, type, volume: qty.toFixed(2), entry: fmt(open), sl: fmt(stop), tp: fmt(target), rr: (Math.abs(target-open)/Math.abs(open-stop)).toFixed(2), time: new Date().toLocaleString(), status: 'PAPER OPEN' };
+    let account, positions, riskLimits;
+    try {
+      account = { balance: 10000, equity: 10000, dailyLoss: 0, peakEquity: 10000, openRisk: 0, ...JSON.parse(localStorage.getItem('tradelab_portfolio_risk_v1') || '{}') };
+      positions = JSON.parse(localStorage.getItem('tradelab_risk_positions_v1') || '[]');
+      riskLimits = { dailyLimitPct: 3, drawdownLimitPct: 10, maxPortfolioRiskPct: 3, ...JSON.parse(localStorage.getItem('tradelab_execution_risk_config_v1') || '{}') };
+      if (!Array.isArray(positions)) positions = [];
+    } catch { return setMessage('Risk settings could not be read safely. Paper order blocked.'); }
+    const proposedOrder = { entry: open, sl: stop, tp: target, volume: qty };
+    const riskCheck = evaluatePaperOrderRisk({ order: proposedOrder, account, positions, existingOrders: orders, limits: riskLimits });
+    if (!riskCheck.allowed) return setMessage(`PAPER ORDER BLOCKED: ${riskCheck.reasons.join(' ')}`);
+    const order = { id: Date.now(), symbol, side, type, volume: qty.toFixed(2), entry: fmt(open), sl: fmt(stop), tp: fmt(target), riskCash: riskCheck.proposedRisk, rr: (Math.abs(target-open)/Math.abs(open-stop)).toFixed(2), time: new Date().toLocaleString(), status: 'PAPER OPEN' };
     const next = [order, ...orders].slice(0, 100);
     setOrders(next);
     try { localStorage.setItem('tradelab_demo_orders', JSON.stringify(next)); } catch {}
-    setMessage(`${side} paper order saved locally. No broker order was sent.`);
+    setMessage(`${side} paper order saved locally. Estimated risk: $${riskCheck.proposedRisk.toFixed(2)}; projected open risk: ${riskCheck.projectedRiskPct.toFixed(2)}% of balance. No broker order was sent.`);
   }
 
   return <>
@@ -2806,7 +2817,7 @@ function TradingTerminalPage({ symbol, price, candles }) {
       <div className="muted" style={{margin:'12px 0'}}>ATR(14): {Number.isFinite(atr) ? fmt(atr) : 'Insufficient candle history'}. Suggested levels use 1.5× ATR stop and 3× ATR target; they are not guaranteed signals.</div>
       <div className="trade-buttons"><button className="period-btn" onClick={suggestLevels}>Suggest ATR levels</button><button className="execute-btn" onClick={submitOrder}>Save paper order</button></div>
       {message && <p className="muted" role="status" style={{marginTop:12}}>{message}</p>}
-      <p className="muted" style={{lineHeight:1.6}}>This terminal stores simulated orders in this browser only. It does not connect to Deriv, MT5 or any broker. Lot value, pip value, margin and cash risk are not estimated because broker contract specifications are not configured.</p>
+      <p className="muted" style={{lineHeight:1.6}}>This terminal stores simulated orders in this browser only. It does not connect to Deriv, MT5 or any broker. The local risk gate uses a simplified price-distance × volume × 100,000 estimate; actual contract size, pip value, conversion, margin, fees and slippage vary by instrument and broker.</p>
     </div>
     <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper order history</h3><span className="muted">{orders.length} saved</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Entry</th><th>Stop loss</th><th>Take profit</th><th>R:R</th><th>Time</th></tr></thead><tbody>{orders.length===0?<tr><td colSpan="8" className="empty">No paper orders yet.</td></tr>:orders.map(o=><tr key={o.id}><td>{o.symbol}</td><td className={o.side==='BUY'?'positive':'negative'}>{o.side}</td><td>{o.volume}</td><td>{o.entry}</td><td>{o.sl}</td><td>{o.tp}</td><td>1:{o.rr}</td><td>{o.time}</td></tr>)}</tbody></table></div></div>
   </>;
@@ -3657,8 +3668,9 @@ function PortfolioRiskPage() {
   const [riskPct, setRiskPct] = useState(1);
   const [stopPips, setStopPips] = useState(30);
   const [pipValue, setPipValue] = useState(10);
-  const [dailyLimitPct, setDailyLimitPct] = useState(3);
-  const [drawdownLimitPct, setDrawdownLimitPct] = useState(10);
+  const [dailyLimitPct, setDailyLimitPct] = useState(() => { try { return Math.max(0.1, Number(JSON.parse(localStorage.getItem('tradelab_execution_risk_config_v1') || '{}').dailyLimitPct) || 3); } catch { return 3; } });
+  const [drawdownLimitPct, setDrawdownLimitPct] = useState(() => { try { return Math.max(0.1, Number(JSON.parse(localStorage.getItem('tradelab_execution_risk_config_v1') || '{}').drawdownLimitPct) || 10); } catch { return 10; } });
+  const [maxPortfolioRiskPct, setMaxPortfolioRiskPct] = useState(() => { try { return Math.max(0.1, Math.min(25, Number(JSON.parse(localStorage.getItem('tradelab_execution_risk_config_v1') || '{}').maxPortfolioRiskPct) || 3)); } catch { return 3; } });
   const [positions, setPositions] = useState(() => {
     try { return JSON.parse(localStorage.getItem('tradelab_risk_positions_v1') || '[]'); } catch { return []; }
   });
@@ -3671,6 +3683,9 @@ function PortfolioRiskPage() {
   const [notice, setNotice] = useState('');
   useEffect(() => { localStorage.setItem('tradelab_portfolio_risk_v1', JSON.stringify(account)); }, [account]);
   useEffect(() => { localStorage.setItem('tradelab_risk_positions_v1', JSON.stringify(positions)); }, [positions]);
+  useEffect(() => {
+    localStorage.setItem('tradelab_execution_risk_config_v1', JSON.stringify({ dailyLimitPct, drawdownLimitPct, maxPortfolioRiskPct }));
+  }, [dailyLimitPct, drawdownLimitPct, maxPortfolioRiskPct]);
 
   const balance = Math.max(0, Number(account.balance) || 0);
   const equity = Math.max(0, Number(account.equity) || 0);
@@ -3690,6 +3705,11 @@ function PortfolioRiskPage() {
     if ((direction === 'BUY' && (sl >= e || tp <= e)) || (direction === 'SELL' && (sl <= e || tp >= e))) { setNotice('Check direction: stop-loss and take-profit are on the wrong side of entry.'); return; }
     const risk = riskDistance * lots * 100000;
     const rewardCash = reward * lots * 100000;
+    let existingOrders = [];
+    try { existingOrders = JSON.parse(localStorage.getItem('tradelab_demo_orders') || '[]'); if (!Array.isArray(existingOrders)) existingOrders = []; }
+    catch { setNotice('Paper order history could not be read safely. Demo exposure blocked.'); return; }
+    const riskCheck = evaluatePaperOrderRisk({ order: { entry: e, sl, volume: lots }, account, positions, existingOrders, limits: { dailyLimitPct, drawdownLimitPct, maxPortfolioRiskPct } });
+    if (!riskCheck.allowed) { setNotice(`DEMO EXPOSURE BLOCKED: ${riskCheck.reasons.join(' ')}`); return; }
     const item = { id: Date.now(), symbol, direction, entry: e, stop: sl, target: tp, volume: lots, risk, reward: rewardCash, rr: rewardCash / risk };
     setPositions(prev => [...prev, item]); setNotice('Demo position added to portfolio risk monitor.');
     setEntry(''); setStop(''); setTarget('');
@@ -3717,6 +3737,7 @@ function PortfolioRiskPage() {
         <label style={label}>Today's realized loss ($)<input style={field} type="number" min="0" value={account.dailyLoss} onChange={e=>setAccount(a=>({...a,dailyLoss:e.target.value}))}/></label>
         <label style={label}>Daily loss limit (%)<input style={field} type="number" min="0.1" max="100" step="0.1" value={dailyLimitPct} onChange={e=>setDailyLimitPct(Math.max(0.1,Number(e.target.value)||0.1))}/></label>
         <label style={label}>Maximum drawdown limit (%)<input style={field} type="number" min="0.1" max="100" step="0.1" value={drawdownLimitPct} onChange={e=>setDrawdownLimitPct(Math.max(0.1,Number(e.target.value)||0.1))}/></label>
+        <label style={label}>Maximum aggregate open risk (%)<input style={field} type="number" min="0.1" max="25" step="0.1" value={maxPortfolioRiskPct} onChange={e=>setMaxPortfolioRiskPct(Math.max(0.1,Math.min(25,Number(e.target.value)||0.1)))}/></label>
       </div>
       <div style={card}>
         <h3 style={{marginTop:0}}>Position sizing calculator</h3>
@@ -3748,7 +3769,7 @@ function PortfolioRiskPage() {
       {positions.length===0?<tr><td colSpan="10" className="empty">No demo positions added yet.</td></tr>:positions.map(p=><tr key={p.id}><td>{p.symbol}</td><td>{p.direction}</td><td>{p.volume}</td><td>{p.entry}</td><td>{p.stop}</td><td>{p.target}</td><td>${p.risk.toFixed(2)}</td><td>${p.reward.toFixed(2)}</td><td>{p.rr.toFixed(2)}R</td><td><button className="period-btn" onClick={()=>setPositions(prev=>prev.filter(x=>x.id!==p.id))}>Remove</button></td></tr>)}
       </tbody></table></div>
     </div>
-    <p className="muted" style={{marginTop:12}}>Risk calculations are local demo estimates, not broker margin calculations or financial advice. They do not block orders in the Trading Terminal yet. All account values and positions are stored in this browser only.</p>
+    <p className="muted" style={{marginTop:12}}>Risk calculations are local demo estimates, not broker margin calculations. Daily-loss, drawdown and aggregate open-risk limits are now checked before a paper order is saved. These browser-side controls do not protect a live broker account. All account values and positions are stored in this browser only.</p>
   </div>;
 }
 
