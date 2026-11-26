@@ -108,3 +108,27 @@ test('empty or absent browser keys are backed up as empty arrays', () => {
   const b = createPaperBackup(new MemoryStorage());
   assert.deepEqual(b.data, {orders:[],autoTrades:[],autoLog:[]});
 });
+
+
+test('applies the 10 MB limit to direct object inputs as well as JSON strings', () => {
+  const oversized = {
+    format:'TradeLabAI.PaperTradingBackup', version:1,
+    scope:'browser-local-paper-records',
+    data:{orders:[{note:'x'.repeat(10 * 1024 * 1024)}],autoTrades:[],autoLog:[]}
+  };
+  assert.match(validatePaperBackup(oversized).reason, /10 MB limit/);
+});
+
+test('rejects backup objects that cannot be safely serialized', () => {
+  const cyclic = {format:'TradeLabAI.PaperTradingBackup',version:1,scope:'browser-local-paper-records',data:emptyData()};
+  cyclic.data.orders.push(cyclic);
+  assert.match(validatePaperBackup(cyclic).reason, /cannot be safely serialized/);
+});
+
+test('rejects backups above the total record-count ceiling', () => {
+  const tooMany = v1({
+    orders:Array.from({length:50001}, (_, index) => ({id:`order-${index}`})),
+    autoTrades:[],autoLog:[]
+  });
+  assert.match(validatePaperBackup(tooMany).reason, /50,000 record limit/);
+});
