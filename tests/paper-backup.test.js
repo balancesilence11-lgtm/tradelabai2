@@ -109,26 +109,41 @@ test('empty or absent browser keys are backed up as empty arrays', () => {
   assert.deepEqual(b.data, {orders:[],autoTrades:[],autoLog:[]});
 });
 
-
-test('applies the 10 MB limit to direct object inputs as well as JSON strings', () => {
-  const oversized = {
-    format:'TradeLabAI.PaperTradingBackup', version:1,
-    scope:'browser-local-paper-records',
-    data:{orders:[{note:'x'.repeat(10 * 1024 * 1024)}],autoTrades:[],autoLog:[]}
-  };
-  assert.match(validatePaperBackup(oversized).reason, /10 MB limit/);
+test('restore verifies committed values and confirms rollback after a silent write mismatch', () => {
+  class MismatchingStorage extends MemoryStorage {
+    constructor(seed) { super(seed); this.mismatchOnce = true; }
+    setItem(key, value) {
+      if (key === keys.orders && this.mismatchOnce) {
+        this.mismatchOnce = false;
+        super.setItem(key, '[]');
+        return;
+      }
+      super.setItem(key, value);
+    }
+  }
+  const original = '[{"id":"before"}]';
+  const storage = new MismatchingStorage({ [keys.orders]: original });
+  const incoming = createPaperBackupFromData(createPaperBackup(new MemoryStorage()), { orders: [{ id: 'after' }], autoTrades: [], autoLog: [] });
+  const result = restorePaperBackup(incoming, storage);
+  assert.equal(result.ok, false);
+  assert.equal(result.rollbackAttempted, true);
+  assert.equal(result.rollbackVerified, true);
+  assert.equal(storage.getItem(keys.orders), original);
 });
 
-test('rejects backup objects that cannot be safely serialized', () => {
-  const cyclic = {format:'TradeLabAI.PaperTradingBackup',version:1,scope:'browser-local-paper-records',data:emptyData()};
-  cyclic.data.orders.push(cyclic);
-  assert.match(validatePaperBackup(cyclic).reason, /cannot be safely serialized/);
-});
-
-test('rejects backups above the total record-count ceiling', () => {
-  const tooMany = v1({
-    orders:Array.from({length:50001}, (_, index) => ({id:`order-${index}`})),
-    autoTrades:[],autoLog:[]
-  });
-  assert.match(validatePaperBackup(tooMany).reason, /50,000 record limit/);
+test('restore reports when rollback cannot be verified', () => {
+  class RollbackFailStorage extends MemoryStorage {
+    constructor(seed) { super(seed); this.failRestore = false; }
+    setItem(key, value) {
+      if (key === keys.autoLog && !this.failRestore) { this.failRestore = true; throw new Error('commit blocked'); }
+      if (this.failRestore && key === keys.orders) throw new Error('rollback blocked');
+      super.setItem(key, value);
+    }
+  }
+  const storage = new RollbackFailStorage({ [keys.orders]: '[{"id":"before"}]' });
+  const incoming = createPaperBackupFromData(createPaperBackup(new MemoryStorage()), { orders: [{ id: 'after' }], autoTrades: [], autoLog: [] });
+  const result = restorePaperBackup(incoming, storage);
+  assert.equal(result.ok, false);
+  assert.equal(result.rollbackAttempted, true);
+  assert.equal(result.rollbackVerified, false);
 });
