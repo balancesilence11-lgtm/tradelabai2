@@ -12,6 +12,8 @@ export function validateSignalRecord(body, options = {}) {
   const symbol = String(body?.symbol || '').toUpperCase().replace('/', '');
   const timeframe = String(body?.timeframe || '').toLowerCase();
   const signal = String(body?.signal || '').toUpperCase();
+  const engineId = String(body?.engineId || 'legacy-unspecified');
+  const allowedEngines = new Set(['advanced-client-confluence-v1', 'legacy-unspecified']);
   const confluence = Number(body?.confluence);
   const entry = Number(body?.entry);
   const stopLoss = Number(body?.stopLoss);
@@ -19,6 +21,7 @@ export function validateSignalRecord(body, options = {}) {
   const generatedAtMs = Date.parse(body?.generatedAt);
 
   if (!symbol || !TIMEFRAME_MS[timeframe] || !['BUY', 'SELL'].includes(signal) ||
+      !allowedEngines.has(engineId) ||
       !Number.isFinite(confluence) || confluence < 0 || confluence > 100 ||
       !finitePositive(entry) || !finitePositive(stopLoss) || !targets.length ||
       targets.some(target => !finitePositive(target)) ||
@@ -40,7 +43,7 @@ export function validateSignalRecord(body, options = {}) {
   return {
     ok: true,
     value: { symbol, timeframe, signal, confluence, entry, stopLoss, takeProfit: targets,
-      generatedAt: new Date(generatedAtMs).toISOString(), risk, reward,
+      generatedAt: new Date(generatedAtMs).toISOString(), engineId, risk, reward,
       rewardRisk: reward / risk }
   };
 }
