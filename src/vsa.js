@@ -3,62 +3,101 @@
  * Volume source is labelled conservatively; generic `volume` is never assumed
  * to be exchange-traded volume. Signals are descriptive, not proof of intent.
  */
-const finite = value => Number.isFinite(Number(value));
 
-function readVolume(candle) {
-  if (!candle || typeof candle !== 'object') return { value: null, source: 'unavailable' };
-  const explicitTick = ['tick_volume', 'tickVolume', 'tickvol'].find(key =>
-    finite(candle[key]) && Number(candle[key]) >= 0
-  );
-  if (explicitTick) return { value: Number(candle[explicitTick]), source: 'broker tick volume' };
+const toFiniteNumber = value => {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
 
-  const explicitReal = ['real_volume', 'realVolume', 'exchangeVolume'].find(key =>
-    finite(candle[key]) && Number(candle[key]) >= 0
-  );
-  if (explicitReal) return { value: Number(candle[explicitReal]), source: 'provider-labelled real/exchange volume' };
-
-  if (finite(candle.volume) && Number(candle.volume) >= 0) {
-    const declared = String(candle.volumeType || candle.volume_type || '').toLowerCase();
-    if (/tick/.test(declared)) return { value: Number(candle.volume), source: 'broker tick volume' };
-    if (/real|exchange/.test(declared)) return { value: Number(candle.volume), source: 'provider-labelled real/exchange volume' };
-    return { value: Number(candle.volume), source: 'reported volume (type unspecified)' };
+/**
+ * Read one candle's volume without treating null/blank values as zero.
+ * Exported so Market Intelligence uses exactly the same source classification.
+ */
+export function readVolume(candle) {
+  if (!candle || typeof candle !== 'object') {
+    return { value: null, source: 'unavailable' };
   }
-  return { value: null, source: 'unavailable' };
+
+  for (const key of ['tick_volume', 'tickVolume', 'tickvol']) {
+    const value = toFiniteNumber(candle[key]);
+    if (value !== null && value > 0) {
+      return { value, source: 'broker tick volume' };
+    }
+  }
+
+  for (const key of ['real_volume', 'realVolume', 'exchangeVolume']) {
+    const value = toFiniteNumber(candle[key]);
+    if (value !== null && value > 0) {
+      return { value, source: 'provider-labelled real/exchange volume' };
+    }
+  }
+
+  const value = toFiniteNumber(candle.volume);
+  if (value === null || value <= 0) {
+    return { value: null, source: 'unavailable' };
+  }
+
+  const declared = String(candle.volumeType ?? candle.volume_type ?? '').toLowerCase();
+  if (/tick/.test(declared)) {
+    return { value, source: 'broker tick volume' };
+  }
+  if (/real|exchange/.test(declared)) {
+    return { value, source: 'provider-labelled real/exchange volume' };
+  }
+  return { value, source: 'reported volume (type unspecified)' };
 }
 
-export function analyzeVSA(candles, lookback = 20) {
-  const unavailable = {
-    ready: false,
-    signal: 'UNAVAILABLE',
-    label: 'Volume data unavailable',
-    confidence: 'None',
-    source: 'unavailable',
-    relativeVolume: null,
-    spreadRatio: null,
-    closeLocation: null,
-    direction: 0,
-    detail: 'VSA requires at least 20 prior candles with valid, non-zero volume and OHLC data.',
-    caveat: 'No volume-based confirmation is used.'
-  };
+const unavailableResult = (detail, lookback = 20) => ({
+  ready: false,
+  signal: 'UNAVAILABLE',
+  label: 'Volume data unavailable',
+  confidence: 'None',
+  source: 'unavailable',
+  relativeVolume: null,
+  spreadRatio: null,
+  closeLocation: null,
+  direction: 0,
+  lookback,
+  detail,
+  caveat: 'No volume-based confirmation is used.'
+});
 
-  if (!Array.isArray(candles) || candles.length < lookback + 1) return unavailable;
+export function analyzeVSA(candles, lookback = 20) {
+  if (!Number.isInteger(lookback) || lookback < 2 || lookback > 500) {
+    return unavailableResult('VSA lookback must be a whole number between 2 and 500 bars.', lookback);
+  }
+
+  if (!Array.isArray(candles) || candles.length < lookback + 1) {
+    return unavailableResult(`VSA requires ${lookback} prior candles plus the current candle.`);
+  }
 
   const sample = candles.slice(-(lookback + 1));
   const parsed = sample.map(candle => {
-    const open = Number(candle.open);
-    const high = Number(candle.high);
-    const low = Number(candle.low);
-    const close = Number(candle.close);
+    const open = toFiniteNumber(candle?.open);
+    const high = toFiniteNumber(candle?.high);
+    const low = toFiniteNumber(candle?.low);
+    const close = toFiniteNumber(candle?.close);
     const volume = readVolume(candle);
-    const validOHLC = [open, high, low, close].every(Number.isFinite) &&
-      high >= Math.max(open, close, low) && low <= Math.min(open, close, high);
+    const validOHLC = [open, high, low, close].every(value => value !== null) &&
+      high >= Math.max(open, close, low) &&
+      low <= Math.min(open, close, high);
     return { open, high, low, close, volume: volume.value, source: volume.source, validOHLC };
   });
 
-  if (parsed.some(c => !c.validOHLC || c.volume == null || c.volume <= 0)) {
+  if (parsed.some(c => !c.validOHLC)) {
+    return unavailableResult('VSA is unavailable because the selected lookback contains invalid OHLC values.', lookback);
+  }
+
+  if (parsed.some(c => c.volume === null || c.volume <= 0)) {
+    return unavailableResult('VSA is unavailable because the selected lookback contains missing, zero, or invalid volume values.', lookback);
+  }
+
+  const sourceSet = [...new Set(parsed.map(c => c.source))];
+  if (sourceSet.length !== 1) {
     return {
-      ...unavailable,
-      detail: 'VSA is unavailable because the selected lookback contains missing, zero, or invalid volume/OHLC values.'
+      ...unavailableResult('VSA is unavailable because the selected lookback mixes different volume sources. Use one consistent volume source.', lookback),
+      source: 'mixed volume sources'
     };
   }
 
@@ -68,7 +107,10 @@ export function analyzeVSA(candles, lookback = 20) {
   const avgVolume = mean(prior.map(c => c.volume));
   const avgSpread = mean(prior.map(c => c.high - c.low));
   const spread = current.high - current.low;
-  if (!(avgVolume > 0) || !(avgSpread > 0) || !(spread > 0)) return unavailable;
+
+  if (!(avgVolume > 0) || !(avgSpread > 0) || !(spread > 0)) {
+    return unavailableResult('VSA is unavailable because average volume, average spread, or current candle spread is zero.', lookback);
+  }
 
   const relativeVolume = current.volume / avgVolume;
   const spreadRatio = spread / avgSpread;
@@ -80,19 +122,18 @@ export function analyzeVSA(candles, lookback = 20) {
   const risingContext = priorClose > priorClose2;
   const fallingContext = priorClose < priorClose2;
   const priorHigh = Math.max(...prior.map(c => c.high));
-  const sourceSet = [...new Set(parsed.map(c => c.source))];
-  const source = sourceSet.length === 1 ? sourceSet[0] : 'mixed volume sources';
 
   let result = {
     ready: true,
     signal: 'NEUTRAL',
     label: 'No clear VSA event',
     confidence: 'Low',
-    source,
+    source: sourceSet[0],
     relativeVolume,
     spreadRatio,
     closeLocation,
     direction: 0,
+    lookback,
     detail: `Current volume is ${relativeVolume.toFixed(2)}× the prior ${lookback}-bar average; spread is ${spreadRatio.toFixed(2)}× average. No defined VSA pattern was met.`,
     caveat: 'VSA describes candle spread and reported activity; it does not reveal participant identity or prove institutional activity.'
   };
