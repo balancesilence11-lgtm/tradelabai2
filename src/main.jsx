@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { analyzeMarketIntelligence, buildMarketIntelligenceExplanation } from './market-intelligence.js';
 import { runHistoricalBacktest } from './backtesting.js';
 import { replayStrategy, calibrateConfidence } from './strategy-replay.js';
+import { splitWalkForward } from './execution-realism.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -2194,8 +2195,10 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     setLibraryMessage(`Deleted “${item.name}”.`);
   };
   const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct, runKey]);
-  const replay = useMemo(() => replayStrategy(candles, config, { stopLossPct, takeProfitPct, horizon: 10, minBars: 60 }), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, stopLossPct, takeProfitPct, runKey]);
-  const calibration = useMemo(() => calibrateConfidence(replay.trades, { minSample: 100 }), [replay]);
+  const replay = useMemo(() => replayStrategy(candles, config, { stopLossPct, takeProfitPct, horizon: 10, minBars: 60 }), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct, runKey]);
+  const replaySplit = useMemo(() => splitWalkForward(candles.length, { trainFraction: 0.7, minimumTest: 20 }), [candles.length]);
+  const outOfSampleReplay = useMemo(() => replaySplit.valid ? replayStrategy(candles, config, { stopLossPct, takeProfitPct, horizon: 10, minBars: 60, startIndex: replaySplit.testStart, endIndex: replaySplit.testEnd - 1 }) : { error: replaySplit.reason, trades: [], metrics: { signals: 0, resolved: 0, unresolved: 0, ambiguous: 0 } }, [candles, replaySplit, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct, runKey]);
+  const calibration = useMemo(() => calibrateConfidence(outOfSampleReplay.trades, { minSample: 100 }), [outOfSampleReplay]);
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
   const chart = result?.curve || [];
@@ -2267,7 +2270,7 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Estimated round-trip cost: <strong>{(spreadBps + commissionBps * 2 + slippageBps * 2).toFixed(2)} bps</strong> ({((spreadBps + commissionBps * 2 + slippageBps * 2) / 100).toFixed(4)}%). Spread, commission and slippage are applied on entry and exit.</span></div>
     </div>
     <div className="card" style={{marginTop:18,background:'#0b1728'}}>
-      <div className="card-heading"><div><h3>Walk-forward strategy replay & confidence calibration</h3><div className="muted">{symbol} · {timeframe} · {replay.trades?.length || 0} replayed signal events</div></div><span className="tag">PHASE 2.6</span></div>
+      <div className="card-heading"><div><h3>Execution-aware replay & out-of-sample validation</h3><div className="muted">{symbol} · {timeframe} · {replay.trades?.length || 0} full-sample events</div></div><span className="tag">PHASE 2.7</span></div>
       {replay.error ? <div className="muted">{replay.error}</div> : <>
         <div className="stats-grid" style={{marginBottom:12}}>
           <div className="card"><div className="stat-label">Replay signals</div><div className="stat-value">{replay.metrics.signals}</div></div>
@@ -2275,9 +2278,10 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
           <div className="card"><div className="stat-label">Replay win rate</div><div className="stat-value">{replay.metrics.winRate == null ? '—' : `${replay.metrics.winRate}%`}</div></div>
           <div className="card"><div className="stat-label">Ambiguous / unresolved</div><div className="stat-value">{replay.metrics.ambiguous} / {replay.metrics.unresolved}</div></div>
         </div>
-        <div className="card-heading"><h4>Empirical win rate by signal-strength band</h4><span className="muted">Minimum 100 resolved outcomes overall; 100 per band</span></div>
+        <div className="card" style={{marginBottom:14,borderColor:'#31516b'}}><div className="card-heading"><h4>Unseen-data validation (chronological 70/30 split)</h4><span className="tag">OUT OF SAMPLE</span></div>{outOfSampleReplay.error ? <p className="muted">{outOfSampleReplay.error}</p> : <div className="stats-grid"><div><div className="stat-label">Training candles</div><div className="stat-value">{replaySplit.trainCandles}</div></div><div><div className="stat-label">Test candles</div><div className="stat-value">{replaySplit.testCandles}</div></div><div><div className="stat-label">OOS resolved trades</div><div className="stat-value">{outOfSampleReplay.metrics.resolved}</div></div><div><div className="stat-label">OOS win rate</div><div className="stat-value">{outOfSampleReplay.metrics.winRate == null ? '—' : `${outOfSampleReplay.metrics.winRate}%`}</div></div><div><div className="stat-label">OOS expectancy</div><div className="stat-value">{outOfSampleReplay.metrics.expectancyR == null ? '—' : `${outOfSampleReplay.metrics.expectancyR} R`}</div></div><div><div className="stat-label">OOS net result</div><div className="stat-value">{outOfSampleReplay.metrics.netR ?? '—'} R</div></div></div>}</div>
+        <div className="card-heading"><h4>Empirical win rate by signal-strength band (out-of-sample only)</h4><span className="muted">Minimum 100 resolved outcomes overall; 100 per band</span></div>
         <div className="table-wrap"><table><thead><tr><th>Strength band</th><th>Sample</th><th>Historical win rate</th><th>Status</th></tr></thead><tbody>{calibration.bins.map(bin=><tr key={bin.range}><td>{bin.range}</td><td>{bin.count}</td><td>{bin.eligible ? `${bin.winRate}%` : '—'}</td><td>{bin.eligible ? 'SAMPLE MET' : 'INSUFFICIENT'}</td></tr>)}</tbody></table></div>
-        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>{replay.methodology} {calibration.notice} Confidence bands represent replay signal-strength scores, not the existing AI confluence score. This module uses a fixed 10-candle outcome horizon and configured percentage stop/target; it is a research diagnostic, not broker-grade execution simulation.</p>
+        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>{replay.methodology} {calibration.notice} Calibration uses only the unseen 30% test window. The test period is not used to fit indicator parameters. Results remain historical estimates and are not broker fills or forecasts.</p>
       </>}
     </div>
     <div className="card" style={{marginTop:18}}>
