@@ -192,11 +192,13 @@ function CandlestickChart({ candles, loading, error, symbol }) {
 // Confirmed swing points use three candles on each side to reduce noisy pivots.
 function detectSwingPoints(candles, strength=3) {
   const highs=[], lows=[];
+  if (!Array.isArray(candles) || !Number.isInteger(strength) || strength < 1) return {highs,lows};
   for(let i=strength;i<candles.length-strength;i++) {
-    const h=Number(candles[i].high), l=Number(candles[i].low);
+    const h=Number(candles[i]?.high), l=Number(candles[i]?.low);
+    if (!Number.isFinite(h) || !Number.isFinite(l)) continue;
     const window=candles.slice(i-strength,i+strength+1);
-    if(window.every((c,j)=>j===strength || h>=Number(c.high))) highs.push({index:i,price:h});
-    if(window.every((c,j)=>j===strength || l<=Number(c.low))) lows.push({index:i,price:l});
+    if(window.every((c,j)=>j===strength || (j<strength ? h>Number(c?.high) : h>=Number(c?.high)))) highs.push({index:i,price:h,confirmationIndex:i+strength});
+    if(window.every((c,j)=>j===strength || (j<strength ? l<Number(c?.low) : l<=Number(c?.low)))) lows.push({index:i,price:l,confirmationIndex:i+strength});
   }
   return {highs,lows};
 }
@@ -217,15 +219,16 @@ function buildTrendlines(swings) {
 
 // Flags a close beyond the latest confirmed swing. BOS follows the prior break direction;
 // CHoCH marks a break in the opposite direction. This is a price-action heuristic.
-function detectMarketStructure(candles, swings) {
-  if(candles.length<15 || !swings.highs.length || !swings.lows.length) return {event:null,direction:0};
+function detectMarketStructure(candles, swings, strength=3) {
+  if(!Array.isArray(candles) || candles.length<15 || !swings?.highs?.length || !swings?.lows?.length) return {event:null,direction:0,events:[]};
   let direction=0, lastEvent=null;
   const events=[];
   let highCursor=0, lowCursor=0, activeHigh=null, activeLow=null;
   for(let i=0;i<candles.length;i++) {
-    while(highCursor<swings.highs.length && swings.highs[highCursor].index<i) activeHigh=swings.highs[highCursor++];
-    while(lowCursor<swings.lows.length && swings.lows[lowCursor].index<i) activeLow=swings.lows[lowCursor++];
+    while(highCursor<swings.highs.length && (swings.highs[highCursor].confirmationIndex ?? swings.highs[highCursor].index+strength)<=i) activeHigh=swings.highs[highCursor++];
+    while(lowCursor<swings.lows.length && (swings.lows[lowCursor].confirmationIndex ?? swings.lows[lowCursor].index+strength)<=i) activeLow=swings.lows[lowCursor++];
     const close=Number(candles[i].close);
+    if (!Number.isFinite(close)) continue;
     if(activeHigh && close>activeHigh.price && (!lastEvent || lastEvent.level!==activeHigh.price || lastEvent.direction!==1)) {
       const label=direction===-1?'Bullish CHoCH':'Bullish BOS';
       lastEvent={label,level:activeHigh.price,direction:1,index:i}; events.push(lastEvent); direction=1;
@@ -1009,23 +1012,25 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       const thirdLow = Number(third.low ?? third.close);
 
       if (thirdLow > firstHigh) {
-        fairValueGap = {
-          direction: 1,
-          low: firstHigh,
-          high: thirdLow,
-          label: 'Bullish Fair Value Gap'
-        };
-        break;
+        const later = data.slice(i + 1);
+        const fullyFilled = later.some(c => Number(c.low ?? c.close) <= firstHigh);
+        if (!fullyFilled) {
+          const partial = later.some(c => Number(c.low ?? c.close) < thirdLow);
+          fairValueGap = { direction: 1, low: firstHigh, high: thirdLow, index: i,
+            status: partial ? 'PARTIALLY MITIGATED' : 'OPEN', label: 'Bullish Fair Value Gap' };
+          break;
+        }
       }
 
       if (thirdHigh < firstLow) {
-        fairValueGap = {
-          direction: -1,
-          low: thirdHigh,
-          high: firstLow,
-          label: 'Bearish Fair Value Gap'
-        };
-        break;
+        const later = data.slice(i + 1);
+        const fullyFilled = later.some(c => Number(c.high ?? c.close) >= firstLow);
+        if (!fullyFilled) {
+          const partial = later.some(c => Number(c.high ?? c.close) > thirdHigh);
+          fairValueGap = { direction: -1, low: thirdHigh, high: firstLow, index: i,
+            status: partial ? 'PARTIALLY MITIGATED' : 'OPEN', label: 'Bearish Fair Value Gap' };
+          break;
+        }
       }
     }
 
@@ -1034,7 +1039,7 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
         name: 'Fair Value Gap',
         dir: fairValueGap.direction,
         weight: 2,
-        detail: `${fairValueGap.label}: ${fairValueGap.low} – ${fairValueGap.high}`
+        detail: `${fairValueGap.label} (${fairValueGap.status}): ${fairValueGap.low} – ${fairValueGap.high}`
       });
     }
 
