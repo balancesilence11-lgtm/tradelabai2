@@ -33,3 +33,9 @@ test('ambiguous same-candle stop and target touches are excluded from calibratio
   const result=calibrateConfidence(trades,{minSample:1});
   assert.equal(result.sampleSize,1);
 });
+
+test('out-of-sample index bounds remain aligned when malformed candles are skipped',()=>{
+  const data=candles(180); data.splice(90,0,{time:90,open:100,high:99,low:101,close:100});
+  const result=replayStrategy(data,{strategy:'ema',fast:8,slow:21},{minBars:60,horizon:5,startIndex:126,endIndex:178});
+  assert.ok(result.trades.every(t=>t.index>=126&&t.index<=178));
+});
