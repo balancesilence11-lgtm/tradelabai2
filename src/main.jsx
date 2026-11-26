@@ -6,6 +6,7 @@ import { runHistoricalBacktest } from './backtesting.js';
 import { replayStrategy, calibrateConfidence } from './strategy-replay.js';
 import { splitWalkForward } from './execution-realism.js';
 import { evaluatePaperOrderRisk } from './portfolio-risk-guard.js';
+import { closePaperOrder, cancelPaperOrder, applyPaperRealizedPnl } from './paper-order-lifecycle.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -2772,6 +2773,45 @@ function TradingTerminalPage({ symbol, price, candles }) {
     setMessage('Illustrative ATR levels filled. Review them before creating a demo order.');
   }
 
+  function finishOrder(orderId) {
+    const current = orders.find(item => item.id === orderId);
+    if (!current) return setMessage('Paper order was not found.');
+    const result = closePaperOrder(current, quote);
+    if (!result.ok) return setMessage(result.reason);
+    let account;
+    try {
+      account = { balance: 10000, equity: 10000, dailyLoss: 0, peakEquity: 10000, openRisk: 0, ...JSON.parse(localStorage.getItem('tradelab_portfolio_risk_v1') || '{}') };
+    } catch { return setMessage('Account risk data could not be read. Order close was not recorded.'); }
+    const nextAccount = applyPaperRealizedPnl(account, result.order.realizedPnl);
+    if (!nextAccount) return setMessage('Account values are invalid; order close was not recorded.');
+    const nextOrders = orders.map(item => item.id === orderId ? result.order : item);
+    const previousAccount = localStorage.getItem('tradelab_portfolio_risk_v1');
+    const previousOrders = localStorage.getItem('tradelab_demo_orders');
+    try {
+      localStorage.setItem('tradelab_portfolio_risk_v1', JSON.stringify(nextAccount));
+      localStorage.setItem('tradelab_demo_orders', JSON.stringify(nextOrders));
+    } catch {
+      try {
+        if (previousAccount == null) localStorage.removeItem('tradelab_portfolio_risk_v1'); else localStorage.setItem('tradelab_portfolio_risk_v1', previousAccount);
+        if (previousOrders == null) localStorage.removeItem('tradelab_demo_orders'); else localStorage.setItem('tradelab_demo_orders', previousOrders);
+      } catch {}
+      return setMessage('Browser storage failed. Order close was not recorded.');
+    }
+    setOrders(nextOrders);
+    setMessage(`Paper order closed at ${fmt(quote)}. Illustrative realised P/L: $${result.order.realizedPnl.toFixed(2)}. No broker order was sent.`);
+  }
+
+  function cancelOrder(orderId) {
+    const current = orders.find(item => item.id === orderId);
+    const result = cancelPaperOrder(current);
+    if (!result.ok) return setMessage(result.reason);
+    const nextOrders = orders.map(item => item.id === orderId ? result.order : item);
+    try { localStorage.setItem('tradelab_demo_orders', JSON.stringify(nextOrders)); }
+    catch { return setMessage('Browser storage failed. Cancellation was not recorded.'); }
+    setOrders(nextOrders);
+    setMessage('Pending paper order cancelled. No P/L was recorded.');
+  }
+
   function submitOrder() {
     const qty = Number(volume);
     const open = type === 'Market' ? quote : Number(entry);
@@ -2819,7 +2859,7 @@ function TradingTerminalPage({ symbol, price, candles }) {
       {message && <p className="muted" role="status" style={{marginTop:12}}>{message}</p>}
       <p className="muted" style={{lineHeight:1.6}}>This terminal stores simulated orders in this browser only. It does not connect to Deriv, MT5 or any broker. The local risk gate uses a simplified price-distance × volume × 100,000 estimate; actual contract size, pip value, conversion, margin, fees and slippage vary by instrument and broker.</p>
     </div>
-    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper order history</h3><span className="muted">{orders.length} saved</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Entry</th><th>Stop loss</th><th>Take profit</th><th>R:R</th><th>Time</th></tr></thead><tbody>{orders.length===0?<tr><td colSpan="8" className="empty">No paper orders yet.</td></tr>:orders.map(o=><tr key={o.id}><td>{o.symbol}</td><td className={o.side==='BUY'?'positive':'negative'}>{o.side}</td><td>{o.volume}</td><td>{o.entry}</td><td>{o.sl}</td><td>{o.tp}</td><td>1:{o.rr}</td><td>{o.time}</td></tr>)}</tbody></table></div></div>
+    <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Paper order history</h3><span className="muted">{orders.length} saved</span></div><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Entry</th><th>Stop loss</th><th>Take profit</th><th>R:R</th><th>Status</th><th>Exit / P&amp;L</th><th>Action</th></tr></thead><tbody>{orders.length===0?<tr><td colSpan="10" className="empty">No paper orders yet.</td></tr>:orders.map(o=><tr key={o.id}><td>{o.symbol}</td><td className={o.side==='BUY'?'positive':'negative'}>{o.side}</td><td>{o.volume}</td><td>{o.entry}</td><td>{o.sl}</td><td>{o.tp}</td><td>1:{o.rr}</td><td>{o.status || 'PAPER OPEN'}</td><td>{o.status==='CLOSED'?`${o.exit} / $${Number(o.realizedPnl||0).toFixed(2)}`:'—'}</td><td>{(o.status==='PAPER OPEN' || !o.status) && o.type==='Market'?<button className="period-btn" disabled={o.symbol!==symbol || !Number.isFinite(quote) || quote<=0} title={o.symbol!==symbol?'Select this order instrument before closing it':'Close at the current displayed quote'} onClick={()=>finishOrder(o.id)}>{o.symbol===symbol?'Close at market':'Select instrument'}</button>:(o.status==='PAPER OPEN' || !o.status)?<button className="period-btn" onClick={()=>cancelOrder(o.id)}>Cancel pending</button>:'—'}</td></tr>)}</tbody></table></div><p className="muted" style={{fontSize:11,lineHeight:1.6,marginTop:10}}>Closing a market paper order updates the local demo balance, equity and daily realised loss. P/L uses the same simplified price-difference × volume × 100,000 estimate and is not a broker statement.</p></div>
   </>;
 }
 
