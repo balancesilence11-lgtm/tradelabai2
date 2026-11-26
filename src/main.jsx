@@ -1,7 +1,7 @@
 import DerivLivePanel from "./DerivLivePanel";import AuthGate from "./AuthGate";import TradingViewChart from "./TradingViewChart";import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
-import { analyzeVSA } from './vsa.js';
+import { analyzeMarketIntelligence, buildMarketIntelligenceExplanation } from './market-intelligence.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -1056,13 +1056,24 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
 
     // 10a. Volume Spread Analysis. Only directional, defined patterns contribute
     // a low-weight vote; unavailable/ambiguous volume never creates a direction.
-    const vsa = analyzeVSA(data.slice(-21));
+    const marketIntelligence = analyzeMarketIntelligence(data.slice(-100));
+    const vsa = marketIntelligence.vsa;
     if (vsa.ready && vsa.direction !== 0) {
       votes.push({
         name: vsa.label,
         dir: vsa.direction,
         weight: 1,
         detail: `${vsa.detail} Source: ${vsa.source}.`
+      });
+    }
+    // A small, capped vote from the volume-pressure proxy; absorption and
+    // exhaustion remain contextual unless a separate price confirmation exists.
+    if (marketIntelligence.pressure?.ready && marketIntelligence.pressure.direction !== 0 && marketIntelligence.pressure.score >= 18) {
+      votes.push({
+        name: 'Volume pressure estimate',
+        dir: marketIntelligence.pressure.direction,
+        weight: 1,
+        detail: marketIntelligence.pressure.detail
       });
     }
 
@@ -1257,6 +1268,15 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
       displacement,
       wyckoffEvent,
       vsa,
+      marketIntelligence: {
+        ...marketIntelligence,
+        explanation: buildMarketIntelligenceExplanation({
+          direction,
+          intelligence: marketIntelligence,
+          structure: recentEvent?.label || null,
+          mtf: mtfSummary.ready ? `${mtfSummary.direction} (${mtfSummary.ready} timeframes available)` : 'unavailable'
+        })
+      },
       dealingRange
     };
 
@@ -1480,13 +1500,22 @@ function AIAnalysisPanel({ candles, symbol, timeframe }) {
             <div className="signal"><span>VSA event</span><strong>{analysis.vsa?.label || 'Unavailable'}</strong></div>
             {analysis.vsa?.ready && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>Relative volume {analysis.vsa.relativeVolume.toFixed(2)}× · Spread {analysis.vsa.spreadRatio.toFixed(2)}× · {analysis.vsa.source}</div>}
             {analysis.vsa?.ready && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{analysis.vsa.detail}</div>}
+            <div className="signal"><span>Buying / selling pressure</span><strong>{analysis.marketIntelligence?.pressure?.label || 'Unavailable'}</strong></div>
+            {analysis.marketIntelligence?.pressure?.ready && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{analysis.marketIntelligence.pressure.buyPressure}% buy-side · {analysis.marketIntelligence.pressure.sellPressure}% sell-side · {analysis.marketIntelligence.pressure.source}</div>}
+            <div className="signal"><span>Absorption</span><strong>{analysis.marketIntelligence?.absorption?.label || 'Unavailable'}</strong></div>
+            <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{analysis.marketIntelligence?.absorption?.detail}</div>
+            <div className="signal"><span>Exhaustion</span><strong>{analysis.marketIntelligence?.exhaustion?.label || 'Unavailable'}</strong></div>
+            <div className="signal"><span>Potential demand zone</span><strong>{analysis.marketIntelligence?.zones?.demand ? `${fmt(analysis.marketIntelligence.zones.demand.low)} – ${fmt(analysis.marketIntelligence.zones.demand.high)}` : 'Not detected'}</strong></div>
+            <div className="signal"><span>Potential supply zone</span><strong>{analysis.marketIntelligence?.zones?.supply ? `${fmt(analysis.marketIntelligence.zones.supply.low)} – ${fmt(analysis.marketIntelligence.zones.supply.high)}` : 'Not detected'}</strong></div>
+            <div className="signal"><span>Volume confluence</span><strong>{analysis.marketIntelligence?.confluence?.direction || 'Unavailable'}</strong></div>
+            <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>{analysis.marketIntelligence?.explanation}</div>
             <div className="signal"><span>Dealing-range location</span><strong>{analysis.dealingRange ? analysis.dealingRange.zone : 'Insufficient data'}</strong></div>
             {analysis.dealingRange && <div className="muted" style={{fontSize:11,margin:'-5px 0 10px'}}>Low {fmt(analysis.dealingRange.low)} · EQ {fmt(analysis.dealingRange.equilibrium)} · High {fmt(analysis.dealingRange.high)} · Position {(analysis.dealingRange.position*100).toFixed(1)}%</div>}
             <div className="signal"><span>Market structure</span><strong>{analysis.recentEvent?.label || 'No recent BOS/CHoCH'}</strong></div>
             <div className="signal"><span>Liquidity sweep</span><strong>{analysis.liquiditySweep?.label || 'Not detected'}</strong></div>
           </div>
         </div>
-        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations. Order blocks, Wyckoff events and premium/discount zones are candidates, not verified institutional order flow. VSA uses reported candle volume and spread only when the 20-bar sample is complete; tick volume is labelled separately and is not represented as exchange-traded volume.</p>
+        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>These are rule-based candle interpretations, not verified institutional order flow. Supply/demand areas are candidate zones; pressure is a close-location-weighted volume proxy, not order-book data. Tick volume, provider-labelled real volume and unspecified reported volume are kept distinct. Missing or unreliable volume is excluded from volume confirmation.</p>
       </div>
 
       <SignalPerformancePanel candles={analysisCandles} symbol={symbol} timeframe={timeframe} analysis={analysis} />
