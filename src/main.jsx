@@ -10,6 +10,7 @@ import { closePaperOrder, cancelPaperOrder, applyPaperRealizedPnl } from './pape
 import { buildPaperPerformance } from './paper-performance.js';
 import { buildPaperTradesCsv, buildPaperSummaryCsv } from './paper-performance-export.js';
 import { createPaperBackup, previewPaperRestore, restorePaperBackup } from './paper-backup.js';
+import { readPaperBackupAudit, recordPaperBackupAudit } from './paper-backup-audit.js';
 import { restoreWorkspaceEntries } from './backup-coordinator.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
@@ -5477,6 +5478,8 @@ function PaperDataBackupPage() {
   const [preview, setPreview] = useState(null);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [audit, setAudit] = useState(() => readPaperBackupAudit());
+  const logAudit = (action, details) => { recordPaperBackupAudit(action, details); setAudit(readPaperBackupAudit()); };
   const downloadBackup = () => {
     try {
       const data = createPaperBackup();
@@ -5486,6 +5489,7 @@ function PaperDataBackupPage() {
       link.href = url;
       link.download = `tradelab-paper-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
       document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+      logAudit('backup_created', {sourceVersion:data.version, records:Object.values(data.manifest.recordCounts).reduce((a,b)=>a+b,0), message:'Paper backup downloaded'});
       setNotice('Backup downloaded. Store a copy somewhere separate from this browser.');
     } catch (error) { setNotice(error.message || 'Backup could not be created.'); }
   };
@@ -5497,7 +5501,8 @@ function PaperDataBackupPage() {
     try {
       const parsed = JSON.parse(await file.text());
       const result = previewPaperRestore(parsed);
-      if (!result.ok) { setNotice(result.reason); return; }
+      if (!result.ok) { logAudit('validation_rejected', {message:result.reason}); setNotice(result.reason); return; }
+      logAudit('validation_passed', {sourceVersion:result.sourceVersion, records:Object.values(result.counts).reduce((a,c)=>a+c.incoming,0), message:'Backup validated and previewed'});
       setBackup(parsed); setPreview(result);
       setNotice(result.migrated
         ? 'Older version 1 backup validated and migrated in memory to version 2. Review the preview before restoring; the original file is unchanged.'
@@ -5511,8 +5516,8 @@ function PaperDataBackupPage() {
     setBusy(true);
     const result = restorePaperBackup(backup);
     setBusy(false);
-    if (result.ok) { setNotice('Restore completed. Existing records were retained and duplicate records were skipped. Refresh Paper Performance or Trading Terminal to reload their displayed data.'); setBackup(null); setPreview(null); }
-    else setNotice(`Restore failed: ${result.reason}`);
+    if (result.ok) { logAudit('restore_succeeded', {sourceVersion:result.sourceVersion, records:Object.values(result.counts || {}).reduce((a,b)=>a+b,0), message:'Paper backup merged successfully'}); setNotice('Restore completed. Existing records were retained and duplicate records were skipped. Refresh Paper Performance or Trading Terminal to reload their displayed data.'); setBackup(null); setPreview(null); }
+    else { logAudit('restore_failed', {sourceVersion:preview?.sourceVersion, message:result.reason}); setNotice(`Restore failed: ${result.reason}`); }
   };
   return <>
     <div className="welcome"><div><h1>Paper Trading Data Backup</h1><div className="muted">Create and restore a portable copy of browser-local paper trading records.</div></div><span className="demo-badge">● LOCAL DATA ONLY</span></div>
@@ -5521,6 +5526,7 @@ function PaperDataBackupPage() {
       <div className="card"><div className="card-heading"><h3>Restore backup</h3><span className="tag">Validate first</span></div><p className="muted">Choose a TradeLab AI JSON backup. The file is validated and previewed before any browser data is changed.</p><input type="file" accept=".json,application/json" onChange={selectBackup}/></div>
     </div>
     {notice && <div className="card" role="status" style={{marginTop:16}}>{notice}</div>}
+    <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Backup activity history</h3><span className="tag">Latest {audit.length} · local only</span></div>{audit.length===0?<div className="empty">No backup activity recorded yet.</div>:<div className="table-wrap"><table><thead><tr><th>Time</th><th>Activity</th><th>Source version</th><th>Records</th><th>Details</th></tr></thead><tbody>{audit.map(row=><tr key={row.id}><td>{new Date(row.at).toLocaleString()}</td><td>{row.action.replaceAll('_',' ')}</td><td>{row.sourceVersion ?? '—'}</td><td>{row.records ?? '—'}</td><td>{row.message || '—'}</td></tr>)}</tbody></table></div>}<p className="muted" style={{fontSize:11}}>History is stored in this browser only, limited to 200 entries, and can be cleared if browser storage is cleared. It is not tamper-proof or a server-side security audit log.</p></div>
     {preview?.ok && <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Restore preview</h3><span className="tag">v{preview.sourceVersion} {preview.migrated ? '→ v2 migrated' : 'verified'} · {preview.createdAt ? new Date(preview.createdAt).toLocaleString() : 'date unavailable'}</span></div>{preview.migrated && <p className="muted">This older backup has been migrated in memory. Your selected source file will not be changed.</p>}<div className="table-wrap"><table><thead><tr><th>Record type</th><th>Current</th><th>In backup</th><th>New records</th><th>Duplicates skipped</th></tr></thead><tbody>{Object.entries(preview.counts).map(([name,c])=><tr key={name}><td>{name==='autoTrades'?'Automation paper trades':name==='autoLog'?'Automation logs':'Paper orders'}</td><td>{c.current}</td><td>{c.incoming}</td><td>{c.added}</td><td>{c.duplicates}</td></tr>)}</tbody></table></div><button className="execute-btn" style={{marginTop:14}} disabled={busy} onClick={restore}>{busy?'Restoring…':'Confirm merge and restore'}</button></div>}
     <div className="card" style={{marginTop:16,borderColor:'#5b4520'}}><strong style={{color:'#fbbf24'}}>Important backup scope</strong><p className="muted" style={{fontSize:12,lineHeight:1.7}}>This backup includes browser-local paper orders, automation paper trades and automation logs. It does not include account balances, equity, risk limits, broker credentials, market history, strategy settings or trade journal entries. Those are intentionally excluded to prevent a restore from overwriting account state or duplicating realised P/L. Keep backup files private and store them outside this browser.</p></div>
   </>;
