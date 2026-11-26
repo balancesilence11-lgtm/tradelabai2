@@ -7,6 +7,7 @@ import { replayStrategy, calibrateConfidence } from './strategy-replay.js';
 import { splitWalkForward } from './execution-realism.js';
 import { evaluatePaperOrderRisk } from './portfolio-risk-guard.js';
 import { closePaperOrder, cancelPaperOrder, applyPaperRealizedPnl } from './paper-order-lifecycle.js';
+import { buildPaperPerformance } from './paper-performance.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -71,6 +72,7 @@ const navigation = [
   { name: 'AI Assistant', icon: Bot },
   { name: 'Strategy Lab', icon: Activity },
   { name: 'Performance Analytics', icon: BarChart3 },
+  { name: 'Paper Performance', icon: BarChart3 },
   { name: 'Trading Terminal', icon: TrendingUp },
   { name: 'Smart Scanner', icon: SlidersHorizontal },
   { name: 'Risk Centre', icon: ShieldCheck },
@@ -5402,6 +5404,51 @@ function MarketIntelligencePage({ selectedMarket, candles, timeframe }) {
   </>;
 }
 
+function PaperPerformancePage() {
+  const [orders, setOrders] = useState(() => {
+    try { const saved = JSON.parse(localStorage.getItem('tradelab_demo_orders') || '[]'); return Array.isArray(saved) ? saved : []; }
+    catch { return []; }
+  });
+  const [symbol, setSymbol] = useState('ALL');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [notice, setNotice] = useState('');
+  const refresh = () => {
+    try { const saved = JSON.parse(localStorage.getItem('tradelab_demo_orders') || '[]'); setOrders(Array.isArray(saved) ? saved : []); setNotice('Paper order history refreshed from this browser.'); }
+    catch { setNotice('Paper order history could not be read.'); }
+  };
+  const stats = useMemo(() => buildPaperPerformance(orders, { symbol, from, to }), [orders, symbol, from, to]);
+  const symbols = [...new Set(orders.map(o => String(o.symbol || '').toUpperCase()).filter(Boolean))].sort();
+  const money = value => `${value < 0 ? '-' : ''}$${Math.abs(value).toFixed(2)}`;
+  const pf = stats.profitFactor === Infinity ? '∞' : stats.profitFactor.toFixed(2);
+  const chartW = 640, chartH = 150, values = [0, ...stats.equityCurve.map(p => p.cumulativePnl)];
+  const low = Math.min(...values), high = Math.max(...values), range = high - low || 1;
+  const points = values.map((v, i) => `${values.length < 2 ? chartW / 2 : 12 + i / (values.length - 1) * (chartW - 24)},${chartH - 12 - (v - low) / range * (chartH - 24)}`).join(' ');
+  const input = { background:'#0b1728', border:'1px solid #2b3b52', color:'#fff', borderRadius:6, padding:9, fontSize:12 };
+  return <>
+    <div className="welcome"><div><h1>Paper Trading Performance</h1><div className="muted">Performance statistics from closed paper orders recorded in this browser.</div></div><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><span className="demo-badge">● PAPER DATA ONLY</span><button className="period-btn" onClick={refresh}>Refresh history</button></div></div>
+    <div className="card" style={{marginBottom:16}}><div className="card-heading"><h3>Performance filters</h3><span className="muted">{stats.total} matching closed orders</span></div><div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'end'}}>
+      <label style={{fontSize:11,color:'#9ba9bd'}}>Instrument<br/><select style={input} value={symbol} onChange={e=>setSymbol(e.target.value)}><option value="ALL">All instruments</option>{symbols.map(s=><option key={s} value={s}>{s}</option>)}</select></label>
+      <label style={{fontSize:11,color:'#9ba9bd'}}>From date<br/><input style={input} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></label>
+      <label style={{fontSize:11,color:'#9ba9bd'}}>To date<br/><input style={input} type="date" value={to} onChange={e=>setTo(e.target.value)}/></label>
+      <button className="period-btn" onClick={()=>{setSymbol('ALL');setFrom('');setTo('');}}>Clear filters</button>
+    </div>{notice && <p className="muted" role="status">{notice}</p>}</div>
+    <div className="stats-grid">
+      <div className="card"><div className="stat-label">Net realised P/L</div><div className={`stat-value ${stats.netPnl>=0?'positive':'negative'}`}>{money(stats.netPnl)}</div><div className="muted">{stats.total} closed orders</div></div>
+      <div className="card"><div className="stat-label">Win rate</div><div className="stat-value">{stats.winRate.toFixed(1)}%</div><div className="muted">{stats.wins} wins · {stats.losses} losses · {stats.breakeven} breakeven</div></div>
+      <div className="card"><div className="stat-label">Profit factor</div><div className="stat-value">{pf}</div><div className="muted">Gross profit ÷ gross loss</div></div>
+      <div className="card"><div className="stat-label">Expectancy / trade</div><div className="stat-value">{money(stats.expectancy)}</div><div className="muted">Average realised result per closed order</div></div>
+    </div>
+    <div className="dashboard-grid" style={{gridTemplateColumns:'minmax(0,1.5fr) minmax(260px,1fr)'}}>
+      <div className="card"><div className="card-heading"><h3>Cumulative realised P/L</h3><span className="muted">Chronological closed-order sequence</span></div>{stats.total===0?<div className="empty">No closed paper orders match these filters.</div>:<svg viewBox={`0 0 ${chartW} ${chartH}`} style={{width:'100%',height:170}}><line x1="0" y1={chartH-12-(0-low)/range*(chartH-24)} x2={chartW} y2={chartH-12-(0-low)/range*(chartH-24)} stroke="#52627a" strokeDasharray="4 4"/><polyline points={points} fill="none" stroke="#20d6a1" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round"/></svg>}<div className="signal"><span>Maximum peak-to-trough drawdown</span><strong className={stats.maxDrawdown>0?'negative':'positive'}>{money(stats.maxDrawdown)}</strong></div></div>
+      <div className="card"><div className="card-heading"><h3>Trade distribution</h3></div><div className="signal"><span>Gross profit</span><strong className="positive">{money(stats.grossProfit)}</strong></div><div className="signal"><span>Gross loss</span><strong className="negative">{money(-stats.grossLoss)}</strong></div><div className="signal"><span>Average win</span><strong>{money(stats.averageWin)}</strong></div><div className="signal"><span>Average loss</span><strong>{money(-stats.averageLoss)}</strong></div><div className="signal"><span>Closed orders</span><strong>{stats.total}</strong></div></div>
+    </div>
+    <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Performance by instrument</h3></div>{stats.bySymbol.length===0?<div className="empty">No instrument results available.</div>:<div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Closed orders</th><th>Wins</th><th>Losses</th><th>Win rate</th><th>Net P/L</th></tr></thead><tbody>{stats.bySymbol.map(row=><tr key={row.symbol}><td>{row.symbol}</td><td>{row.trades}</td><td>{row.wins}</td><td>{row.losses}</td><td>{row.winRate.toFixed(1)}%</td><td className={row.netPnl>=0?'positive':'negative'}>{money(row.netPnl)}</td></tr>)}</tbody></table></div>}</div>
+    <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Closed paper-order ledger</h3></div>{stats.trades.length===0?<div className="empty">No matching closed orders.</div>:<div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Entry</th><th>Exit</th><th>Closed at</th><th>Realised P/L</th></tr></thead><tbody>{stats.trades.slice().reverse().map(o=><tr key={o.id}><td>{o.symbol}</td><td>{o.side}</td><td>{o.volume}</td><td>{o.entry}</td><td>{o.exit}</td><td>{o.closedAt?new Date(o.closedAt).toLocaleString():'—'}</td><td className={Number(o.realizedPnl)>=0?'positive':'negative'}>{money(Number(o.realizedPnl))}</td></tr>)}</tbody></table></div>}</div>
+    <div className="card" style={{marginTop:16,borderColor:'#5b4520'}}><p className="muted" style={{fontSize:11,lineHeight:1.7,margin:0}}><strong style={{color:'#fbbf24'}}>Accounting limitation:</strong> These metrics summarize the illustrative realised P/L already stored on paper orders. They do not correct contract sizes, quote-currency conversion, commissions, spread, swaps, slippage or broker-specific CFD specifications. They are not broker statements, live account results or forecasts. Refresh history after making changes in the Trading Terminal.</p></div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -5834,7 +5881,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <DerivLivePanel/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Billing & Subscription' ? <BillingSubscriptionPage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Paper Performance' ? <PaperPerformancePage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <DerivLivePanel/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Billing & Subscription' ? <BillingSubscriptionPage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
