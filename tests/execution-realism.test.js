@@ -29,3 +29,17 @@ test('same-candle stop and target touch remains ambiguous absent an opening gap'
   const r=simulateTradeExecution({side:'BUY',candles,entryIndex:1,stop:98,target:103,risk:2,execution:{},horizon:1});
   assert.equal(r.status,'AMBIGUOUS');
 });
+
+test('target exit applies adverse slippage as well as spread',()=>{
+  const candles=[{open:100,high:100,low:100,close:100},{open:100,high:104,low:99,close:103}];
+  const noSlip=simulateTradeExecution({side:'BUY',candles,entryIndex:1,stop:98,target:102,risk:2,execution:{spreadBps:0,slippageBps:0,commissionBps:0},horizon:1});
+  const withSlip=simulateTradeExecution({side:'BUY',candles,entryIndex:1,stop:98,target:102,risk:2,execution:{spreadBps:0,slippageBps:5,commissionBps:0},horizon:1});
+  assert.equal(noSlip.status,'RESOLVED'); assert.equal(withSlip.status,'RESOLVED');
+  assert.ok(withSlip.exitFill < noSlip.exitFill);
+});
+
+test('rejects target levels on the wrong side of the executed entry',()=>{
+  const candles=[{open:100,high:100,low:100,close:100},{open:100,high:101,low:99,close:100}];
+  const r=simulateTradeExecution({side:'BUY',candles,entryIndex:1,stop:98,target:99,risk:2,execution:{},horizon:1});
+  assert.equal(r.status,'INVALID');
+});
