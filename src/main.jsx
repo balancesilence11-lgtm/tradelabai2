@@ -9,6 +9,7 @@ import { evaluatePaperOrderRisk } from './portfolio-risk-guard.js';
 import { closePaperOrder, cancelPaperOrder, applyPaperRealizedPnl } from './paper-order-lifecycle.js';
 import { buildPaperPerformance } from './paper-performance.js';
 import { buildPaperTradesCsv, buildPaperSummaryCsv } from './paper-performance-export.js';
+import { createPaperBackup, previewPaperRestore, restorePaperBackup } from './paper-backup.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -74,6 +75,7 @@ const navigation = [
   { name: 'Strategy Lab', icon: Activity },
   { name: 'Performance Analytics', icon: BarChart3 },
   { name: 'Paper Performance', icon: BarChart3 },
+  { name: 'Paper Data Backup', icon: ShieldCheck },
   { name: 'Trading Terminal', icon: TrendingUp },
   { name: 'Smart Scanner', icon: SlidersHorizontal },
   { name: 'Risk Centre', icon: ShieldCheck },
@@ -5465,6 +5467,58 @@ function PaperPerformancePage() {
   </>;
 }
 
+function PaperDataBackupPage() {
+  const [backup, setBackup] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const downloadBackup = () => {
+    try {
+      const data = createPaperBackup();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `tradelab-paper-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+      setNotice('Backup downloaded. Store a copy somewhere separate from this browser.');
+    } catch (error) { setNotice(error.message || 'Backup could not be created.'); }
+  };
+  const selectBackup = async event => {
+    setBackup(null); setPreview(null); setNotice('');
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { setNotice('Backup exceeds the 10 MB limit.'); event.target.value = ''; return; }
+    try {
+      const parsed = JSON.parse(await file.text());
+      const result = previewPaperRestore(parsed);
+      if (!result.ok) { setNotice(result.reason); return; }
+      setBackup(parsed); setPreview(result);
+      setNotice('Backup validated. Review the restore preview before continuing.');
+    } catch (error) { setNotice(error.message || 'Could not read the selected backup.'); }
+    event.target.value = '';
+  };
+  const restore = () => {
+    if (!backup || !preview?.ok || busy) return;
+    if (!window.confirm('Merge these records into this browser? Existing records will be kept; matching IDs will not be duplicated.')) return;
+    setBusy(true);
+    const result = restorePaperBackup(backup);
+    setBusy(false);
+    if (result.ok) { setNotice('Restore completed. Existing records were retained and duplicate records were skipped. Refresh Paper Performance or Trading Terminal to reload their displayed data.'); setBackup(null); setPreview(null); }
+    else setNotice(`Restore failed: ${result.reason}`);
+  };
+  return <>
+    <div className="welcome"><div><h1>Paper Trading Data Backup</h1><div className="muted">Create and restore a portable copy of browser-local paper trading records.</div></div><span className="demo-badge">● LOCAL DATA ONLY</span></div>
+    <div className="dashboard-grid">
+      <div className="card"><div className="card-heading"><h3>Create backup</h3><ShieldCheck size={18}/></div><p className="muted">Download a versioned JSON backup containing paper order history, automation paper trades and automation logs.</p><button className="execute-btn" onClick={downloadBackup}>Download JSON backup</button></div>
+      <div className="card"><div className="card-heading"><h3>Restore backup</h3><span className="tag">Validate first</span></div><p className="muted">Choose a TradeLab AI JSON backup. The file is validated and previewed before any browser data is changed.</p><input type="file" accept=".json,application/json" onChange={selectBackup}/></div>
+    </div>
+    {notice && <div className="card" role="status" style={{marginTop:16}}>{notice}</div>}
+    {preview?.ok && <div className="card" style={{marginTop:16}}><div className="card-heading"><h3>Restore preview</h3><span className="tag">Backup {preview.createdAt ? new Date(preview.createdAt).toLocaleString() : 'date unavailable'}</span></div><div className="table-wrap"><table><thead><tr><th>Record type</th><th>Current</th><th>In backup</th><th>New records</th><th>Duplicates skipped</th></tr></thead><tbody>{Object.entries(preview.counts).map(([name,c])=><tr key={name}><td>{name==='autoTrades'?'Automation paper trades':name==='autoLog'?'Automation logs':'Paper orders'}</td><td>{c.current}</td><td>{c.incoming}</td><td>{c.added}</td><td>{c.duplicates}</td></tr>)}</tbody></table></div><button className="execute-btn" style={{marginTop:14}} disabled={busy} onClick={restore}>{busy?'Restoring…':'Confirm merge and restore'}</button></div>}
+    <div className="card" style={{marginTop:16,borderColor:'#5b4520'}}><strong style={{color:'#fbbf24'}}>Important backup scope</strong><p className="muted" style={{fontSize:12,lineHeight:1.7}}>This backup includes browser-local paper orders, automation paper trades and automation logs. It does not include account balances, equity, risk limits, broker credentials, market history, strategy settings or trade journal entries. Those are intentionally excluded to prevent a restore from overwriting account state or duplicating realised P/L. Keep backup files private and store them outside this browser.</p></div>
+  </>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard');
   const [selectedMarket, setSelectedMarket] = useState('EURUSD');
@@ -5897,7 +5951,7 @@ function App() {
             <div className="welcome"><div><h1>AI Market Analysis</h1><div className="muted">Multi-factor technical assessment for the selected market.</div></div><div className="demo-badge">● TRANSPARENT RULES ENGINE</div></div>
             <AIAnalysisPanel candles={candles} symbol={selectedMarket} timeframe={period}/>
             <div className="card" style={{marginTop:18}}><div className="card-heading"><h3>Analysis timeframe</h3><span className="muted">Current instrument: {selectedMarket}</span></div><div className="periods">{[['1min','1m'],['5min','5m'],['15min','15m'],['30min','30m'],['1h','1h'],['4h','4h']].map(([v,l])=><button key={v} className={`period-btn ${period===v?'active':''}`} onClick={()=>setPeriod(v)}>{l}</button>)}</div></div>
-          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Paper Performance' ? <PaperPerformancePage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <DerivLivePanel/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Billing & Subscription' ? <BillingSubscriptionPage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
+          </> : activePage === 'AI Assistant' ? <AIAssistant candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Performance Analytics' ? <PerformanceAnalyticsPage/> : activePage === 'Paper Performance' ? <PaperPerformancePage/> : activePage === 'Paper Data Backup' ? <PaperDataBackupPage/> : activePage === 'Strategy Lab' ? <StrategyLab candles={candles} symbol={selectedMarket} timeframe={period} loading={candleLoading} error={candleError}/> : activePage === 'Risk Centre' ? <RiskCentre symbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Portfolio Risk' ? <PortfolioRiskPage/> : activePage === 'Trade Journal' ? <TradeJournal defaultSymbol={selectedMarket} marketPrice={currentMarket?.price}/> : activePage === 'Smart Scanner' ? <SmartScanner selectedMarket={selectedMarket} onSelectMarket={symbol => {setSelectedMarket(symbol);setActivePage('Market Analysis');}} onSendToPlanner={result => { localStorage.setItem('tradelab_scanner_plan_draft_v1', JSON.stringify({symbol:result.symbol,signal:result.signal,entry:result.price,atr:result.atr,timeframe:period,scannedAt:result.scannedAt,quality:result.signalQuality})); setSelectedMarket(result.symbol); setActivePage('Trade Planner'); }} timeframe={period} onTimeframeChange={setPeriod}/> : activePage === 'Trading Terminal' ? <TradingTerminalPage symbol={selectedMarket} price={currentMarket?.price} candles={candles}/> : activePage === 'Automation Centre' ? <AutomationCentrePage candles={candles} symbol={selectedMarket} timeframe={period}/> : activePage === 'Account Overview' ? <AccountOverviewPage trades={trades}/> : activePage === 'Broker Connections' ? <DerivLivePanel/> : activePage === 'Security Centre' ? <SecurityCentrePage/> : activePage === 'Billing & Subscription' ? <BillingSubscriptionPage/> : activePage === 'Settings' ? <SettingsPage/> : <div className="card page-placeholder"><div><Sparkles size={35} color="#20d6a1"/><h2>{activePage}</h2>
             <p>This module is part of the TradeLab AI Pro development plan.</p>
             <p>We will activate its full functionality as we integrate market data, broker services and the platform backend.</p>
           </div></div>}
