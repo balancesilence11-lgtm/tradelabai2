@@ -1431,7 +1431,7 @@ if (path === "/api/ai/signals/record") {
 
     const validated = validateSignalRecord(body, { allowedSymbols: Object.keys(SYMBOLS) });
     if (!validated.ok) return json({ ok: false, error: validated.error }, 400);
-    const { symbol, timeframe, signal, confluence, entry, stopLoss, takeProfit } = validated.value;
+    const { symbol, timeframe, signal, confluence, entry, stopLoss, takeProfit, engineId } = validated.value;
     const timestamp = validated.value.generatedAt;
     const id = crypto.randomUUID();
     try {
@@ -1450,7 +1450,7 @@ if (path === "/api/ai/signals/record") {
         WHERE user_id = ? AND symbol = ? AND timeframe = ? AND signal = ? AND generated_at = ?
         LIMIT 1
       `).bind(user.id, symbol, timeframe, signal, timestamp).first();
-      return json({ ok: true, id: saved?.id || id, status: saved?.status || 'PENDING', duplicate: saved?.id !== id });
+      return json({ ok: true, id: saved?.id || id, status: saved?.status || 'PENDING', duplicate: saved?.id !== id, engineId });
     } catch (error) {
       console.error('Signal event recording failed:', error.message);
       return json({ ok: false, error: 'Signal history storage is not configured. Apply the Phase 6 D1 migration first.' }, 503);
@@ -1875,6 +1875,8 @@ direction: "HOLD"
 return {
 ok: true,
 engine: "TradeLab AI Technical Signal Engine",
+engineId: "server-technical-baseline-v1",
+sourceRole: "reference-only",
 model: "Deterministic technical analysis",
 symbol,
 timeframe,
