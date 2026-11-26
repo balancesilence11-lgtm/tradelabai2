@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { analyzeMarketIntelligence, buildMarketIntelligenceExplanation } from './market-intelligence.js';
 import { runHistoricalBacktest } from './backtesting.js';
+import { replayStrategy, calibrateConfidence } from './strategy-replay.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -2193,6 +2194,8 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
     setLibraryMessage(`Deleted “${item.name}”.`);
   };
   const result = useMemo(() => runStrategyBacktest(candles, config), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, capital, spreadBps, commissionBps, slippageBps, stopLossPct, takeProfitPct, runKey]);
+  const replay = useMemo(() => replayStrategy(candles, config, { stopLossPct, takeProfitPct, horizon: 10, minBars: 60 }), [candles, strategy, fastPeriod, slowPeriod, rsiPeriod, oversold, overbought, lookback, macdFast, macdSlow, macdSignal, bbPeriod, bbDeviation, stopLossPct, takeProfitPct, runKey]);
+  const calibration = useMemo(() => calibrateConfidence(replay.trades, { minSample: 100 }), [replay]);
   const money = v => Number.isFinite(v) ? v.toLocaleString(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }) : '—';
   const pct = v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
   const chart = result?.curve || [];
@@ -2262,6 +2265,20 @@ function StrategyLab({ candles, symbol, timeframe, loading, error }) {
         </>}
       </div>
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:16}}><button className="execute-btn" onClick={()=>setRunKey(k=>k+1)} disabled={loading || candles.length<60}>Run backtest</button><span className="muted" style={{fontSize:11}}>Signals use completed candles; positions take effect on the following candle. Estimated round-trip cost: <strong>{(spreadBps + commissionBps * 2 + slippageBps * 2).toFixed(2)} bps</strong> ({((spreadBps + commissionBps * 2 + slippageBps * 2) / 100).toFixed(4)}%). Spread, commission and slippage are applied on entry and exit.</span></div>
+    </div>
+    <div className="card" style={{marginTop:18,background:'#0b1728'}}>
+      <div className="card-heading"><div><h3>Walk-forward strategy replay & confidence calibration</h3><div className="muted">{symbol} · {timeframe} · {replay.trades?.length || 0} replayed signal events</div></div><span className="tag">PHASE 2.6</span></div>
+      {replay.error ? <div className="muted">{replay.error}</div> : <>
+        <div className="stats-grid" style={{marginBottom:12}}>
+          <div className="card"><div className="stat-label">Replay signals</div><div className="stat-value">{replay.metrics.signals}</div></div>
+          <div className="card"><div className="stat-label">Resolved outcomes</div><div className="stat-value">{replay.metrics.resolved}</div></div>
+          <div className="card"><div className="stat-label">Replay win rate</div><div className="stat-value">{replay.metrics.winRate == null ? '—' : `${replay.metrics.winRate}%`}</div></div>
+          <div className="card"><div className="stat-label">Ambiguous / unresolved</div><div className="stat-value">{replay.metrics.ambiguous} / {replay.metrics.unresolved}</div></div>
+        </div>
+        <div className="card-heading"><h4>Empirical win rate by signal-strength band</h4><span className="muted">Minimum 100 resolved outcomes overall; 100 per band</span></div>
+        <div className="table-wrap"><table><thead><tr><th>Strength band</th><th>Sample</th><th>Historical win rate</th><th>Status</th></tr></thead><tbody>{calibration.bins.map(bin=><tr key={bin.range}><td>{bin.range}</td><td>{bin.count}</td><td>{bin.eligible ? `${bin.winRate}%` : '—'}</td><td>{bin.eligible ? 'SAMPLE MET' : 'INSUFFICIENT'}</td></tr>)}</tbody></table></div>
+        <p className="muted" style={{fontSize:11,lineHeight:1.6,marginBottom:0}}>{replay.methodology} {calibration.notice} Confidence bands represent replay signal-strength scores, not the existing AI confluence score. This module uses a fixed 10-candle outcome horizon and configured percentage stop/target; it is a research diagnostic, not broker-grade execution simulation.</p>
+      </>}
     </div>
     <div className="card" style={{marginTop:18}}>
       <div className="card-heading"><div><h3>Strategy Library</h3><div className="muted">Save, load, duplicate, import and export strategy configurations on this device.</div></div><span className="tag">{savedStrategies.length} SAVED</span></div>
