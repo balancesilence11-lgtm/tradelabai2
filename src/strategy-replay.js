@@ -7,7 +7,7 @@ function rsi(values, period=14) { const out=Array(values.length).fill(null); if(
 function macd(values, fast=12, slow=26, sig=9) { const f=ema(values,fast),s=ema(values,slow),line=values.map((_,i)=>f[i]!=null&&s[i]!=null?f[i]-s[i]:null); const compact=line.filter(Number.isFinite), sc=ema(compact,sig), signal=Array(values.length).fill(null); let j=0; line.forEach((v,i)=>{if(v!=null)signal[i]=sc[j++];}); return {line,signal}; }
 function scoreStrength(side, raw, scale) { return Math.max(50,Math.min(95,50+Math.min(45,Math.abs(raw)/Math.max(scale,1e-12)*45))); }
 export function replayStrategy(candles, config={}, options={}) {
-  const clean=(Array.isArray(candles)?candles:[]).map((c,i)=>({open:Number(c.open),high:Number(c.high),low:Number(c.low),close:Number(c.close),time:c.time??c.timestamp??i})).filter(c=>[c.open,c.high,c.low,c.close].every(Number.isFinite)&&c.low<=c.high&&c.open>0&&c.close>0);
+  const clean=(Array.isArray(candles)?candles:[]).map((c,i)=>({open:Number(c.open),high:Number(c.high),low:Number(c.low),close:Number(c.close),time:c.time??c.timestamp??i,sourceIndex:i})).filter(c=>[c.open,c.high,c.low,c.close].every(Number.isFinite)&&c.low<=c.high&&c.open>0&&c.close>0);
   const minBars=Math.max(2,Number(options.minBars??60));
   if(clean.length<minBars)return {error:`At least ${minBars} valid candles are required.`,trades:[],metrics:{signals:0,resolved:0,unresolved:0,ambiguous:0}};
   const closes=clean.map(c=>c.close), type=config.strategy||'ema';
@@ -28,15 +28,17 @@ export function replayStrategy(candles, config={}, options={}) {
   };
   const trades=[]; let priorSide=0;
   const startIndex=Math.max(0,Math.floor(Number(options.startIndex??0)));
-  const endIndex=Math.min(clean.length-2,Math.floor(Number(options.endIndex??(clean.length-2))));
+  const endIndex=Math.floor(Number(options.endIndex??(Array.isArray(candles)?candles.length-2:clean.length-2))); 
   const execution=buildExecutionModel({spreadBps:options.spreadBps??config.spreadBps,commissionBps:options.commissionBps??config.commissionBps,slippageBps:options.slippageBps??config.slippageBps});
-  for(let i=0;i<=endIndex;i++){
+  for(let i=0;i<clean.length-1;i++){
+    const sourceIndex=clean[i].sourceIndex;
+    if(sourceIndex>endIndex) break;
+    if(sourceIndex<startIndex){ priorSide=0; continue; }
     const s=signalAt(i); if(!s.side){priorSide=0;continue;} if(s.side===priorSide)continue; priorSide=s.side;
-    if(i<startIndex) continue;
     const entryBar=i+1; const rawEntry=clean[entryBar].open;
     const entry=rawEntry; const stop=s.side===1?entry*(1-stopPct):entry*(1+stopPct),target=s.side===1?entry*(1+targetPct):entry*(1-targetPct);
     const executionResult=simulateTradeExecution({side:s.side===1?'BUY':'SELL',candles:clean,entryIndex:entryBar,stop,target,risk:Math.abs(entry-stop),execution,horizon});
-    trades.push({index:i,time:clean[i].time,side:s.side===1?'BUY':'SELL',confidence:Number(s.strength.toFixed(1)),entrySignalClose:clean[i].close,entry,stop,target,...executionResult});
+    trades.push({index:sourceIndex,time:clean[i].time,side:s.side===1?'BUY':'SELL',confidence:Number(s.strength.toFixed(1)),entrySignalClose:clean[i].close,entry,stop,target,...executionResult});
   }
   const resolved=trades.filter(t=>t.status==='RESOLVED'),wins=resolved.filter(t=>t.outcome==='WIN');
   const netValues=resolved.map(t=>t.netR); const grossProfit=netValues.filter(v=>v>0).reduce((a,b)=>a+b,0),grossLoss=Math.abs(netValues.filter(v=>v<0).reduce((a,b)=>a+b,0));
