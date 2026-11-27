@@ -162,11 +162,40 @@ export function restorePaperBackup(input, storage = globalThis.localStorage) {
       next[key] = JSON.stringify(merged);
     }
     for (const key of Object.values(PAPER_BACKUP_KEYS)) storage.setItem(key, next[key]);
-    return { ok: true, counts: Object.fromEntries(Object.entries(PAPER_BACKUP_KEYS).map(([name, key]) => [name, JSON.parse(next[key]).length])), sourceVersion: checked.sourceVersion, migrated: checked.migrated };
+    const committedValuesMatch = Object.values(PAPER_BACKUP_KEYS)
+      .every(key => storage.getItem(key) === next[key]);
+    if (!committedValuesMatch) throw new Error('Restore verification failed: stored values do not match the prepared backup.');
+    return {
+      ok: true,
+      verified: true,
+      counts: Object.fromEntries(Object.entries(PAPER_BACKUP_KEYS).map(([name, key]) => [name, JSON.parse(next[key]).length])),
+      sourceVersion: checked.sourceVersion,
+      migrated: checked.migrated
+    };
   } catch (error) {
+    let rollbackAttempted = false;
+    let rollbackVerified = true;
     for (const [key, value] of Object.entries(previous)) {
-      try { if (value == null) storage.removeItem(key); else storage.setItem(key, value); } catch { /* best-effort rollback */ }
+      rollbackAttempted = true;
+      try {
+        if (value == null) storage.removeItem(key);
+        else storage.setItem(key, value);
+      } catch {
+        rollbackVerified = false;
+      }
     }
-    return { ok: false, reason: error.message || 'Restore failed; previous records were preserved where browser storage allowed.' };
+    for (const [key, value] of Object.entries(previous)) {
+      try {
+        if (storage.getItem(key) !== value) rollbackVerified = false;
+      } catch {
+        rollbackVerified = false;
+      }
+    }
+    return {
+      ok: false,
+      reason: error.message || 'Restore failed; previous records were preserved where browser storage allowed.',
+      rollbackAttempted,
+      rollbackVerified
+    };
   }
 }
