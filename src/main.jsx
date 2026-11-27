@@ -57,7 +57,8 @@ const supportedSymbols = [
   'EURAUD',
   'GBPAUD',
   'XAUUSD',
-  'BTCUSD'
+  'BTCUSD',
+  'US30'
 ];
 const TIMEFRAME_OPTIONS = [
   ['1min', '1m'], ['5min', '5m'], ['15min', '15m'],
@@ -5574,9 +5575,14 @@ function App() {
 
   const currentMarket = markets.find(m => m.symbol === selectedMarket);
 
-  // Live Twelve Data WebSocket stream for the selected instrument. HTTP polling below remains as a fallback.
+  // Twelve Data WebSocket for provider symbols; US30 is supplied by the authenticated MT5 bridge over HTTP polling.
   useEffect(() => {
     latestLiveTickRef.current = null;
+    if (selectedMarket === 'US30') {
+      setStreamStatus('HTTP_POLLING');
+      setStreamStats(previous => ({...previous, provider:'MT5'}));
+      return undefined;
+    }
     if (!supportedSymbols.includes(selectedMarket)) {
       setStreamStatus('NOT_SUPPORTED');
       return undefined;
@@ -5685,7 +5691,12 @@ function App() {
           ? { ...m, price: String(quote), live: true } : m));
         setMarketStatus('LIVE');
         setLastUpdated(data.timestamp ? new Date(data.timestamp) : receivedAt);
-        setMarketDataHealth(previous=>({...previous,status:'CHECKING',message:'Quote received; validating historical candles…',checkedAt:receivedAt,source:'Market API',quoteAgeMs:0}));
+        if (selectedMarket === 'US30' && data.source === 'MT5') {
+          setStreamStatus('CONNECTED');
+          setStreamLastTick(receivedAt);
+          setStreamStats(previous => ({...previous, provider:'MT5', priceUpdates:previous.priceUpdates + 1, providerMessages:previous.providerMessages + 1, priceAgeSeconds:0}));
+        }
+        setMarketDataHealth(previous=>({...previous,status:'CHECKING',message:'Quote received; validating historical candles…',checkedAt:receivedAt,source:data.source || 'Market API',quoteAgeMs:Number(data.ageMs || 0)}));
       } catch (error) {
         if (!active) return;
         setMarketStatus('Connection error');
@@ -5694,7 +5705,7 @@ function App() {
       }
     };
     fetchPrice();
-    const timer = setInterval(fetchPrice, 60000);
+    const timer = setInterval(fetchPrice, selectedMarket === 'US30' ? 2000 : 60000);
     return () => { active = false; clearInterval(timer); };
   }, [selectedMarket]);
 
@@ -5705,7 +5716,7 @@ function App() {
     setCandles([]);
     if (!supportedSymbols.includes(selectedMarket)) {
       setCandles([]);
-      setCandleError('Historical data is not supported for this instrument (US30 is not connected).');
+      setCandleError('Historical data is not supported for this instrument.');
       setCandleLoading(false);
       return () => { active = false; };
     }
@@ -5729,7 +5740,7 @@ function App() {
         setCandles(synchronizedCandles);
         setCandleError('');
         setLastCandleUpdated(new Date());
-        setMarketDataHealth(previous=>({...previous,status:quality.stale?'STALE':quality.gaps?'WARNING':'HEALTHY',message:quality.message,checkedAt:new Date(),source:'Market + candle API',candleAgeMs:quality.ageMs,gaps:quality.gaps,invalid:quality.invalid,duplicates:quality.duplicates,latestCandleTime:quality.latestTime}));
+        setMarketDataHealth(previous=>({...previous,status:quality.stale?'STALE':quality.gaps?'WARNING':'HEALTHY',message:quality.message,checkedAt:new Date(),source:data.source || 'Market + candle API',candleAgeMs:quality.ageMs,gaps:quality.gaps,invalid:quality.invalid,duplicates:quality.duplicates,latestCandleTime:quality.latestTime}));
       } catch (error) {
         if (!active) return;
         setCandleError(error.message);
