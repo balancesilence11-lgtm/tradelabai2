@@ -9292,297 +9292,180 @@ socket.send(JSON.stringify(payload));
 }
 }
 async function streamConnectTwelveData(env, symbols) {
-const apiKey = String(
-env.TWELVE_DATA_API_KEY || ""
-).trim();
-    if (!apiKey) {
-        throw new Error(
-            "Twelve Data API key is not configured."
-        );
-    }
-
-    const providerSymbols = symbols.map(
-        streamProviderSymbol
-    );
-
-    const websocketUrl =
-        "wss://ws.twelvedata.com/v1/quotes/price" +
+    const apiKey = String(env.TWELVE_DATA_API_KEY || "").trim();
+    if (!apiKey) throw new Error("Twelve Data API key is not configured.");
+    const providerSymbols = symbols.map(streamProviderSymbol);
+    const websocketUrl = "wss://ws.twelvedata.com/v1/quotes/price" +
         `?apikey=${encodeURIComponent(apiKey)}`;
-
-    const response = await fetch(websocketUrl, {
-        headers: {
-            Upgrade: "websocket"
-        }
-    });
-
+    const response = await fetch(websocketUrl, { headers: { Upgrade: "websocket" } });
     if (response.status !== 101 || !response.webSocket) {
-        throw new Error(
-            "Could not establish Twelve Data WebSocket connection."
-        );
+        throw new Error(`Twelve Data WebSocket handshake failed (${response.status}).`);
     }
-
-    const upstream = response.webSocket;
-
-    upstream.accept();
-
-    return {
-        socket: upstream,
-        symbols: providerSymbols
-    };
+    const socket = response.webSocket;
+    socket.accept();
+    socket.send(JSON.stringify({ action: "subscribe", params: { symbols: providerSymbols.join(",") } }));
+    return { socket, provider: "twelve_data", symbols: providerSymbols };
 }
+
+async function streamConnectFinnhub(env, symbols) {
+    const token = String(env.FINNHUB_API_KEY || "").trim();
+    if (!token) throw new Error("Finnhub WebSocket fallback is not configured.");
+    const response = await fetch(`wss://ws.finnhub.io?token=${encodeURIComponent(token)}`, {
+        headers: { Upgrade: "websocket" }
+    });
+    if (response.status !== 101 || !response.webSocket) {
+        throw new Error(`Finnhub WebSocket handshake failed (${response.status}).`);
+    }
+    const socket = response.webSocket;
+    socket.accept();
+    const providerSymbols = symbols.map(symbol => marketFinnhubSymbol(streamProviderSymbol(symbol)));
+    for (const symbol of providerSymbols) socket.send(JSON.stringify({ type: "subscribe", symbol }));
+    return { socket, provider: "finnhub", symbols: providerSymbols };
+}
+
 async function handleMarketStream(request, env, user) {
-const url = new URL(request.url);
-    if (
-        request.method !== "GET" ||
-        request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
-    ) {
-        return json({
-            ok: false,
-            error: "A WebSocket upgrade request is required."
-        }, 426);
+    const url = new URL(request.url);
+    if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return json({ ok: false, error: "A WebSocket upgrade request is required." }, 426);
     }
-
     let symbols;
+    try { symbols = streamGetSymbols(url.searchParams.get("symbols")); }
+    catch (error) { return json({ ok: false, error: error.message }, 400); }
 
-    try {
-        symbols = streamGetSymbols(
-            url.searchParams.get("symbols")
-        );
-    } catch (error) {
-        return json({
-            ok: false,
-            error: error.message
-        }, 400);
-    }
+    const providers = [];
+    if (String(env.TWELVE_DATA_API_KEY || "").trim()) providers.push({ name: "twelve_data", connect: () => streamConnectTwelveData(env, symbols) });
+    if (String(env.FINNHUB_API_KEY || "").trim()) providers.push({ name: "finnhub", connect: () => streamConnectFinnhub(env, symbols) });
+    if (!providers.length) return json({ ok: false, error: "No WebSocket market-data provider is configured." }, 503);
 
-    if (!env.TWELVE_DATA_API_KEY) {
-        return json({
-            ok: false,
-            error: "Market streaming is not configured."
-        }, 503);
-    }
-
-    let upstream;
-
-    try {
-        const connection = await streamConnectTwelveData(
-            env,
-            symbols
-        );
-
-        upstream = connection.socket;
-
-        const pair = new WebSocketPair();
-        const client = pair[0];
-        const server = pair[1];
-
-        server.accept();
-
-        let closed = false;
-        let messageCount = 0;
-        let messageWindow = Date.now();
-
-        function closeConnections(code = 1000, reason = "Connection closed") {
-            if (closed) return;
-
-            closed = true;
-
-            try {
-                server.close(code, reason);
-            } catch {}
-
-            try {
-                upstream.close(code, reason);
-            } catch {}
+    let initialConnection;
+    const initialErrors = [];
+    for (const provider of providers) {
+        try { initialConnection = await provider.connect(); break; }
+        catch (error) {
+            initialErrors.push(`${provider.name}: ${String(error?.message || error).slice(0, 180)}`);
+            console.warn(`Market stream provider ${provider.name} unavailable:`, error?.message || error);
         }
-
-        // Forward provider price updates to the authenticated client.
-        upstream.addEventListener("message", event => {
-            if (closed) return;
-
-            let data;
-
-            try {
-                data = JSON.parse(event.data);
-            } catch {
-                streamSend(server, {
-                    type: "provider_message",
-                    data: String(event.data).slice(0, 2000)
-                });
-
-                return;
-            }
-
-            // Do not expose provider credentials or internal details.
-            if (
-                data.event === "subscribe-status" ||
-                data.event === "price" ||
-                data.status === "ok"
-            ) {
-                streamSend(server, {
-                    type: "market_update",
-                    data,
-                    receivedAt: new Date().toISOString()
-                });
-
-                return;
-            }
-
-            if (data.status === "error" || data.event === "error") {
-                streamSend(server, {
-                    type: "market_error",
-                    message: String(
-                        data.message || data.code || "Provider error"
-                    ).slice(0, 300)
-                });
-
-                return;
-            }
-
-            streamSend(server, {
-                type: "market_message",
-                data
-            });
-        });
-
-        upstream.addEventListener("close", event => {
-            closeConnections(
-                event.code || 1000,
-                "Market provider disconnected"
-            );
-        });
-
-        upstream.addEventListener("error", () => {
-            streamSend(server, {
-                type: "market_error",
-                message: "Market provider connection failed."
-            });
-
-            closeConnections(
-                1011,
-                "Market provider error"
-            );
-        });
-
-        // Restrict messages coming from the browser.
-        server.addEventListener("message", event => {
-            if (closed) return;
-
-            const now = Date.now();
-
-            if (now - messageWindow >= 1000) {
-                messageWindow = now;
-                messageCount = 0;
-            }
-
-            messageCount++;
-
-            if (
-                messageCount >
-                MARKET_STREAM_CONFIG.MAX_MESSAGES_PER_SECOND
-            ) {
-                closeConnections(
-                    1008,
-                    "Message rate limit exceeded"
-                );
-
-                return;
-            }
-
-            const raw = String(event.data || "");
-
-            if (
-                raw.length >
-                MARKET_STREAM_CONFIG.MAX_CLIENT_MESSAGE_LENGTH
-            ) {
-                closeConnections(
-                    1009,
-                    "Message too large"
-                );
-
-                return;
-            }
-
-            let message;
-
-            try {
-                message = JSON.parse(raw);
-            } catch {
-                closeConnections(
-                    1008,
-                    "Invalid client message"
-                );
-
-                return;
-            }
-
-            // Only heartbeat messages are accepted.
-            // Clients cannot change upstream subscriptions.
-            if (message.type === "ping") {
-                streamSend(server, {
-                    type: "pong",
-                    timestamp: new Date().toISOString()
-                });
-
-                return;
-            }
-
-            closeConnections(
-                1008,
-                "Unsupported client message"
-            );
-        });
-
-        server.addEventListener("close", () => {
-            closeConnections(
-                1000,
-                "Client disconnected"
-            );
-        });
-
-        server.addEventListener("error", () => {
-            closeConnections(
-                1011,
-                "Client connection error"
-            );
-        });
-
-        // Subscribe only to the symbols validated by the Worker.
-        upstream.send(JSON.stringify({
-            action: "subscribe",
-            params: {
-                symbols: connection.symbols.join(",")
-            }
-        }));
-
-        streamSend(server, {
-            type: "connected",
-            broker: "twelve_data",
-            symbols,
-            connectedAt: new Date().toISOString()
-        });
-
-        return new Response(null, {
-            status: 101,
-            webSocket: client
-        });
-
-    } catch (error) {
-        console.error(
-            "Market stream connection error:",
-            error?.message || error
-        );
-
-        try {
-            upstream?.close(1011, "Connection failed");
-        } catch {}
-
-        return json({
-            ok: false,
-            error: error?.message ||
-                "Unable to establish market stream."
-        }, 502);
     }
+    if (!initialConnection) return json({ ok: false, error: "All configured WebSocket providers are unavailable.", providers: initialErrors }, 502);
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.accept();
+    let activeConnection = initialConnection;
+    let activeProviderIndex = providers.findIndex(item => item.name === initialConnection.provider);
+    let closed = false;
+    let switching = false;
+    let messageCount = 0;
+    let messageWindow = Date.now();
+
+    function closeAll(code = 1000, reason = "Connection closed") {
+        if (closed) return;
+        closed = true;
+        try { server.close(code, reason); } catch {}
+        try { activeConnection?.socket?.close(code, reason); } catch {}
+    }
+
+    function sendConnected(provider, failover = false) {
+        streamSend(server, {
+            type: "connected", provider, broker: provider, symbols,
+            failover, connectedAt: new Date().toISOString()
+        });
+    }
+
+    function forwardTwelveData(data, provider) {
+        if (data.event === "subscribe-status" || data.event === "price" || data.status === "ok") {
+            streamSend(server, { type: "market_update", provider, data, receivedAt: new Date().toISOString() });
+        } else if (data.status === "error" || data.event === "error") {
+            streamSend(server, { type: "market_error", provider, message: String(data.message || data.code || "Provider error").slice(0, 300) });
+        } else {
+            streamSend(server, { type: "market_message", provider, data });
+        }
+    }
+
+    function attachConnection(connection) {
+        const socket = connection.socket;
+        const provider = connection.provider;
+        socket.addEventListener("message", event => {
+            if (closed || activeConnection?.socket !== socket) return;
+            let data;
+            try { data = JSON.parse(event.data); }
+            catch { streamSend(server, { type: "provider_message", provider, data: String(event.data).slice(0, 1000) }); return; }
+            if (provider === "twelve_data") {
+                forwardTwelveData(data, provider);
+                return;
+            }
+            if (data.type === "trade" && Array.isArray(data.data)) {
+                for (const trade of data.data) {
+                    const matched = symbols.find(symbol => marketFinnhubSymbol(streamProviderSymbol(symbol)) === trade.s);
+                    if (!matched || !Number.isFinite(Number(trade.p)) || Number(trade.p) <= 0) continue;
+                    streamSend(server, {
+                        type: "market_update", provider,
+                        data: { event: "price", symbol: matched, price: Number(trade.p), timestamp: Number(trade.t) },
+                        receivedAt: new Date().toISOString()
+                    });
+                }
+            } else if (data.type === "error") {
+                streamSend(server, { type: "market_error", provider, message: String(data.msg || "Finnhub stream error").slice(0, 300) });
+            }
+        });
+        socket.addEventListener("close", () => {
+            if (closed || activeConnection?.socket !== socket) return;
+            void switchProvider("upstream_close");
+        });
+        socket.addEventListener("error", () => {
+            if (closed || activeConnection?.socket !== socket) return;
+            void switchProvider("upstream_error");
+        });
+    }
+
+    async function switchProvider(reason) {
+        if (closed || switching) return;
+        switching = true;
+        const previous = activeConnection;
+        streamSend(server, { type: "stream_status", streamStatus: "FAILING_OVER", provider: previous?.provider, reason });
+        try { previous?.socket?.close(1012, "Switching market-data provider"); } catch {}
+        for (let index = activeProviderIndex + 1; index < providers.length; index++) {
+            try {
+                const next = await providers[index].connect();
+                if (closed) { try { next.socket.close(); } catch {} return; }
+                activeConnection = next;
+                activeProviderIndex = index;
+                attachConnection(next);
+                sendConnected(next.provider, true);
+                switching = false;
+                return;
+            } catch (error) {
+                console.warn(`Market stream failover to ${providers[index].name} failed:`, error?.message || error);
+            }
+        }
+        streamSend(server, { type: "market_error", message: "All streaming providers failed; client will reconnect and HTTP quote fallback remains active." });
+        closeAll(1011, "All market streaming providers failed");
+        switching = false;
+    }
+
+    attachConnection(initialConnection);
+    sendConnected(initialConnection.provider, false);
+
+    server.addEventListener("message", event => {
+        if (closed) return;
+        const now = Date.now();
+        if (now - messageWindow >= 1000) { messageWindow = now; messageCount = 0; }
+        if (++messageCount > MARKET_STREAM_CONFIG.MAX_MESSAGES_PER_SECOND) return closeAll(1008, "Message rate limit exceeded");
+        const raw = String(event.data || "");
+        if (raw.length > MARKET_STREAM_CONFIG.MAX_CLIENT_MESSAGE_LENGTH) return closeAll(1009, "Message too large");
+        let message;
+        try { message = JSON.parse(raw); } catch { return closeAll(1008, "Invalid client message"); }
+        if (message.type === "ping") {
+            streamSend(server, { type: "pong", timestamp: new Date().toISOString() });
+            return;
+        }
+        closeAll(1008, "Unsupported client message");
+    });
+    server.addEventListener("close", () => closeAll(1000, "Client disconnected"));
+    server.addEventListener("error", () => closeAll(1011, "Client connection error"));
+
+    return new Response(null, { status: 101, webSocket: client });
 }
 async function handleMarketSnapshot(request, env) {
 const url = new URL(request.url);
