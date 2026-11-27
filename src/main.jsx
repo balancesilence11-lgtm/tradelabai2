@@ -5364,7 +5364,8 @@ function MarketIntelligencePage({ selectedMarket, candles, timeframe }) {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
   };
-  const impactStyle = impact => ({ color: String(impact).toLowerCase() === 'high' ? '#fb7185' : String(impact).toLowerCase() === 'medium' ? '#fbbf24' : '#21d6a0' });
+  const impactLabel = impact => { const value = String(impact ?? '').toLowerCase(); return value === '3' ? 'HIGH' : value === '2' ? 'MEDIUM' : value === '1' ? 'LOW' : value.toUpperCase() || '—'; };
+  const impactStyle = impact => ({ color: ['high','3'].includes(String(impact).toLowerCase()) ? '#fb7185' : ['medium','2'].includes(String(impact).toLowerCase()) ? '#fbbf24' : '#21d6a0' });
 
   return <>
     <div className="welcome">
@@ -5395,7 +5396,7 @@ function MarketIntelligencePage({ selectedMarket, candles, timeframe }) {
     {!loading && !error && tab==='calendar' && <div className="card">
       <div className="card-heading"><h3>Upcoming economic events</h3><span className="tag">{events.length} events · next 7 days</span></div>
       {events.length===0 ? <div className="muted">No events were returned for this period.</div> : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Country</th><th>Event</th><th>Impact</th><th>Actual</th><th>Estimate</th><th>Previous</th></tr></thead><tbody>
-        {events.map((event,index)=><tr key={`${event.date}-${event.event}-${index}`}><td>{event.date} {event.time}</td><td>{event.country}</td><td>{event.event}</td><td style={impactStyle(event.impact)}>{event.impact || '—'}</td><td>{event.actual ?? '—'} {event.unit}</td><td>{event.estimate ?? '—'} {event.unit}</td><td>{event.prev ?? '—'} {event.unit}</td></tr>)}
+        {events.map((event,index)=><tr key={`${event.date}-${event.event}-${index}`}><td>{event.date} {event.time}</td><td>{event.country}</td><td>{event.event}</td><td style={impactStyle(event.impact)}>{impactLabel(event.impact)}</td><td>{event.actual ?? '—'} {event.unit}</td><td>{event.estimate ?? '—'} {event.unit}</td><td>{event.prev ?? '—'} {event.unit}</td></tr>)}
       </tbody></table></div>}
       <div className="muted" style={{marginTop:10}}>Event times and provider data may be revised. Confirm high-impact releases with the original source.</div>
     </div>}
