@@ -5600,7 +5600,7 @@ function App() {
       try { socket = new WebSocket(streamUrl); }
       catch (error) {
         setStreamStatus('ERROR');
-        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectTimer = setTimeout(connect, reconnectDelay + Math.floor(Math.random() * 400));
         reconnectDelay = Math.min(reconnectDelay * 2, 30000);
         return;
       }
@@ -5616,6 +5616,17 @@ function App() {
         const receivedAt = new Date();
         if (message.type === 'connected') {
           setStreamStatus('CONNECTED');
+          setStreamStats(previous => ({...previous, provider:message.provider || message.broker || previous.provider}));
+          return;
+        }
+        if (message.type === 'stream_status') {
+          setStreamStatus(message.streamStatus || 'RECONNECTING');
+          if (message.provider) setStreamStats(previous => ({...previous, provider:message.provider}));
+          return;
+        }
+        if (message.type === 'market_error') {
+          setStreamStatus('ERROR');
+          setStreamStats(previous => ({...previous, provider:message.provider || previous.provider}));
           return;
         }
         if (message.type === 'stream_heartbeat') {
@@ -5639,7 +5650,7 @@ function App() {
           setStreamStatus('CONNECTED');
           setLastUpdated(receivedAt);
           setStreamLastTick(receivedAt);
-          setStreamStats(previous => ({...previous, provider:message.provider || 'twelve_data', priceUpdates:previous.priceUpdates + 1, providerMessages:previous.providerMessages + 1, priceAgeSeconds:0}));
+          setStreamStats(previous => ({...previous, provider:message.provider || previous.provider || 'twelve_data', priceUpdates:previous.priceUpdates + 1, providerMessages:previous.providerMessages + 1, priceAgeSeconds:0}));
         } else {
           setStreamStats(previous => ({...previous, provider:message.provider || previous.provider, providerMessages:previous.providerMessages + 1}));
         }
@@ -5648,7 +5659,7 @@ function App() {
       socket.onclose = () => {
         if (disposed) return;
         setStreamStatus('RECONNECTING');
-        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectTimer = setTimeout(connect, reconnectDelay + Math.floor(Math.random() * 400));
         reconnectDelay = Math.min(reconnectDelay * 2, 30000);
       };
     };
@@ -5882,7 +5893,7 @@ function App() {
 
             <div className="card" style={{marginTop:12,borderColor:streamStatus==='CONNECTED'?'#245b4b':streamStatus==='ERROR'||streamStatus==='STALE'?'#70404a':'#5b512c'}}>
               <div className="card-heading">
-                <div><h3><Radio size={15} style={{display:'inline',marginRight:7}}/>Real-Time Market Stream</h3><div className="muted">Selected instrument · {selectedMarket} · Twelve Data WebSocket</div></div>
+                <div><h3><Radio size={15} style={{display:'inline',marginRight:7}}/>Real-Time Market Stream</h3><div className="muted">Selected instrument · {selectedMarket} · {String(streamStats.provider || 'market provider').replaceAll('_',' ') } stream</div></div>
                 <span className="tag" style={{background:streamStatus==='CONNECTED'?'#153c36':streamStatus==='ERROR'||streamStatus==='STALE'?'#48232d':'#403719',color:streamStatus==='CONNECTED'?'#21d6a0':streamStatus==='ERROR'||streamStatus==='STALE'?'#fb7185':'#fbbf24'}}>{streamStatus}</span>
               </div>
               <div className="stats-grid" style={{marginTop:10}}>
@@ -5891,7 +5902,7 @@ function App() {
                 <div><div className="stat-label">Provider messages</div><div className="stat-value" style={{fontSize:16}}>{streamStats.providerMessages}</div></div>
                 <div><div className="stat-label">Price age</div><div className="stat-value" style={{fontSize:16}}>{streamStats.priceAgeSeconds == null ? '—' : `${streamStats.priceAgeSeconds}s`}</div></div>
               </div>
-              <p className="muted" style={{marginBottom:0}}>Automatic reconnection is enabled. HTTP quote refresh remains available as a fallback; a quiet market may not produce a new tick continuously.</p>
+              <p className="muted" style={{marginBottom:0}}>Automatic reconnection with exponential backoff is enabled. The Worker can fail over from Twelve Data to configured Finnhub streaming; periodic HTTP quote refresh remains a recovery fallback. A quiet market may not produce continuous ticks.</p>
             </div>
 
             <div className="dashboard-grid">
