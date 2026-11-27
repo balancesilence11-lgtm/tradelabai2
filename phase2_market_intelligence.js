@@ -1,20 +1,13 @@
 /*
  * TradeLab AI - Phase 2 Market Intelligence module
- *
  * Cloudflare Worker module. Keep this file beside worker.js.
- * Required Worker bindings/secrets:
- *   - DB: Cloudflare D1 database
- *   - FINNHUB_API_KEY: Worker secret
+ * Required bindings/secrets:
+ *   - DB: Cloudflare D1 database (optional for caching; requests still work without it)
+ *   - FINNHUB_API_KEY: Worker secret (Market News only)
  *
- * Required D1 migration:
- *   CREATE TABLE IF NOT EXISTS market_intelligence_cache (
- *     cache_key TEXT PRIMARY KEY NOT NULL,
- *     payload TEXT NOT NULL,
- *     expires_at TEXT NOT NULL,
- *     updated_at TEXT NOT NULL
- *   );
- *   CREATE INDEX IF NOT EXISTS idx_market_intelligence_cache_expiry
- *     ON market_intelligence_cache(expires_at);
+ * Economic Calendar: ShowMyTrades public calendar API (free, no API key).
+ * Documentation: https://showmytrades.com/docs/api/economic-calendar
+ * Display attribution: Economic calendar by ShowMyTrades
  *
  * Routes are dispatched from worker.js after authentication:
  *   return await handleMarketIntelligence(request, env, url);
@@ -24,6 +17,8 @@ const MI_ALLOWED_METHODS = new Set(["GET", "POST"]);
 const MI_CACHE_TTL_SECONDS = 300;
 const MI_FETCH_TIMEOUT_MS = 12000;
 const MI_FINNHUB_BASE = "https://finnhub.io/api/v1";
+const MI_CALENDAR_URL = "https://showmytrades.com/api/public/calendar/v1";
+const MI_CALENDAR_ATTRIBUTION_URL = "https://showmytrades.com/tools/economic-calendar";
 
 function miJson(data, status = 200, extraHeaders = {}) {
   return Response.json(data, {
@@ -53,7 +48,11 @@ function miSymbol(value) {
 
 function miDate(value, fallback) {
   const candidate = miText(value || fallback, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? candidate : fallback;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return fallback;
+  const parsed = new Date(`${candidate}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== candidate
+    ? fallback
+    : candidate;
 }
 
 async function miReadCache(env, key) {
@@ -90,6 +89,35 @@ async function miWriteCache(env, key, value) {
   }
 }
 
+async function miFetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    signal: AbortSignal.timeout(MI_FETCH_TIMEOUT_MS),
+    headers: { Accept: "application/json", ...(options.headers || {}) }
+  });
+
+  if (response.status === 304) return { notModified: true, data: null };
+
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    const error = new Error("The market-data provider returned an invalid JSON response.");
+    error.status = 502;
+    throw error;
+  }
+
+  if (!response.ok) {
+    const detail = miText(data?.error || data?.message || response.statusText, 180);
+    const error = new Error(`Market data provider request failed (${response.status})${detail ? `: ${detail}` : "."}`);
+    error.status = response.status === 429 ? 503 : 502;
+    throw error;
+  }
+
+  return { notModified: false, data };
+}
+
 async function miFinnhub(path, env) {
   const apiKey = env?.FINNHUB_API_KEY;
   if (!apiKey) {
@@ -99,17 +127,10 @@ async function miFinnhub(path, env) {
   }
 
   const separator = path.includes("?") ? "&" : "?";
-  const response = await fetch(
-    `${MI_FINNHUB_BASE}${path}${separator}token=${encodeURIComponent(apiKey)}`,
-    { signal: AbortSignal.timeout(MI_FETCH_TIMEOUT_MS) }
+  const result = await miFetchJson(
+    `${MI_FINNHUB_BASE}${path}${separator}token=${encodeURIComponent(apiKey)}`
   );
-
-  if (!response.ok) {
-    const error = new Error(`Finnhub request failed with status ${response.status}.`);
-    error.status = response.status === 429 ? 503 : 502;
-    throw error;
-  }
-  return response.json();
+  return result.data;
 }
 
 async function miNews(url, env) {
@@ -150,6 +171,21 @@ async function miNews(url, env) {
   return result;
 }
 
+function miCurrencyCountry(currency) {
+  const countries = {
+    USD: "United States",
+    EUR: "Eurozone",
+    GBP: "United Kingdom",
+    JPY: "Japan",
+    AUD: "Australia",
+    NZD: "New Zealand",
+    CAD: "Canada",
+    CHF: "Switzerland",
+    CNY: "China"
+  };
+  return countries[currency] || currency || "—";
+}
+
 async function miCalendar(url, env) {
   const today = new Date().toISOString().slice(0, 10);
   const from = miDate(url.searchParams.get("from"), today);
@@ -162,38 +198,87 @@ async function miCalendar(url, env) {
     throw error;
   }
 
-  const cacheKey = `calendar:${from}:${to}`;
+  const now = Date.now();
+  const fromTime = Date.parse(`${from}T00:00:00.000Z`);
+  const toTime = Date.parse(`${to}T23:59:59.999Z`);
+  const earliestSupported = now - 6 * 60 * 60 * 1000;
+  if (toTime < earliestSupported) {
+    return {
+      ok: true,
+      provider: "ShowMyTrades",
+      from,
+      to,
+      count: 0,
+      events: [],
+      generatedAt: new Date().toISOString(),
+      cached: false,
+      note: "The public calendar API provides upcoming events and only the previous six hours."
+    };
+  }
+
+  const days = Math.max(1, Math.min(30, Math.ceil((toTime - now) / 86400000)));
+  if (toTime > now + 30 * 86400000 + 86400000) {
+    const error = new Error("The free economic calendar supports a maximum window of 30 days ahead.");
+    error.status = 400;
+    throw error;
+  }
+
+  const cacheKey = `calendar:showmytrades:${from}:${to}`;
   const cached = await miReadCache(env, cacheKey);
   if (cached) return { ...cached, cached: true };
 
-  const raw = await miFinnhub(
-    `/calendar/economic?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-    env
-  );
-  const events = Array.isArray(raw?.economicCalendar)
-    ? raw.economicCalendar.map(item => ({
-        country: miText(item.country, 80),
-        event: miText(item.event, 240),
-        impact: miText(item.impact, 40),
+  const providerUrl = new URL(MI_CALENDAR_URL);
+  providerUrl.searchParams.set("impact", "all");
+  providerUrl.searchParams.set("days", String(days));
+
+  const { data: raw } = await miFetchJson(providerUrl.toString());
+  const sourceEvents = Array.isArray(raw?.events) ? raw.events : [];
+  const events = sourceEvents
+    .filter(item => {
+      const timestamp = Number(item.ts) * 1000;
+      return Number.isFinite(timestamp) && timestamp >= fromTime && timestamp <= toTime;
+    })
+    .map(item => {
+      const isoTime = typeof item.time === "string" ? item.time : "";
+      const parsedTime = isoTime ? new Date(isoTime) : new Date(Number(item.ts) * 1000);
+      const validTime = !Number.isNaN(parsedTime.getTime());
+      const currency = miText(item.currency, 3).toUpperCase();
+      const impact = miText(item.impact, 20).toLowerCase();
+      return {
+        id: miText(item.id, 160) || `${currency}-${Number(item.ts)}`,
+        country: miCurrencyCountry(currency),
+        currency,
+        event: miText(item.title, 240),
+        impact: impact ? impact.charAt(0).toUpperCase() + impact.slice(1) : "Unknown",
         actual: item.actual ?? null,
-        estimate: item.estimate ?? null,
-        prev: item.prev ?? null,
-        unit: miText(item.unit, 30),
-        time: miText(item.time, 40),
-        date: miText(item.date, 10),
-        source: "Finnhub"
-      }))
-    : [];
+        estimate: item.forecast ?? null,
+        prev: item.previous ?? null,
+        unit: "",
+        date: validTime ? parsedTime.toISOString().slice(0, 10) : "",
+        time: validTime ? `${parsedTime.toISOString().slice(11, 16)} UTC` : "Time not supplied",
+        eventTime: validTime ? parsedTime.toISOString() : null,
+        status: miText(item.status, 30),
+        confidence: miText(item.confidence, 40),
+        source: "ShowMyTrades"
+      };
+    })
+    .filter(item => item.event)
+    .sort((a, b) => new Date(a.eventTime).getTime() - new Date(b.eventTime).getTime());
 
   const result = {
     ok: true,
-    provider: "Finnhub",
+    provider: "ShowMyTrades",
     from,
     to,
     count: events.length,
     events,
     generatedAt: new Date().toISOString(),
-    cached: false
+    cached: false,
+    attribution: {
+      text: "Economic calendar by ShowMyTrades",
+      url: MI_CALENDAR_ATTRIBUTION_URL
+    },
+    note: "Event times are UTC. Schedules and figures may be revised by their publishers."
   };
   await miWriteCache(env, cacheKey, result);
   return result;
