@@ -37,16 +37,26 @@ test('calendar endpoint validates date order and maps provider events', async ()
   assert.equal(invalid.status, 400);
 
   await withFetch(async url => {
-    assert.match(String(url), /from=2026-11-27/);
-    return Response.json({ economicCalendar: [{ country: 'US', event: 'CPI', impact: 3, actual: null, estimate: 2.5, prev: 2.4, time: '2026-11-27 13:30:00', date: '2026-11-27' }] });
+    assert.match(String(url), /impact=all/);
+    assert.match(String(url), /days=/);
+    const eventTimestamp = Math.floor(Date.now() / 1000) + 60 * 60;
+    return Response.json({ events: [{
+      id: 'us-cpi-1', ts: eventTimestamp, time: new Date(eventTimestamp * 1000).toISOString(),
+      currency: 'USD', title: 'CPI', impact: 'high', actual: null,
+      forecast: 2.5, previous: 2.4, status: 'upcoming'
+    }] });
   }, async () => {
-    const url = new URL('https://tradelab.test/api/market-intelligence/calendar?from=2026-11-27&to=2026-11-28');
-    const response = await handleMarketIntelligence(endpoint(url.pathname + url.search), { FINNHUB_API_KEY: 'test-key' }, url);
+    const from = new Date().toISOString().slice(0, 10);
+    const to = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const url = new URL(`https://tradelab.test/api/market-intelligence/calendar?from=${from}&to=${to}`);
+    const response = await handleMarketIntelligence(endpoint(url.pathname + url.search), {}, url);
     const data = await response.json();
     assert.equal(response.status, 200);
+    assert.equal(data.provider, 'ShowMyTrades');
     assert.equal(data.events[0].event, 'CPI');
-    assert.equal(data.events[0].impact, '3');
+    assert.equal(data.events[0].impact, 'High');
     assert.equal(data.events[0].estimate, 2.5);
+    assert.equal(data.events[0].currency, 'USD');
   });
 });
 
