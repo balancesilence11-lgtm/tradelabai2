@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "test:vsa": "node --test tests/vsa.test.js",
     "test": "node --test tests/*.test.js",
-    "test:market-intelligence": "node --test tests/market-intelligence.test.js",
+    "test:market-intelligence": "node --test tests/market-intelligence.js tests/market-intelligence-api.test.js",
     "test:signals": "node --test tests/signal-validation.test.js",
     "test:backtest": "node --test tests/backtesting.test.js",
     "test:execution": "node --test tests/execution-realism.test.js"
@@ -26,5 +26,3 @@
     "vite": "^6.0.5"
   }
 }
-
-
