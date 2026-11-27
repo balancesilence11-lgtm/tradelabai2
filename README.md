@@ -1,51 +1,52 @@
-# TradeLab AI — trading analysis platform foundation
+TradeLab AI — Phase 4.0.5: AI Market Brief
 
-Responsive React/Vite trading workspace with a Cloudflare Worker API proxy.
+FILES IN THIS PATCH
+1. phase2_market_intelligence.js
+   - Replaces the root-level Worker module.
+   - Keeps Finnhub for Market News only.
+   - Keeps the existing free ShowMyTrades public Economic Calendar.
+   - Expands POST /api/market-intelligence/brief into a multi-factor quantitative report.
+   - Adds explicit US30 symbol support.
+   - No new API key, paid provider, D1 migration, or worker.js route change is required.
 
-## Phase 2: Twelve Data market feed
-- Added a server-side Cloudflare Worker endpoint at `/api/market`.
-- The Worker reads `TWELVE_DATA_API_KEY` from a Cloudflare secret; the key is never sent to the browser.
-- Supported instruments in this integration: EUR/USD, GBP/USD, USD/JPY and XAU/USD, subject to Twelve Data account entitlement and provider symbol availability.
-- Supported chart intervals: 15 minutes, 1 hour, 4 hours and 1 day.
-- Chart data refreshes every five minutes and is cached at the Worker for 30 seconds.
-- US30 remains illustrative because it is not enabled in this initial provider integration.
-- If the provider request fails, the dashboard clearly falls back to illustrative data and displays the reason.
+2. src/main.jsx
+   - Replaces the frontend source.
+   - Renames the Candle Intelligence tab to AI Market Brief.
+   - Displays trend, structure, momentum, volatility, key levels, factor breakdown,
+     conditional scenario, and high-impact events expected in the next 48 hours.
+   - Keeps Market News and Economic Calendar tabs.
 
-## Current implementation
-- Responsive dashboard and navigation.
-- Overview, market watch, AI analysis preview, trading ticket preview, trade history, risk controls, broker connections, admin and settings screens.
-- Interactive chart with optional 8-period moving average.
-- Manual / assisted / automated mode preference UI.
-- Risk preference slider (UI only; not enforced).
-- Deriv and MetaTrader 5 connection placeholders.
+3. tests/market-intelligence-api.test.js
+   - Updates the calendar API test to match the already-deployed free ShowMyTrades provider.
 
-## Cloudflare configuration
-The project uses `wrangler.jsonc`, `worker.js` and the `ASSETS` binding to serve the Vite build while routing `/api/*` requests through the Worker. In the Cloudflare Worker settings, create a **Secret** named exactly `TWELVE_DATA_API_KEY` and set its value to your Twelve Data API key. Do not put the key in `.env`, React code, GitHub, or any public variable.
+4. tests/market-intelligence-brief.test.js
+   - Adds tests for the expanded brief, US30 mapping, and candle validation.
 
-The configured Worker name is `tradelabai2`. If your Cloudflare project uses a different Worker name, update the `name` field in `wrangler.jsonc` to match.
+GITHUB UPDATE
+1. Open the repository.
+2. Replace the root-level phase2_market_intelligence.js with this package version.
+3. Replace src/main.jsx with this package version.
+4. Replace tests/market-intelligence-api.test.js.
+5. Add tests/market-intelligence-brief.test.js under the existing tests folder.
+6. Commit the changes and let the existing deployment workflow run.
 
-## Run locally
-Requires Node.js 20+.
+Do NOT replace worker.js. The existing authenticated route already dispatches
+/api/market-intelligence/brief to this module.
 
-```bash
-npm install
-npm run dev
-```
+VALIDATION
+- Worker module syntax check passed.
+- Frontend JSX parser check passed.
+- All 12 focused Market Intelligence tests passed.
+- Full test suite: 103 passed, 3 failed. The same 3 paper-backup tests also fail
+  against the unmodified Phase 4.0.4 baseline, so they are pre-existing and
+  unrelated to this patch.
+- A Vite production build was not run in this environment because project
+  dependencies/node_modules were not installed.
 
-The live-data endpoint runs in the deployed Cloudflare Worker. For local development, either run the Worker with Wrangler and configure a local secret, or expect the `/api/market` request to fall back to illustrative data.
-
-## Build and deploy
-```bash
-npm run build
-```
-
-Deploy with Wrangler (after installing dependencies and setting the Worker secret):
-```bash
-npx wrangler secret put TWELVE_DATA_API_KEY
-npx wrangler deploy
-```
-
-## Important limitations
-This is not a live trading system. Market-data access depends on Twelve Data plan limits, exchange coverage, symbol availability and any applicable licensing. Prices may be delayed depending on the provider subscription. No real authentication, user database, AI-generated signal service, broker authorisation, MT5 connectivity, server-side risk enforcement or order execution is implemented. The trading ticket does not submit orders. US30 is not enabled in this initial market-data proxy. Do not use illustrative fallback figures to make financial decisions.
-
-Never commit API keys, `.env` files, broker passwords or access tokens to GitHub. Keep live execution disabled until authentication, server-side risk checks, audit logging, broker authorisation, demo testing and security review are complete.
+ANALYSIS LIMITATIONS
+- This is a transparent quantitative rules engine, not a paid external AI/LLM.
+- At least 20 valid candles are required; up to 250 recent candles are analysed.
+- The latest supplied candle may still be forming; confirm with a closed candle.
+- Tick volume is not centralized exchange volume for OTC forex/CFD instruments.
+- The confluence score is not a win probability.
+- The brief is analysis only and does not place orders or issue entry/SL/TP instructions.
