@@ -1010,6 +1010,111 @@ return json({ error: "Billing route not found" }, 404);
 TWELVE DATA MARKET CONNECTION
 ========================================= */
 /* =========================================
+MT5 BRIDGE DATA ACCESS
+========================================= */
+const MT5_TIMEFRAMES = new Set(["1min", "5min", "15min", "30min", "1h", "4h", "1day"]);
+const MT5_QUOTE_MAX_AGE_MS = 15000;
+
+async function readMT5Quote(env, symbol = "US30") {
+  if (!env.DB) throw new Error("Market database is not configured.");
+  const row = await env.DB.prepare(`
+    SELECT symbol, broker_symbol, bid, ask, last, timestamp_ms, received_at_ms
+    FROM mt5_market_quotes WHERE symbol = ? LIMIT 1
+  `).bind(symbol).first();
+  if (!row) return null;
+  const ageMs = Date.now() - Number(row.received_at_ms);
+  const sourceAgeMs = Date.now() - Number(row.timestamp_ms);
+  if (!Number.isFinite(ageMs) || !Number.isFinite(sourceAgeMs) || ageMs < -30000 || sourceAgeMs < -30000 || ageMs > MT5_QUOTE_MAX_AGE_MS || sourceAgeMs > MT5_QUOTE_MAX_AGE_MS) return null;
+  return { ...row, ageMs: Math.max(0, sourceAgeMs) };
+}
+
+async function readMT5Candles(env, symbol, interval, outputsize) {
+  if (!env.DB) throw new Error("Market database is not configured.");
+  const result = await env.DB.prepare(`
+    SELECT candle_time_ms, open, high, low, close, tick_volume, spread, real_volume
+    FROM mt5_market_candles
+    WHERE symbol = ? AND timeframe = ?
+    ORDER BY candle_time_ms DESC LIMIT ?
+  `).bind(symbol, interval, outputsize).all();
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  return rows.reverse().map(row => ({
+    time: new Date(Number(row.candle_time_ms)).toISOString(),
+    open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close),
+    volume: Number(row.tick_volume || 0), tickVolume: Number(row.tick_volume || 0),
+    spread: Number(row.spread || 0), realVolume: Number(row.real_volume || 0)
+  }));
+}
+
+async function handleMT5BridgeIngest(request, env) {
+  if (request.method !== "POST") return json({ ok: false, error: "Method not allowed." }, 405, { Allow: "POST" });
+  const configuredToken = String(env.MT5_BRIDGE_TOKEN || "").trim();
+  const suppliedToken = String(request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  if (!configuredToken || !suppliedToken || suppliedToken.length !== configuredToken.length || suppliedToken !== configuredToken) {
+    return json({ ok: false, error: "Unauthorized bridge request." }, 401);
+  }
+  if (!env.DB) return json({ ok: false, error: "Market database is not configured." }, 503);
+  const declaredLength = Number(request.headers.get("Content-Length") || 0);
+  if (declaredLength > 512000) return json({ ok: false, error: "Payload is too large." }, 413);
+  let raw;
+  try { raw = await request.text(); } catch { return json({ ok: false, error: "Invalid request body." }, 400); }
+  if (raw.length > 512000) return json({ ok: false, error: "Payload is too large." }, 413);
+  let body;
+  try { body = JSON.parse(raw); } catch { return json({ ok: false, error: "Malformed JSON payload." }, 400); }
+
+  const symbol = String(body?.symbol || "").toUpperCase();
+  const brokerSymbol = String(body?.brokerSymbol || "").trim();
+  if (symbol !== "US30" || !brokerSymbol || brokerSymbol.length > 32) {
+    return json({ ok: false, error: "Only the configured US30 MT5 instrument is accepted." }, 400);
+  }
+
+  let quoteStored = false;
+  if (body.quote !== undefined && body.quote !== null) {
+    const q = body.quote;
+    const bid = Number(q.bid), ask = Number(q.ask), last = Number(q.last), timestampMs = Number(q.timestampMs);
+    if (![bid, ask, last, timestampMs].every(Number.isFinite) || bid <= 0 || ask <= 0 || last <= 0 || ask < bid || timestampMs <= 0 || timestampMs > Date.now() + 30000 || Date.now() - timestampMs > 120000) {
+      return json({ ok: false, error: "Quote failed price or timestamp validation." }, 422);
+    }
+    await env.DB.prepare(`
+      INSERT INTO mt5_market_quotes (symbol, broker_symbol, bid, ask, last, timestamp_ms, received_at_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(symbol) DO UPDATE SET broker_symbol=excluded.broker_symbol, bid=excluded.bid,
+        ask=excluded.ask, last=excluded.last, timestamp_ms=excluded.timestamp_ms, received_at_ms=excluded.received_at_ms
+    `).bind(symbol, brokerSymbol, bid, ask, last, Math.floor(timestampMs), Date.now()).run();
+    quoteStored = true;
+  }
+
+  let candlesStored = 0;
+  if (body.candles !== undefined) {
+    const timeframe = String(body.timeframe || "");
+    if (!MT5_TIMEFRAMES.has(timeframe) || !Array.isArray(body.candles) || body.candles.length > 500) {
+      return json({ ok: false, error: "Invalid timeframe or candle batch." }, 422);
+    }
+    const statements = [];
+    for (const c of body.candles) {
+      const timeMs = Number(c.timeMs);
+      const open = Number(c.open), high = Number(c.high), low = Number(c.low), close = Number(c.close);
+      const tickVolume = Math.max(0, Math.floor(Number(c.tickVolume || 0)));
+      const spread = Math.max(0, Math.floor(Number(c.spread || 0)));
+      const realVolume = Math.max(0, Math.floor(Number(c.realVolume || 0)));
+      if (![timeMs, open, high, low, close, tickVolume, spread, realVolume].every(Number.isFinite) || timeMs <= 0 || timeMs > Date.now() + 3600000 || Math.min(open, high, low, close) <= 0 || high < Math.max(open, close, low) || low > Math.min(open, close, high)) {
+        return json({ ok: false, error: "Candle batch contains invalid OHLC or timestamp data." }, 422);
+      }
+      statements.push(env.DB.prepare(`
+        INSERT INTO mt5_market_candles (symbol, timeframe, candle_time_ms, open, high, low, close, tick_volume, spread, real_volume, received_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, timeframe, candle_time_ms) DO UPDATE SET open=excluded.open, high=excluded.high,
+          low=excluded.low, close=excluded.close, tick_volume=excluded.tick_volume, spread=excluded.spread,
+          real_volume=excluded.real_volume, received_at_ms=excluded.received_at_ms
+      `).bind(symbol, timeframe, Math.floor(timeMs), open, high, low, close, tickVolume, spread, realVolume, Date.now()));
+    }
+    if (statements.length) await env.DB.batch(statements);
+    candlesStored = statements.length;
+  }
+  if (!quoteStored && candlesStored === 0) return json({ ok: false, error: "No market data was supplied." }, 400);
+  return json({ ok: true, symbol, brokerSymbol, quoteStored, candlesStored, receivedAt: new Date().toISOString() });
+}
+
+/* =========================================
 MARKET DATA API
 PROVIDER FAILOVER ENABLED
 ========================================= */
@@ -1030,12 +1135,23 @@ return json(
 const symbol = url.searchParams.get("symbol")
 ?.toUpperCase()
 .replace("/", "");
-const providerSymbol = SYMBOLS[symbol];
+const isMT5US30 = symbol === "US30";
+const providerSymbol = isMT5US30 ? "US30" : SYMBOLS[symbol];
 if (!providerSymbol) {
 return json({
 ok: false,
 error: "Unsupported symbol"
 }, 400);
+}
+if (isMT5US30 && url.pathname === "/api/market") {
+  try {
+    const quote = await readMT5Quote(env, "US30");
+    if (!quote) return json({ ok: false, status: "STALE", source: "MT5", error: "US30 MT5 quote is unavailable or stale. Check that the MT5 bridge EA is running." }, 503);
+    return json({ ok: true, symbol: "US30", brokerSymbol: quote.broker_symbol, price: Number(quote.last), bid: Number(quote.bid), ask: Number(quote.ask), status: "LIVE", source: "MT5", timestamp: new Date(Number(quote.timestamp_ms)).toISOString(), receivedAt: new Date(Number(quote.received_at_ms)).toISOString(), ageMs: quote.ageMs });
+  } catch (error) {
+    console.error("MT5 US30 quote read failed:", error.message);
+    return json({ ok: false, status: "ERROR", source: "MT5", error: "Unable to read the US30 MT5 quote." }, 503);
+  }
 }
 /* =====================================
 LIVE PRICE
@@ -1101,6 +1217,11 @@ url.searchParams.get("interval") || "5min";
     );
 
     try {
+      if (isMT5US30) {
+        const candles = await readMT5Candles(env, "US30", interval, outputsize);
+        if (!candles.length) return json({ ok: false, status: "WAITING", source: "MT5", error: `No ${interval} MT5 candles are stored yet. Keep the TradeLab MT5 bridge EA running to import history.` }, 503);
+        return json({ ok: true, symbol: "US30", providerSymbol: "US30", brokerSymbol: "US30", interval, count: candles.length, candles, latestCandleAt: candles[candles.length - 1].time, status: "LIVE", source: "MT5", timestamp: new Date().toISOString() });
+      }
       const result = await marketGetCandles(
         providerSymbol,
         interval,
@@ -10116,6 +10237,10 @@ async function routeRequest(request, env, ctx) {
 
     if (path.startsWith("/api/billing/")) {
       return await handleBilling(request, env, url);
+    }
+
+    if (path === "/api/mt5/bridge/ingest") {
+      return await handleMT5BridgeIngest(request, env);
     }
 
     if (path === "/api/market" || path === "/api/candles") {
