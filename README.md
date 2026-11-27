@@ -1,52 +1,53 @@
-TradeLab AI — Phase 4.0.5: AI Market Brief
+# TradeLab AI — hybrid trading platform foundation
 
-FILES IN THIS PATCH
-1. phase2_market_intelligence.js
-   - Replaces the root-level Worker module.
-   - Keeps Finnhub for Market News only.
-   - Keeps the existing free ShowMyTrades public Economic Calendar.
-   - Expands POST /api/market-intelligence/brief into a multi-factor quantitative report.
-   - Adds explicit US30 symbol support.
-   - No new API key, paid provider, D1 migration, or worker.js route change is required.
+A responsive React/Vite frontend foundation for a personal + multi-user trading workspace.
 
-2. src/main.jsx
-   - Replaces the frontend source.
-   - Renames the Candle Intelligence tab to AI Market Brief.
-   - Displays trend, structure, momentum, volatility, key levels, factor breakdown,
-     conditional scenario, and high-impact events expected in the next 48 hours.
-   - Keeps Market News and Economic Calendar tabs.
+## Current implementation
+- Responsive dashboard and navigation
+- Overview, market watch, AI analysis preview, trading ticket preview, trade history, risk controls, broker connections, admin and settings screens
+- Clearly labelled illustrative market data and simulated demo balance
+- Manual / assisted / automated mode preference UI
+- Risk preference slider (UI only; not enforced)
+- Deriv and MetaTrader 5 connection placeholders
+- Netlify build configuration and health endpoint
 
-3. tests/market-intelligence-api.test.js
-   - Updates the calendar API test to match the already-deployed free ShowMyTrades provider.
+## Important: what is not connected
+This is a **frontend prototype**, not a live trading system. It does not currently provide real authentication, user database, live market prices, AI-generated signals, broker authorisation, MT5 connectivity, server-side risk enforcement, or order execution. Buttons that would place orders explicitly do not submit trades. Do not use it to make financial decisions.
 
-4. tests/market-intelligence-brief.test.js
-   - Adds tests for the expanded brief, US30 mapping, and candle validation.
+## Run locally
+Requires Node.js 20+.
 
-GITHUB UPDATE
-1. Open the repository.
-2. Replace the root-level phase2_market_intelligence.js with this package version.
-3. Replace src/main.jsx with this package version.
-4. Replace tests/market-intelligence-api.test.js.
-5. Add tests/market-intelligence-brief.test.js under the existing tests folder.
-6. Commit the changes and let the existing deployment workflow run.
+```bash
+npm install
+npm run dev
+```
 
-Do NOT replace worker.js. The existing authenticated route already dispatches
-/api/market-intelligence/brief to this module.
+## Netlify deployment
+- Build command: `npm run build`
+- Publish directory: `dist`
+- Functions directory: `netlify/functions`
 
-VALIDATION
-- Worker module syntax check passed.
-- Frontend JSX parser check passed.
-- All 12 focused Market Intelligence tests passed.
-- Full test suite: 103 passed, 3 failed. The same 3 paper-backup tests also fail
-  against the unmodified Phase 4.0.4 baseline, so they are pre-existing and
-  unrelated to this patch.
-- A Vite production build was not run in this environment because project
-  dependencies/node_modules were not installed.
+Push the project to the connected GitHub repository and trigger a Netlify deploy. If you replace the repository contents, keep the repository's existing deployment connection.
 
-ANALYSIS LIMITATIONS
-- This is a transparent quantitative rules engine, not a paid external AI/LLM.
-- At least 20 valid candles are required; up to 250 recent candles are analysed.
-- The latest supplied candle may still be forming; confirm with a closed candle.
-- Tick volume is not centralized exchange volume for OTC forex/CFD instruments.
-- The confluence score is not a win probability.
-- The brief is analysis only and does not place orders or issue entry/SL/TP instructions.
+## Production architecture still required
+1. Authentication with verified email, password reset and role-based access.
+2. PostgreSQL database with row-level tenant isolation.
+3. Server-side API for market data, AI analysis and order routing.
+4. Official Deriv authorisation with scoped per-user tokens stored encrypted.
+5. MT5 integration through a separately hosted, secured bridge or broker-approved connector.
+6. Server-side pre-trade risk checks, idempotency, audit log and emergency kill switch.
+7. Demo/paper testing, security review and explicit account-owner consent before any live execution.
+
+Never commit `.env` files, broker passwords, API tokens or other secrets to GitHub. Keep live execution disabled until all production controls have been independently tested.
+
+## MT5 US30 market-data bridge (read-only)
+
+The US30 feed uses the exact broker symbol `US30` from the user's MT5 terminal. It does not place, modify, or close orders.
+
+1. Apply the D1 schema: `npx wrangler d1 migrations apply tradelab-ai-db --remote`.
+2. Create a strong random bridge token (at least 32 characters) and set it as a Worker secret: `npx wrangler secret put MT5_BRIDGE_TOKEN`.
+3. Open `mt5/TradeLabDataBridge.mq5` in MetaEditor, set `BridgeURL` to this Worker deployment's `/api/mt5/bridge/ingest` endpoint, paste the same token into `BridgeToken`, and keep `BrokerSymbol=US30`.
+4. Compile and attach the EA to a chart. In MT5, add the Worker HTTPS host under Tools → Options → Expert Advisors → Allow WebRequest for listed URL.
+5. Keep the terminal and EA running. The EA sends quotes every second and uploads M1, M5, M15, M30, H1, H4 and D1 candle history, then refreshes a timeframe when a new bar forms.
+
+US30 quote responses are deliberately sourced only from this MT5 bridge. A missing or stale MT5 quote returns an unavailable response rather than silently substituting a different broker's US30 price. Never place the bridge token in frontend code, source control, or a public file.
