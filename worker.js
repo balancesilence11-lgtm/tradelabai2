@@ -1,5 +1,6 @@
 import { handleMarketIntelligence } from "./phase2_market_intelligence.js";
 import { validateSignalRecord, resolveSignalOutcome } from "./src/signal-validation.js";
+import { constantTimeEqual, isValidEmail, readJsonLimited } from "./src/security-hardening.js";
 /*
  * TradeLab AI — Phase 2 Market Intelligence (additive module)
  * Requires existing Cloudflare Worker bindings: DB (D1), FINNHUB_API_KEY.
@@ -218,6 +219,20 @@ const encoder = new TextEncoder();
 /* =========================================
 GENERAL RESPONSE AND SECURITY HELPERS
 ========================================= */
+function applySecurityHeaders(response) {
+const headers = new Headers(response.headers);
+headers.set("X-Content-Type-Options", "nosniff");
+headers.set("Referrer-Policy", "no-referrer");
+headers.set("Cross-Origin-Resource-Policy", "same-origin");
+headers.set("X-Frame-Options", "DENY");
+headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+return new Response(response.body, {
+status: response.status,
+statusText: response.statusText,
+headers
+});
+}
 function json(data, status = 200, extraHeaders = {}) {
 return Response.json(data, {
 status,
@@ -226,6 +241,9 @@ headers: {
 "X-Content-Type-Options": "nosniff",
 "Referrer-Policy": "no-referrer",
 "Cross-Origin-Resource-Policy": "same-origin",
+"X-Frame-Options": "DENY",
+"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+"Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 ...extraHeaders
 }
 });
@@ -283,11 +301,29 @@ if (fetchSite === "cross-site") return false;
 return true;
 }
 async function readJson(request) {
-const contentLength = Number(request.headers.get("Content-Length") || 0);
-if (contentLength > 8192) throw new Error("Request too large");
-const text = await request.text();
-if (text.length > 8192) throw new Error("Request too large");
-return JSON.parse(text);
+return readJsonLimited(request, 8192);
+}
+async function enforceAuthRateLimit(env, request, purpose) {
+const ip = String(request.headers.get("CF-Connecting-IP") || "unknown").slice(0, 64);
+const ipHash = await sha256(ip);
+const rateKey = `${purpose}:${ipHash}`;
+const now = Date.now();
+const windowMs = purpose === "register" ? 60 * 60 * 1000 : 15 * 60 * 1000;
+const limit = purpose === "register" ? 5 : 25;
+const row = await env.DB.prepare(`
+INSERT INTO auth_rate_limits (rate_key, attempts, window_started_at, blocked_until)
+VALUES (?, 1, ?, NULL)
+ON CONFLICT(rate_key) DO UPDATE SET
+  attempts = CASE WHEN auth_rate_limits.window_started_at <= ? THEN 1 ELSE auth_rate_limits.attempts + 1 END,
+  window_started_at = CASE WHEN auth_rate_limits.window_started_at <= ? THEN excluded.window_started_at ELSE auth_rate_limits.window_started_at END,
+  blocked_until = CASE
+    WHEN auth_rate_limits.window_started_at <= ? THEN NULL
+    WHEN auth_rate_limits.attempts + 1 >= ? THEN auth_rate_limits.window_started_at + ?
+    ELSE auth_rate_limits.blocked_until
+  END
+RETURNING attempts, window_started_at, blocked_until
+`).bind(rateKey, now, now - windowMs, now - windowMs, now - windowMs, limit, windowMs).first();
+return Boolean(row?.blocked_until && Number(row.blocked_until) > now);
 }
 /* =========================================
 AUTHENTICATION DATABASE HELPERS
@@ -326,18 +362,18 @@ createdAt: session.created_at
 REGISTRATION
 ========================================= */
 async function register(request, env) {
+if (await enforceAuthRateLimit(env, request, "register")) {
+return json({ error: "Too many registration attempts. Try again later." }, 429, { "Retry-After": "3600" });
+}
 let body;
 try {
 body = await readJson(request);
-} catch {
-return json({ error: "Invalid request body" }, 400);
+} catch (error) {
+return json({ error: error?.code === "BODY_TOO_LARGE" ? "Request body too large." : "Invalid request body" }, error?.code === "BODY_TOO_LARGE" ? 413 : 400);
 }
 const email = String(body.email || "").trim().toLowerCase();
 const password = String(body.password || "");
-if (
-email.length > 254 ||
-!/^[^\s@]+@[^\s@]+.[^\s@]+$/.test(email)
-) {
+if (!isValidEmail(email)) {
 return json({ error: "Enter a valid email address" }, 400);
 }
 if (password.length < 12 || password.length > 128) {
@@ -369,19 +405,24 @@ user: { id: userId, email }
 LOGIN
 ========================================= */
 async function login(request, env) {
+if (await enforceAuthRateLimit(env, request, "login")) {
+return json({ error: "Too many login attempts. Try again later." }, 429, { "Retry-After": "900" });
+}
 let body;
 try {
 body = await readJson(request);
-} catch {
-return json({ error: "Invalid request body" }, 400);
+} catch (error) {
+return json({ error: error?.code === "BODY_TOO_LARGE" ? "Request body too large." : "Invalid request body" }, error?.code === "BODY_TOO_LARGE" ? 413 : 400);
 }
 const email = String(body.email || "").trim().toLowerCase();
 const password = String(body.password || "");
-if (!email || email.length > 254 || !password || password.length > 128) {
+if (!isValidEmail(email) || !password || password.length > 128) {
 return json({ error: "Invalid email or password" }, 400);
 }
+const ip = String(request.headers.get("CF-Connecting-IP") || "unknown").slice(0, 64);
+const attemptKey = await sha256(`${email}:${ip}`);
 const now = Date.now();
-const attempts = await env.DB.prepare(`SELECT attempts, window_started_at, locked_until FROM login_attempts WHERE email = ?`).bind(email).first();
+const attempts = await env.DB.prepare(`SELECT attempts, window_started_at, locked_until FROM login_attempts WHERE email = ?`).bind(attemptKey).first();
 if (attempts?.locked_until && Date.parse(attempts.locked_until) > now) {
 return json({ error: "Too many login attempts. Try again later." }, 429);
 }
@@ -389,7 +430,7 @@ const user = await env.DB.prepare(`SELECT id, email, password_hash, password_sal
 let valid = false;
 if (user && user.status === "active") {
 const suppliedHash = await hashPassword(password, user.password_salt);
-valid = suppliedHash === user.password_hash;
+valid = constantTimeEqual(suppliedHash, user.password_hash);
 }
 if (!valid) {
 const windowStart = attempts?.window_started_at
@@ -412,7 +453,7 @@ const windowStart = attempts?.window_started_at
         window_started_at = excluded.window_started_at,
         locked_until = excluded.locked_until
     `).bind(
-      email,
+      attemptKey,
       count,
       withinWindow ? attempts.window_started_at : new Date(now).toISOString(),
       lockedUntil
@@ -422,7 +463,7 @@ const windowStart = attempts?.window_started_at
     return json({ error: "Invalid email or password" }, 401);
 }
 await env.DB.prepare("DELETE FROM login_attempts WHERE email = ?")
-.bind(email).run();
+.bind(attemptKey).run();
 await logAuthEvent(env, user.id, email, "login_success");
 const token = await createSession(env, user.id);
 return json({
@@ -1049,7 +1090,7 @@ async function handleMT5BridgeIngest(request, env) {
   if (request.method !== "POST") return json({ ok: false, error: "Method not allowed." }, 405, { Allow: "POST" });
   const configuredToken = String(env.MT5_BRIDGE_TOKEN || "").trim();
   const suppliedToken = String(request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-  if (!configuredToken || !suppliedToken || suppliedToken.length !== configuredToken.length || suppliedToken !== configuredToken) {
+  if (!configuredToken || !constantTimeEqual(suppliedToken, configuredToken)) {
     return json({ ok: false, error: "Unauthorized bridge request." }, 401);
   }
   if (!env.DB) return json({ ok: false, error: "Market database is not configured." }, 503);
@@ -6003,12 +6044,12 @@ mode: normalized
 async function handleRiskAssessment(request, env, user) {
 let body;
 try {
-body = await request.json();
-} catch {
+body = await readJson(request);
+} catch (error) {
 return json({
 ok: false,
-error: "Invalid JSON request."
-}, 400);
+error: error?.code === "BODY_TOO_LARGE" ? "Request body too large." : "Invalid JSON request."
+}, error?.code === "BODY_TOO_LARGE" ? 413 : 400);
 }
 const result = validateTradeParameters(body);
 if (!result.valid) {
@@ -6089,7 +6130,7 @@ async function handleRiskSettings(request, env, user) {
 if (!env.DB) return json({ ok: false, error: "Risk settings database is unavailable." }, 503);
 if (request.method === "PUT") {
 let input;
-try { input = await request.json(); } catch { return json({ ok: false, error: "Invalid JSON request." }, 400); }
+try { input = await readJson(request); } catch (error) { return json({ ok: false, error: error?.code === "BODY_TOO_LARGE" ? "Request body too large." : "Invalid JSON request." }, error?.code === "BODY_TOO_LARGE" ? 413 : 400); }
 if (!input || typeof input !== "object" || Array.isArray(input)) return json({ ok: false, error: "Invalid risk settings." }, 400);
 const number = (value, fallback) => value === undefined || value === null || value === "" ? fallback : Number(value);
 const settings = {
@@ -6194,11 +6235,11 @@ error: "Trade journal database is unavailable."
 }
 let body;
 try {
-body = await request.json();
-} catch {
+body = await readJson(request);
+} catch (error) {
 return json({
 ok: false,
-error: "Invalid JSON request."
+error: error?.code === "BODY_TOO_LARGE" ? "Request body too large." : "Invalid JSON request."
 }, 400);
 }
 const symbol = journalText(
@@ -6444,11 +6485,11 @@ error: "Invalid trade identifier."
 }
 let body;
 try {
-body = await request.json();
-} catch {
+body = await readJson(request);
+} catch (error) {
 return json({
 ok: false,
-error: "Invalid JSON request."
+error: error?.code === "BODY_TOO_LARGE" ? "Request body too large." : "Invalid JSON request."
 }, 400);
 }
 const exitPrice = journalNumber(
@@ -10109,6 +10150,15 @@ async function routeRequest(request, env, ctx) {
   const method = request.method.toUpperCase();
 
   try {
+    const originExempt = path === "/api/billing/webhook" ||
+      path === "/api/flutterwave/webhook" ||
+      path === "/api/mt5/bridge/ingest";
+    if (path.startsWith("/api/") && !originExempt &&
+        !["GET", "HEAD", "OPTIONS"].includes(method) &&
+        !validOrigin(request, url)) {
+      return json({ error: "Request origin rejected" }, 403);
+    }
+
     // Authentication routes must be handled before the paid-user API gate.
     if (path.startsWith("/api/auth/")) {
       return await handleAuth(request, env, url);
@@ -10219,7 +10269,7 @@ async function routeRequest(request, env, ctx) {
     }
 
     if (env.ASSETS) {
-      return await env.ASSETS.fetch(request);
+      return applySecurityHeaders(await env.ASSETS.fetch(request));
     }
 
     return new Response("TradeLab AI", { status: 200 });
