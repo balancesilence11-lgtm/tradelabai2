@@ -6961,7 +6961,7 @@ trade.id,
 event.type,
 new Date(Date.now() - 5 * 60 * 1000).toISOString()
 ).first();
-    if (existing) return;
+    if (existing) return false;
 
     await env.DB.prepare(`
       INSERT INTO trade_monitor_events (
@@ -6992,11 +6992,13 @@ new Date(Date.now() - 5 * 60 * 1000).toISOString()
       now
     ).run();
 
+    return true;
 } catch (error) {
 console.error(
 "Unable to save trade monitoring event:",
 error.message
 );
+    return false;
 }
 }
 async function monitorOpenPositions(
@@ -7066,13 +7068,47 @@ let priceError = null;
     );
 
     for (const event of events) {
-      await monitorSaveEvent(
+      const eventSaved = await monitorSaveEvent(
         env,
         user,
         trade,
         event,
         currentPrice
       );
+
+      // Create an in-app notification only for a newly persisted event.
+      // A repeated monitoring poll must not generate duplicate alerts.
+      if (eventSaved) {
+        const notificationTitles = {
+          STOP_LOSS_APPROACHED: "Stop-loss warning",
+          TAKE_PROFIT_APPROACHED: "Take-profit approaching",
+          STOP_LOSS_REACHED: "Stop-loss level reached",
+          TAKE_PROFIT_REACHED: "Take-profit level reached",
+          ENTRY_REACHED: "Entry level reached"
+        };
+
+        try {
+          await notificationCreate(
+            env,
+            user.id,
+            "trade_monitor",
+            notificationTitles[event.type] || "Trading monitor alert",
+            `${trade.symbol || "Trading instrument"}: ${event.message || event.type}`,
+            {
+              symbol: trade.symbol || null,
+              eventType: event.type,
+              tradeId: trade.id || null,
+              marketPrice: currentPrice
+            }
+          );
+        } catch (notificationError) {
+          // Notification delivery is best-effort and must not interrupt monitoring.
+          console.error(
+            "Could not create monitoring notification:",
+            notificationError?.message || notificationError
+          );
+        }
+      }
     }
 
     monitored.push({
@@ -7571,42 +7607,6 @@ const method = request.method.toUpperCase();
             error: error?.message || "Notification request failed."
         }, 500);
     }
-}
-// Create an in-app notification for the monitoring event.
-// Notification failure must not interrupt trade monitoring.
-try {
-const eventTitle = {
-stop_loss_near: "Stop-loss warning",
-take_profit_near: "Take-profit approaching",
-stop_loss_hit: "Stop-loss level reached",
-take_profit_hit: "Take-profit level reached",
-price_movement: "Significant price movement"
-};
-    const title =
-        eventTitle[event.type] || "Trading monitor alert";
-
-    const message =
-        `${event.symbol || "Trading instrument"}: ` +
-        `${event.message || event.type}`;
-
-    await notificationCreate(
-        env,
-        event.userId || event.user_id,
-        "trade_monitor",
-        title,
-        message,
-        {
-            symbol: event.symbol,
-            eventType: event.type,
-            tradeId: event.tradeId || event.trade_id || null
-        }
-    );
-
-} catch (notificationError) {
-console.error(
-"Could not create monitoring notification:",
-notificationError?.message || notificationError
-);
 }
 // ============================================================
 // PART 16: MARKET SCANNER AND WATCHLIST ENGINE
