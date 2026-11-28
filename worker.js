@@ -10272,7 +10272,7 @@ async function routeRequest(request, env, ctx) {
       return applySecurityHeaders(await env.ASSETS.fetch(request));
     }
 
-    return new Response("TradeLab AI", { status: 200 });
+    return applySecurityHeaders(new Response("TradeLab AI", { status: 200 }));
   } catch (error) {
     console.error("TradeLab request failed:", path, error?.stack || error?.message || error);
     return json({ ok: false, error: "An unexpected server error occurred." }, 500);
