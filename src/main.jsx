@@ -13,6 +13,7 @@ import { createPaperBackup, previewPaperRestore, restorePaperBackup } from './pa
 import { readPaperBackupAudit, recordPaperBackupAudit, clearPaperBackupAudit, PAPER_BACKUP_AUDIT_LIMIT } from './paper-backup-audit.js';
 import { inspectPaperTradingStorage } from './paper-backup-health.js';
 import { restoreWorkspaceEntries } from './backup-coordinator.js';
+import { inspectWorkspaceStorageIntegrity } from './workspace-integrity.js';
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, Bot, BarChart3,
   ChevronDown, Clock3, LayoutDashboard, LockKeyhole, LogOut, Menu,
@@ -3534,14 +3535,10 @@ function SecurityCentrePage() {
     recordSecurityEvent(value?'Local paper lock enabled':'Local paper lock disabled','Browser-local preference only');
   }
   function checkIntegrity() {
-    let valid=0,invalid=0;
-    STORAGE_KEYS.forEach(key=>{
-      const raw=localStorage.getItem(key);
-      if(raw===null){valid++;return;}
-      try { JSON.parse(raw); valid++; } catch { invalid++; }
-    });
-    setIntegrity({checked:true,valid,invalid});
-    recordSecurityEvent('Workspace integrity check',`${valid} readable entries; ${invalid} invalid JSON entries`);
+    const result = inspectWorkspaceStorageIntegrity(localStorage, STORAGE_KEYS);
+    setIntegrity({checked:true,valid:result.valid,invalid:result.invalid});
+    const detail = `${result.valid} readable entries; ${result.invalid} invalid JSON entries${result.invalidKeys.length ? ` (${result.invalidKeys.join(', ')})` : ''}`;
+    recordSecurityEvent('Workspace integrity check', detail);
   }
   function exportBackup() {
     try {
