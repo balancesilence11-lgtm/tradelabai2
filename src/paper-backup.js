@@ -149,9 +149,14 @@ export function restorePaperBackup(input, storage = globalThis.localStorage) {
   if (!storage) return { ok: false, reason: 'Browser storage is unavailable.' };
   const previous = {};
   const next = {};
+  let commitStarted = false;
   try {
-    for (const [name, key] of Object.entries(PAPER_BACKUP_KEYS)) {
+    // Snapshot every affected key before preparing or writing anything. This
+    // ensures rollback has a complete view even if a later read/parse fails.
+    for (const key of Object.values(PAPER_BACKUP_KEYS)) {
       previous[key] = storage.getItem(key);
+    }
+    for (const [name, key] of Object.entries(PAPER_BACKUP_KEYS)) {
       const current = readArray(storage, key);
       const seen = new Set(current.map(recordKey));
       const merged = [...current];
@@ -161,6 +166,7 @@ export function restorePaperBackup(input, storage = globalThis.localStorage) {
       }
       next[key] = JSON.stringify(merged);
     }
+    commitStarted = true;
     for (const key of Object.values(PAPER_BACKUP_KEYS)) storage.setItem(key, next[key]);
     const committedValuesMatch = Object.values(PAPER_BACKUP_KEYS)
       .every(key => storage.getItem(key) === next[key]);
@@ -173,10 +179,10 @@ export function restorePaperBackup(input, storage = globalThis.localStorage) {
       migrated: checked.migrated
     };
   } catch (error) {
-    let rollbackAttempted = false;
+    let rollbackAttempted = commitStarted;
     let rollbackVerified = true;
     for (const [key, value] of Object.entries(previous)) {
-      rollbackAttempted = true;
+      if (!commitStarted) break;
       try {
         if (value == null) storage.removeItem(key);
         else storage.setItem(key, value);
