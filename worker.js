@@ -9844,19 +9844,20 @@ const symbolsResult = await env.DB.prepare(`SELECT symbol FROM trade_watchlist_s
           confidence >= minimumConfidence &&
           typeof notificationCreate === "function"
         ) {
-          await notificationCreate(env, {
+          await notificationCreate(
+            env,
             userId,
-            type: "scheduled_signal",
-            title: `AI ${direction} signal: ${symbol}`,
-            message: `${symbol} generated a ${direction} signal on ${timeframe}. Confidence: ${confidence}%.`,
-            data: {
+            "scheduled_signal",
+            `AI ${direction} signal: ${symbol}`,
+            `${symbol} generated a ${direction} signal on ${timeframe}. Confidence: ${confidence}%.`,
+            {
               symbol,
               timeframe,
               direction,
               confidence,
               watchlistId: watchlist.id
             }
-          });
+          );
 
           notificationCount++;
         }
