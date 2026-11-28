@@ -10151,6 +10151,34 @@ async function routeRequest(request, env, ctx) {
   const method = request.method.toUpperCase();
 
   try {
+    // Public liveness endpoint. This confirms that the Worker is responding;
+    // it deliberately does not expose secrets or claim provider connectivity.
+    if (path === "/api/health") {
+      if (method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: { Allow: "GET, HEAD, OPTIONS" } });
+      }
+      if (method !== "GET" && method !== "HEAD") {
+        return json({ ok: false, error: "Method not allowed." }, 405, { Allow: "GET, HEAD, OPTIONS" });
+      }
+      const payload = {
+        ok: true,
+        status: "healthy",
+        service: "TradeLab AI",
+        timestamp: new Date().toISOString()
+      };
+      if (method === "HEAD") {
+        return applySecurityHeaders(new Response(null, {
+          status: 200,
+          headers: {
+            "Cache-Control": "no-store",
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }));
+      }
+      return json(payload, 200);
+    }
+
+
     const originExempt = path === "/api/billing/webhook" ||
       path === "/api/flutterwave/webhook" ||
       path === "/api/mt5/bridge/ingest";
