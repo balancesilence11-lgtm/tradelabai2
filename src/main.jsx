@@ -21,7 +21,24 @@ import {
   TrendingUp, Wallet, Plus, Star, Trash2, CheckCircle2, X, CalendarDays, Newspaper
 } from 'lucide-react';
 import './style.css';
+function checkIntegrity() {
+  const result = inspectWorkspaceStorageIntegrity(
+    localStorage,
+    STORAGE_KEYS
+  );
 
+  setIntegrity({
+    checked: true,
+    valid: result.valid,
+    invalid: result.invalid
+  });
+
+  const detail =
+    `${result.valid} readable entries; ${result.invalid} invalid JSON entries` +
+    `${result.invalidKeys.length ? ` (${result.invalidKeys.join(', ')})` : ''}`;
+
+  recordSecurityEvent('Workspace integrity check', detail);
+}
 const initialMarkets = [
   { symbol: 'EURUSD', name: 'Euro / US Dollar', price: '—' },
   { symbol: 'GBPUSD', name: 'British Pound / US Dollar', price: '—' },
